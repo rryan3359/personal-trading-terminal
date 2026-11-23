@@ -3,16 +3,18 @@
 /**
  * Terminal home page — dark layout, no login, no database.
  *
- *   ┌──────────────────────────────────────────────┐
- *   │ Toolbar (symbol · timeframe · tools · inds)  │
- *   ├──────────────┬───────────────────────────────┤
- *   │ Watchlist    │ Chart (fills the rest)        │
- *   └──────────────┴───────────────────────────────┘
+ *   ┌───────────────────────────────────────────────────┐
+ *   │ Toolbar (symbol · timeframe · indicators · live)  │
+ *   ├──────┬──────────────────────────────┬─────────────┤
+ *   │ Draw │ Chart (fills the rest)       │ Watchlist   │
+ *   │ ing  │                              │ (right)     │
+ *   │ Bar  │                              │             │
+ *   └──────┴──────────────────────────────┴─────────────┘
  *
- * Mobile (<md): the toolbar wraps into rows, the watchlist becomes a
- * slide-over drawer opened from the toolbar (☰ 自選), and the chart
- * takes the full width. The root uses h-dvh so the mobile browser
- * chrome does not cut the layout off.
+ * Mobile (<md): the drawing bar stays on the left, the watchlist
+ * becomes a slide-over drawer from the right opened from the toolbar
+ * (☰ 自選), and the chart takes the remaining width. The root uses
+ * h-dvh so the mobile browser chrome does not cut the layout off.
  *
  * Symbol, interval, watchlist and indicator settings are persisted in
  * localStorage and restored on the next visit. Drawings are persisted by
@@ -23,6 +25,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Toolbar from '@/components/Toolbar';
+import DrawingBar from '@/components/DrawingBar';
 import Watchlist from '@/components/Watchlist';
 import type { ChartHandle } from '@/components/Chart';
 import { DEFAULT_INDICATORS, type DrawingTool } from '@/lib/chart-config';
@@ -145,19 +148,34 @@ export default function Home() {
           setInterval(tf);
           setActiveTool(null);
         }}
-        activeTool={activeTool}
-        onToolChange={handleToolChange}
         indicators={indicators}
         onToggleIndicator={toggleIndicator}
-        onClearDrawings={() => chartRef.current?.clearDrawings()}
-        onUndo={() => chartRef.current?.undo()}
-        onRedo={() => chartRef.current?.redo()}
-        canUndo={canUndo}
-        canRedo={canRedo}
         connectionStatus={connectionStatus}
         onOpenWatchlist={() => setMobileWatchlistOpen(true)}
       />
       <div className="flex min-h-0 flex-1">
+        <DrawingBar
+          activeTool={activeTool}
+          onToolChange={handleToolChange}
+          onUndo={() => chartRef.current?.undo()}
+          onRedo={() => chartRef.current?.redo()}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onClear={() => chartRef.current?.clearDrawings()}
+        />
+        <main className="min-w-0 flex-1">
+          <Chart
+            ref={chartRef}
+            symbol={symbol}
+            interval={interval}
+            activeTool={activeTool}
+            onToolDone={() => setActiveTool(null)}
+            indicators={indicators}
+            onConnectionStatus={setConnectionStatus}
+            continuousDraw={drawContinuous}
+            onHistoryChange={handleHistoryChange}
+          />
+        </main>
         <Watchlist
           symbols={watchlist}
           activeSymbol={symbol}
@@ -173,19 +191,6 @@ export default function Home() {
           mobileOpen={mobileWatchlistOpen}
           onCloseMobile={() => setMobileWatchlistOpen(false)}
         />
-        <main className="min-w-0 flex-1">
-          <Chart
-            ref={chartRef}
-            symbol={symbol}
-            interval={interval}
-            activeTool={activeTool}
-            onToolDone={() => setActiveTool(null)}
-            indicators={indicators}
-            onConnectionStatus={setConnectionStatus}
-            continuousDraw={drawContinuous}
-            onHistoryChange={handleHistoryChange}
-          />
-        </main>
       </div>
     </div>
   );

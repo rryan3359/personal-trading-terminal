@@ -1,11 +1,14 @@
 'use client';
 
 /**
- * Watchlist.tsx — left watchlist panel.
+ * Watchlist.tsx — right watchlist panel.
  *
  * Presentational: the page owns the list (persisted in localStorage).
  * Click a row to switch symbol; × removes it; type a Binance symbol
  * (e.g. SOLUSDT) and press Enter / 新增 to add it.
+ *
+ * Mobile (<md): a slide-over drawer from the right, opened from the
+ * toolbar (☰ 自選).
  */
 
 import { useState } from 'react';
@@ -55,11 +58,11 @@ export default function Watchlist({
         />
       )}
       <aside
-        className={`flex h-full w-72 shrink-0 flex-col border-r border-[#2a2e39] bg-[#131722] transition-transform duration-200 md:w-56 ${
+        className={`flex h-full w-60 shrink-0 flex-col border-l border-[#2a2e39] bg-[#131722] transition-transform duration-200 ${
           mobileOpen
             ? 'max-md:translate-x-0'
-            : 'max-md:-translate-x-full'
-        } max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:shadow-2xl`}
+            : 'max-md:translate-x-full'
+        } max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-50 max-md:w-72 max-md:shadow-2xl`}
       >
       <div className="border-b border-[#2a2e39] p-2">
         <div className="flex gap-1.5">
