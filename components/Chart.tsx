@@ -11,10 +11,20 @@
  *   one (newer timestamp). No manual updateData call is needed.
  * - setSymbol / setPeriod re-trigger getBars("init") automatically.
  *
- * Drawings are persisted per `${symbol}:${interval}` in localStorage and
- * restored after each init load, so they survive symbol/timeframe switches.
- * Crosshair, wheel zoom and drag pan are klinecharts defaults (explicitly
- * enabled here); the dark theme is applied via setStyles at init.
+ * Drawings are persisted per symbol in localStorage (v2 store, see
+ * lib/store.ts) and restored after each init load, so they survive
+ * symbol/timeframe switches. Overlays default to scope 'symbol'
+ * (shown on every interval); scope 'interval' limits one to its own
+ * interval. Crosshair, wheel zoom and drag pan are klinecharts
+ * defaults (explicitly enabled here); the dark theme is applied via
+ * setStyles at init.
+ *
+ * Drawing system (all klinecharts 10.1.1 APIs verified against the
+ * installed types): createOverlay returns the new overlay id;
+ * overrideOverlay(Partial<OverlayCreate>) edits; removeOverlay({ id })
+ * deletes; getOverlays() reads live state. Undo/redo snapshots the
+ * persisted model (max 50 steps). Selection is tracked via the
+ * onSelected/onDeselected overlay callbacks.
  */
 
 import {
@@ -22,39 +32,56 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
 } from 'react';
 import {
   dispose,
   init,
   type Chart,
   type DataLoader,
+  type DeepPartial,
   type KLineData,
+  type Overlay,
   type OverlayCreate,
+  type OverlayMode,
+  type OverlayStyle,
   type Period,
 } from 'klinecharts';
 import type { Interval, Kline } from '@/lib/types';
 import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
+  hexToRgba,
+  registerFibonacciRetracementOverlay,
+  registerMeasureOverlay,
   registerRectangleOverlay,
 } from '@/lib/chart-theme';
 import {
   DRAWING_TOOLS,
   INDICATOR_OPTIONS,
+  INTERVAL_MS,
   type DrawingTool,
 } from '@/lib/chart-config';
 import {
-  STORAGE_KEYS,
-  drawingsKey,
-  loadJSON,
-  saveJSON,
-  type DrawingsStore,
+  DEFAULT_OVERLAY_STYLE,
+  getLastOverlayStyle,
+  getMagnetMode,
+  loadDrawingsStore,
+  newOverlayId,
+  saveDrawingsStore,
+  saveLastOverlayStyle,
+  type OverlayScope,
+  type OverlayStylePatch,
   type SavedOverlay,
 } from '@/lib/store';
 
 export interface ChartHandle {
-  /** Remove all drawings for the current symbol/interval (and their saved copy). */
+  /** Remove all drawings for the current symbol (and their saved copy). */
   clearDrawings: () => void;
+  /** Undo the last drawing change. No-op when nothing to undo. */
+  undo: () => void;
+  /** Redo an undone drawing change. No-op when nothing to redo. */
+  redo: () => void;
 }
 
 export interface ChartProps {
@@ -67,6 +94,10 @@ export interface ChartProps {
   /** Indicator names currently enabled, e.g. ["MA", "VOL"]. */
   indicators: string[];
   onConnectionStatus?: (status: BinanceSocketStatus) => void;
+  /** Keep the tool armed after each drawing (double-click / Shift-click). */
+  continuousDraw?: boolean;
+  /** Called when undo/redo availability changes. */
+  onHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
 }
 
 const HISTORY_LIMIT = 500;
@@ -90,22 +121,115 @@ function isMainPaneIndicator(name: string): boolean {
   return INDICATOR_OPTIONS.find((o) => o.id === name)?.mainPane ?? false;
 }
 
-/** Only fully-drawn overlays (every point has timestamp + value) are saved. */
-function toSavedOverlay(o: {
+const MAX_HISTORY = 50;
+const MEASURE_NAME = 'measure';
+const COLOR_PALETTE = [
+  '#2962ff',
+  '#26a69a',
+  '#ef5350',
+  '#ff9800',
+  '#ab47bc',
+  '#f5f5f5',
+];
+const LINE_WIDTHS = [1, 2, 3, 4];
+
+/** Snapshot of one selected overlay for the floating edit bar. */
+interface SelectedOverlayState {
+  id: string;
   name: string;
-  points: Array<Partial<{ timestamp: number; value: number }>>;
-}): SavedOverlay | null {
+  color: string;
+  size: number;
+  style: 'solid' | 'dashed';
+  lock: boolean;
+  visible: boolean;
+  scope: OverlayScope;
+  fillOpacity: number;
+  isRect: boolean;
+}
+
+/** Horizontal tools show their price on the right Y axis. */
+function isHorizontalTool(name: string): boolean {
+  return name === 'horizontalStraightLine' || name === 'horizontalRayLine';
+}
+
+/** klinecharts overlay styles for one drawing. */
+function stylesForOverlay(
+  style: OverlayStylePatch,
+  fillOpacity?: number,
+): DeepPartial<OverlayStyle> {
+  const line = {
+    color: style.color,
+    size: style.size,
+    style: style.style,
+    ...(style.style === 'dashed' ? { dashedValue: [6, 4] } : {}),
+  };
+  return {
+    line,
+    rect: {
+      style: 'stroke_fill',
+      color: hexToRgba(
+        style.color,
+        fillOpacity ?? DEFAULT_OVERLAY_STYLE.fillOpacity,
+      ),
+      borderColor: style.color,
+      borderSize: style.size,
+      borderStyle: style.style,
+    },
+  };
+}
+
+/** Whether a saved overlay belongs on the given interval's chart. */
+function isInView(o: SavedOverlay, interval: string): boolean {
+  return o.scope !== 'interval' || o.interval === interval;
+}
+
+/** Only fully-drawn overlays (every point has timestamp + value) are saved. */
+function toSavedOverlay(o: Overlay): SavedOverlay | null {
+  if (o.name === MEASURE_NAME) return null;
   if (o.points.length === 0) return null;
   const points: SavedOverlay['points'] = [];
   for (const p of o.points) {
     if (p.timestamp === undefined || p.value === undefined) return null;
     points.push({ timestamp: p.timestamp, value: p.value });
   }
-  return { name: o.name, points };
+  const line = o.styles?.line;
+  const ext = (o.extendData ?? {}) as Record<string, unknown>;
+  const scope = ext.scope === 'interval' ? 'interval' : 'symbol';
+  const restEntries = Object.entries(ext).filter(
+    ([k]) => k !== 'scope' && k !== 'interval',
+  );
+  return {
+    id: o.id,
+    // Old saves used the built-in name; the custom overlay replaces it.
+    name: o.name === 'fibonacciLine' ? 'fibonacciRetracement' : o.name,
+    points,
+    styles:
+      line?.color !== undefined
+        ? {
+            color: line.color,
+            size: line.size ?? 1,
+            style: line.style ?? 'solid',
+          }
+        : undefined,
+    lock: o.lock || undefined,
+    visible: o.visible === false ? false : undefined,
+    extendData: restEntries.length > 0 ? Object.fromEntries(restEntries) : undefined,
+    scope,
+    interval: typeof ext.interval === 'string' ? ext.interval : undefined,
+  };
 }
 
 const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
-  { symbol, interval, activeTool, onToolDone, indicators, onConnectionStatus },
+  {
+    symbol,
+    interval,
+    activeTool,
+    onToolDone,
+    indicators,
+    onConnectionStatus,
+    continuousDraw = false,
+    onHistoryChange,
+  },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -119,83 +243,412 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const intervalRef = useRef(interval);
   const onToolDoneRef = useRef(onToolDone);
   const onConnectionStatusRef = useRef(onConnectionStatus);
+  const activeToolRef = useRef(activeTool);
+  const continuousDrawRef = useRef(continuousDraw);
+  const onHistoryChangeRef = useRef(onHistoryChange);
   symbolRef.current = symbol;
   intervalRef.current = interval;
   onToolDoneRef.current = onToolDone;
   onConnectionStatusRef.current = onConnectionStatus;
+  activeToolRef.current = activeTool;
+  continuousDrawRef.current = continuousDraw;
+  onHistoryChangeRef.current = onHistoryChange;
 
   const suppressSaveRef = useRef(false);
+  /** True while restoreDrawings / applySnapshot rebuilds overlays. */
+  const restoringRef = useRef(false);
+  /** Id of the overlay currently being drawn, if any. */
+  const drawingIdRef = useRef<string | null>(null);
+  /** Whether Ctrl/Cmd is currently held (temporarily inverts magnet). */
+  const modifierRef = useRef(false);
+  /** Timestamp of the last click that hit an overlay (measure dismiss). */
+  const lastOverlayClickRef = useRef(0);
+  /** Guards the fill-opacity slider against one history push per drag. */
+  const sliderHistoryPushedRef = useRef(false);
+
+  const [selected, setSelected] = useState<SelectedOverlayState | null>(null);
+  const selectedRef = useRef<SelectedOverlayState | null>(null);
+  const setSelectedState = (s: SelectedOverlayState | null) => {
+    selectedRef.current = s;
+    setSelected(s);
+  };
+
+  // ---- magnet ----------------------------------------------------------
+
+  const currentOverlayMode = (): OverlayMode => {
+    const magnet = getMagnetMode();
+    const invert = modifierRef.current;
+    if (magnet === 'off') return invert ? 'weak_magnet' : 'normal';
+    if (magnet === 'weak') return invert ? 'normal' : 'weak_magnet';
+    return invert ? 'normal' : 'strong_magnet';
+  };
 
   // ---- drawing persistence -------------------------------------------
 
-  const persistDrawings = (key: string) => {
+  /**
+   * Full symbol-level list: stored overlays outside the current view
+   * (other intervals' scope='interval' overlays) + the live overlays on
+   * this chart. Live overlays win on id collisions.
+   */
+  const readMergedList = (
+    symbol: string,
+    interval: string,
+  ): SavedOverlay[] => {
+    const store = loadDrawingsStore();
+    const stored = store[symbol] ?? [];
+    const others = stored.filter((o) => !isInView(o, interval));
+    const chart = chartRef.current;
+    if (!chart) return stored;
+    const live = chart
+      .getOverlays()
+      .map(toSavedOverlay)
+      .filter((o): o is SavedOverlay => o !== null);
+    const liveIds = new Set(live.map((o) => o.id));
+    return [...others.filter((o) => !liveIds.has(o.id)), ...live];
+  };
+
+  const persistDrawings = (symbol: string, interval: string) => {
     if (suppressSaveRef.current) return;
+    const store = loadDrawingsStore();
+    store[symbol] = readMergedList(symbol, interval);
+    saveDrawingsStore(store);
+  };
+
+  // ---- undo / redo -----------------------------------------------------
+
+  const undoStackRef = useRef<SavedOverlay[][]>([]);
+  const redoStackRef = useRef<SavedOverlay[][]>([]);
+
+  const emitHistoryChange = () => {
+    onHistoryChangeRef.current?.(
+      undoStackRef.current.length > 0,
+      redoStackRef.current.length > 0,
+    );
+  };
+
+  const pushHistory = () => {
+    undoStackRef.current.push(
+      readMergedList(symbolRef.current, intervalRef.current),
+    );
+    if (undoStackRef.current.length > MAX_HISTORY) {
+      undoStackRef.current.shift();
+    }
+    redoStackRef.current = [];
+    emitHistoryChange();
+  };
+
+  const applySnapshot = (snapshot: SavedOverlay[]) => {
     const chart = chartRef.current;
     if (!chart) return;
-    const saved: SavedOverlay[] = [];
-    const seen = new Set<string>();
-    for (const overlay of chart.getOverlays()) {
-      const s = toSavedOverlay(overlay);
-      if (!s) continue;
-      const fingerprint = JSON.stringify(s);
-      if (seen.has(fingerprint)) continue; // never store the same drawing twice
-      seen.add(fingerprint);
-      saved.push(s);
+    const symbol = symbolRef.current;
+    const interval = intervalRef.current;
+    const store = loadDrawingsStore();
+    store[symbol] = snapshot;
+    saveDrawingsStore(store);
+    restoringRef.current = true;
+    suppressSaveRef.current = true;
+    try {
+      chart.removeOverlay();
+      for (const o of snapshot.filter((o) => isInView(o, interval))) {
+        chart.createOverlay(overlayCreate(o));
+      }
+    } finally {
+      suppressSaveRef.current = false;
+      restoringRef.current = false;
     }
-    const store = loadJSON<DrawingsStore>(STORAGE_KEYS.drawings, {});
-    store[key] = saved;
-    saveJSON(STORAGE_KEYS.drawings, store);
+    setSelectedState(null);
+  };
+
+  const undo = () => {
+    const prev = undoStackRef.current.pop();
+    if (!prev) return;
+    redoStackRef.current.push(
+      readMergedList(symbolRef.current, intervalRef.current),
+    );
+    applySnapshot(prev);
+    emitHistoryChange();
+  };
+
+  const redo = () => {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(
+      readMergedList(symbolRef.current, intervalRef.current),
+    );
+    applySnapshot(next);
+    emitHistoryChange();
+  };
+
+  // ---- overlay creation -------------------------------------------------
+
+  const overlayCreate = (saved: SavedOverlay): OverlayCreate => {
+    const style = saved.styles ?? getLastOverlayStyle();
+    const ext: Record<string, unknown> = { ...(saved.extendData ?? {}) };
+    ext.scope = saved.scope ?? 'symbol';
+    if (ext.scope === 'interval' && saved.interval) {
+      ext.interval = saved.interval;
+    }
+    if (saved.name === 'rectangle') {
+      ext.fillOpacity =
+        typeof ext.fillOpacity === 'number'
+          ? ext.fillOpacity
+          : getLastOverlayStyle().fillOpacity;
+    }
+    if (saved.name === MEASURE_NAME) {
+      ext.intervalMs = INTERVAL_MS[intervalRef.current] ?? 0;
+    }
+    return {
+      ...(saved.id ? { id: saved.id } : {}),
+      name: saved.name,
+      ...(saved.points.length > 0
+        ? {
+            points: saved.points.map((p) => ({
+              timestamp: p.timestamp,
+              value: p.value,
+            })),
+          }
+        : {}),
+      mode: currentOverlayMode(),
+      ...(isHorizontalTool(saved.name)
+        ? { needDefaultYAxisFigure: true }
+        : {}),
+      styles: stylesForOverlay(
+        style,
+        typeof ext.fillOpacity === 'number' ? ext.fillOpacity : undefined,
+      ),
+      lock: saved.lock ?? false,
+      visible: saved.visible ?? true,
+      extendData: ext,
+      onDrawStart: (e) => {
+        if (restoringRef.current) return;
+        drawingIdRef.current = e.overlay.id;
+      },
+      onDrawEnd: () => {
+        if (restoringRef.current) return;
+        persistDrawings(symbolRef.current, intervalRef.current);
+        drawingIdRef.current = null;
+        if (continuousDrawRef.current && activeToolRef.current) {
+          armOverlay(activeToolRef.current);
+        } else {
+          onToolDoneRef.current();
+        }
+      },
+      onRemoved: () => {
+        if (restoringRef.current || suppressSaveRef.current) return;
+        persistDrawings(symbolRef.current, intervalRef.current);
+      },
+      onPressedMoveStart: () => {
+        if (restoringRef.current) return;
+        if (saved.name === MEASURE_NAME) return;
+        pushHistory();
+      },
+      onPressedMoveEnd: () => {
+        if (restoringRef.current || suppressSaveRef.current) return;
+        persistDrawings(symbolRef.current, intervalRef.current);
+      },
+      onSelected: (e) => {
+        if (restoringRef.current) return;
+        if (e.overlay.name === MEASURE_NAME) return;
+        refreshSelected(e.overlay.id);
+      },
+      onDeselected: (e) => {
+        if (restoringRef.current) return;
+        if (selectedRef.current?.id === e.overlay.id) setSelectedState(null);
+      },
+      onClick: () => {
+        lastOverlayClickRef.current = Date.now();
+      },
+    };
+  };
+
+  /** Arm one drawing: remove any unfinished overlay, then create a new one. */
+  const armOverlay = (tool: DrawingTool) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    if (drawingIdRef.current) {
+      chart.removeOverlay({ id: drawingIdRef.current });
+      drawingIdRef.current = null;
+    }
+    pushHistory();
+    const style = getLastOverlayStyle();
+    const draft: SavedOverlay = {
+      id: '',
+      name: tool,
+      points: [],
+      styles: { color: style.color, size: style.size, style: style.style },
+      scope: 'symbol',
+      extendData:
+        tool === 'rectangle' ? { fillOpacity: style.fillOpacity } : undefined,
+    };
+    const id = chart.createOverlay(overlayCreate(draft));
+    if (typeof id === 'string') drawingIdRef.current = id;
   };
 
   const restoreDrawings = () => {
     const chart = chartRef.current;
     if (!chart) return;
-    const key = drawingsKey(symbolRef.current, intervalRef.current);
-    const saved = loadJSON<DrawingsStore>(STORAGE_KEYS.drawings, {})[key] ?? [];
+    const symbol = symbolRef.current;
+    const interval = intervalRef.current;
+    const list = (loadDrawingsStore()[symbol] ?? []).filter((o) =>
+      isInView(o, interval),
+    );
     // Idempotent: getBars("init") can fire more than once per symbol/
     // timeframe change (setSymbol + setPeriod each trigger a load), so
     // always wipe first — otherwise every load duplicates the drawings.
+    restoringRef.current = true;
     suppressSaveRef.current = true;
     try {
       chart.removeOverlay();
-      for (const o of saved) {
-        chart.createOverlay(overlayCreate(o.name as DrawingTool, o.points));
+      for (const o of list) {
+        const saved: SavedOverlay = {
+          ...o,
+          id: o.id || newOverlayId(),
+          name:
+            o.name === 'fibonacciLine' ? 'fibonacciRetracement' : o.name,
+        };
+        chart.createOverlay(overlayCreate(saved));
       }
     } finally {
       suppressSaveRef.current = false;
+      restoringRef.current = false;
     }
   };
 
-  const overlayCreate = (
-    name: DrawingTool,
-    points?: SavedOverlay['points'],
-  ): OverlayCreate => ({
-    name,
-    ...(points
-      ? { points: points.map((p) => ({ timestamp: p.timestamp, value: p.value })) }
-      : {}),
-    onDrawEnd: () => {
-      persistDrawings(drawingsKey(symbolRef.current, intervalRef.current));
-      onToolDoneRef.current();
-    },
-    onRemoved: () => {
-      persistDrawings(drawingsKey(symbolRef.current, intervalRef.current));
-    },
-    onPressedMoveEnd: () => {
-      persistDrawings(drawingsKey(symbolRef.current, intervalRef.current));
-    },
-  });
+  // ---- selection + edit bar --------------------------------------------
+
+  const refreshSelected = (id: string | null) => {
+    if (!id) {
+      setSelectedState(null);
+      return;
+    }
+    const chart = chartRef.current;
+    const o = chart?.getOverlays({ id })[0];
+    if (!o) {
+      setSelectedState(null);
+      return;
+    }
+    const line = o.styles?.line;
+    const ext = (o.extendData ?? {}) as Record<string, unknown>;
+    setSelectedState({
+      id: o.id,
+      name: o.name,
+      color: line?.color ?? DEFAULT_OVERLAY_STYLE.color,
+      size: line?.size ?? 1,
+      style: line?.style ?? 'solid',
+      lock: o.lock,
+      visible: o.visible,
+      scope: ext.scope === 'interval' ? 'interval' : 'symbol',
+      fillOpacity:
+        typeof ext.fillOpacity === 'number'
+          ? ext.fillOpacity
+          : DEFAULT_OVERLAY_STYLE.fillOpacity,
+      isRect: o.name === 'rectangle',
+    });
+  };
+
+  const applyEdit = (
+    patch: Partial<Omit<SelectedOverlayState, 'id' | 'name' | 'isRect'>>,
+    pushHist = true,
+  ) => {
+    const cur = selectedRef.current;
+    if (!cur) return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    const o = chart.getOverlays({ id: cur.id })[0];
+    if (!o) {
+      setSelectedState(null);
+      return;
+    }
+    if (pushHist) pushHistory();
+    const next = { ...cur, ...patch };
+    const ext: Record<string, unknown> = {
+      ...((o.extendData ?? {}) as Record<string, unknown>),
+      scope: next.scope,
+    };
+    if (next.scope === 'interval') ext.interval = intervalRef.current;
+    else delete ext.interval;
+    if (next.isRect) ext.fillOpacity = next.fillOpacity;
+    chart.overrideOverlay({
+      id: cur.id,
+      styles: stylesForOverlay(
+        { color: next.color, size: next.size, style: next.style },
+        next.fillOpacity,
+      ),
+      lock: next.lock,
+      visible: next.visible,
+      extendData: ext,
+    });
+    if (
+      patch.color !== undefined ||
+      patch.size !== undefined ||
+      patch.style !== undefined ||
+      patch.fillOpacity !== undefined
+    ) {
+      saveLastOverlayStyle({
+        color: next.color,
+        size: next.size,
+        style: next.style,
+        fillOpacity: next.fillOpacity,
+      });
+    }
+    persistDrawings(symbolRef.current, intervalRef.current);
+    refreshSelected(cur.id);
+  };
+
+  const deleteSelected = () => {
+    const cur = selectedRef.current;
+    if (!cur) return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    pushHistory();
+    chart.removeOverlay({ id: cur.id });
+    setSelectedState(null);
+    persistDrawings(symbolRef.current, intervalRef.current);
+  };
+
+  const copySelected = () => {
+    const cur = selectedRef.current;
+    if (!cur) return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    const o = chart.getOverlays({ id: cur.id })[0];
+    if (!o) return;
+    const saved = toSavedOverlay(o);
+    if (!saved) return;
+    pushHistory();
+    const shiftMs = 3 * (INTERVAL_MS[intervalRef.current] ?? 0);
+    const copy: SavedOverlay = {
+      ...saved,
+      id: newOverlayId(),
+      lock: false,
+      points: saved.points.map((p) => ({
+        timestamp: p.timestamp + shiftMs,
+        value: p.value,
+      })),
+    };
+    const id = chart.createOverlay(overlayCreate(copy));
+    if (typeof id === 'string') refreshSelected(id);
+    persistDrawings(symbolRef.current, intervalRef.current);
+  };
 
   useImperativeHandle(ref, () => ({
     clearDrawings() {
       const chart = chartRef.current;
       if (!chart) return;
+      pushHistory();
       suppressSaveRef.current = true;
       chart.removeOverlay();
       suppressSaveRef.current = false;
-      const store = loadJSON<DrawingsStore>(STORAGE_KEYS.drawings, {});
-      store[drawingsKey(symbolRef.current, intervalRef.current)] = [];
-      saveJSON(STORAGE_KEYS.drawings, store);
+      const store = loadDrawingsStore();
+      store[symbolRef.current] = [];
+      saveDrawingsStore(store);
+      setSelectedState(null);
+    },
+    undo() {
+      undo();
+    },
+    redo() {
+      redo();
     },
   }));
 
@@ -206,6 +659,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!container) return;
 
     registerRectangleOverlay();
+    registerFibonacciRetracementOverlay();
+    registerMeasureOverlay();
 
     const chart = init(container, { styles: DARK_STYLES });
     if (!chart) return;
@@ -327,11 +782,18 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       prevSymbolIntervalRef.current = { symbol, interval };
       return;
     }
-    const key = drawingsKey(symbol, interval);
-    const prevKey = drawingsKey(prev.symbol, prev.interval);
-    if (prevKey !== key) {
+    if (prev.symbol !== symbol || prev.interval !== interval) {
       // Save the old chart's drawings before wiping them.
-      persistDrawings(prevKey);
+      persistDrawings(prev.symbol, prev.interval);
+      // History is per view — a snapshot from another symbol/interval
+      // must not be applied here.
+      undoStackRef.current = [];
+      redoStackRef.current = [];
+      emitHistoryChange();
+      setSelectedState(null);
+      // An unfinished drawing cannot survive the switch: cancel it.
+      drawingIdRef.current = null;
+      if (activeToolRef.current) onToolDoneRef.current();
     }
     prevSymbolIntervalRef.current = { symbol, interval };
     suppressSaveRef.current = true;
@@ -356,10 +818,102 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || !activeTool) return;
-    chart.createOverlay(overlayCreate(activeTool));
+    if (!chart) return;
+    if (!activeTool) {
+      // Disarming (or Esc) removes any unfinished overlay instead of
+      // leaving it on the chart.
+      if (drawingIdRef.current) {
+        chart.removeOverlay({ id: drawingIdRef.current });
+        drawingIdRef.current = null;
+      }
+      return;
+    }
+    armOverlay(activeTool);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTool]);
+
+  // ---- keyboard shortcuts -----------------------------------------------
+
+  useEffect(() => {
+    const isEditableTarget = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      return (
+        !!el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.tagName === 'SELECT' ||
+          el.isContentEditable)
+      );
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isEditableTarget(e.target)) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (drawingIdRef.current) {
+          // Cancel the overlay being drawn, then disarm the tool.
+          chartRef.current?.removeOverlay({ id: drawingIdRef.current });
+          drawingIdRef.current = null;
+          onToolDoneRef.current();
+          return;
+        }
+        const measure = chartRef.current?.getOverlays({
+          name: MEASURE_NAME,
+        })[0];
+        if (measure) {
+          chartRef.current?.removeOverlay({ id: measure.id });
+          return;
+        }
+        if (selectedRef.current) {
+          setSelectedState(null);
+          return;
+        }
+        if (activeToolRef.current) onToolDoneRef.current();
+        return;
+      }
+      if (
+        (e.key === 'Delete' || e.key === 'Backspace') &&
+        selectedRef.current
+      ) {
+        e.preventDefault();
+        deleteSelected();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      }
+    };
+    // Ctrl/Cmd temporarily inverts the magnet mode while drawing.
+    const onModifier = (e: KeyboardEvent) => {
+      const held = e.ctrlKey || e.metaKey;
+      if (held === modifierRef.current) return;
+      modifierRef.current = held;
+      const id = drawingIdRef.current;
+      if (id) {
+        chartRef.current?.overrideOverlay({ id, mode: currentOverlayMode() });
+      }
+    };
+    const onBlur = () => {
+      if (!modifierRef.current) return;
+      modifierRef.current = false;
+      const id = drawingIdRef.current;
+      if (id) {
+        chartRef.current?.overrideOverlay({ id, mode: currentOverlayMode() });
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onModifier);
+    window.addEventListener('keyup', onModifier);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onModifier);
+      window.removeEventListener('keyup', onModifier);
+      window.removeEventListener('blur', onBlur);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---- indicators -------------------------------------------------------
 
@@ -378,12 +932,143 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }
   }, [indicators]);
 
+  // Clicking empty chart space dismisses a finished measure overlay.
+  // Overlay clicks set lastOverlayClickRef first, so they are excluded.
+  const handleContainerClick = () => {
+    setTimeout(() => {
+      const chart = chartRef.current;
+      if (!chart) return;
+      if (Date.now() - lastOverlayClickRef.current < 100) return;
+      const measure = chart.getOverlays({ name: MEASURE_NAME })[0];
+      if (measure) chart.removeOverlay({ id: measure.id });
+    }, 0);
+  };
+
   return (
-    <div
-      ref={containerRef}
-      className="h-full w-full bg-[#131722]"
-      data-testid="chart-container"
-    />
+    <div className="relative h-full w-full">
+      <div
+        ref={containerRef}
+        onClick={handleContainerClick}
+        className="h-full w-full bg-[#131722]"
+        data-testid="chart-container"
+      />
+      {selected !== null && (
+        <div className="absolute left-1/2 top-2 z-20 flex max-w-full -translate-x-1/2 flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg">
+          {COLOR_PALETTE.map((c) => (
+            <button
+              key={c}
+              title={c}
+              aria-label={`顏色 ${c}`}
+              onClick={() => applyEdit({ color: c })}
+              className={`h-5 w-5 rounded-sm border ${selected.color === c ? 'border-white ring-1 ring-white' : 'border-white/20'}`}
+              style={{ backgroundColor: c }}
+            />
+          ))}
+          <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+          {LINE_WIDTHS.map((w) => (
+            <button
+              key={w}
+              title={`線寬 ${w}`}
+              onClick={() => applyEdit({ size: w })}
+              className={`flex h-5 w-6 items-center justify-center rounded-sm ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
+            >
+              <span
+                className="block rounded-full bg-current"
+                style={{ height: Math.min(w, 3), width: 14 }}
+              />
+            </button>
+          ))}
+          <button
+            onClick={() =>
+              applyEdit({ style: selected.style === 'solid' ? 'dashed' : 'solid' })
+            }
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+          >
+            {selected.style === 'solid' ? '實線' : '虛線'}
+          </button>
+          <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+          {selected.isRect && (
+            <label className="flex items-center gap-1">
+              填色
+              <input
+                type="range"
+                min={0.05}
+                max={0.4}
+                step={0.05}
+                value={selected.fillOpacity}
+                onPointerDown={() => {
+                  if (!sliderHistoryPushedRef.current) {
+                    sliderHistoryPushedRef.current = true;
+                    pushHistory();
+                  }
+                }}
+                onFocus={() => {
+                  if (!sliderHistoryPushedRef.current) {
+                    sliderHistoryPushedRef.current = true;
+                    pushHistory();
+                  }
+                }}
+                onChange={(e) =>
+                  applyEdit({ fillOpacity: Number(e.target.value) }, false)
+                }
+                onPointerUp={() => {
+                  sliderHistoryPushedRef.current = false;
+                }}
+                onBlur={() => {
+                  sliderHistoryPushedRef.current = false;
+                }}
+                className="w-16 accent-[#2962ff]"
+              />
+              <span className="w-8 text-right">
+                {Math.round(selected.fillOpacity * 100)}%
+              </span>
+            </label>
+          )}
+          <label className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={selected.scope === 'interval'}
+              onChange={(e) =>
+                applyEdit({ scope: e.target.checked ? 'interval' : 'symbol' })
+              }
+              className="accent-[#2962ff]"
+            />
+            僅此週期
+          </label>
+          <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+          <button
+            onClick={() => applyEdit({ lock: !selected.lock })}
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+          >
+            {selected.lock ? '🔒 已鎖定' : '🔓 鎖定'}
+          </button>
+          <button
+            onClick={() => applyEdit({ visible: !selected.visible })}
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+          >
+            {selected.visible ? '👁 隱藏' : '隱藏中'}
+          </button>
+          <button
+            onClick={copySelected}
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+          >
+            複製
+          </button>
+          <button
+            onClick={deleteSelected}
+            className="rounded-sm px-1.5 py-0.5 text-[#ef5350] hover:bg-white/10"
+          >
+            刪除
+          </button>
+          <button
+            onClick={() => setSelectedState(null)}
+            className="rounded-sm px-1 hover:bg-white/10"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
   );
 });
 

@@ -16,7 +16,8 @@
  *
  * Symbol, interval, watchlist and indicator settings are persisted in
  * localStorage and restored on the next visit. Drawings are persisted by
- * the Chart component, keyed by symbol + interval.
+ * the Chart component, keyed by symbol (scope 'symbol' by default, shown
+ * on every interval; scope 'interval' limits one to its own interval).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -44,6 +45,9 @@ export default function Home() {
   const [interval, setInterval] = useState<Interval>(DEFAULT_INTERVAL);
   const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
   const [activeTool, setActiveTool] = useState<DrawingTool | null>(null);
+  const [drawContinuous, setDrawContinuous] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [indicators, setIndicators] = useState<string[]>(DEFAULT_INDICATORS);
   const [connectionStatus, setConnectionStatus] =
     useState<BinanceSocketStatus>('closed');
@@ -53,6 +57,9 @@ export default function Home() {
 
   // Load persisted state once on the client (localStorage is not available
   // during server rendering).
+  /* eslint-disable react-hooks/set-state-in-effect -- one-time mount sync
+     from localStorage (an external system); lazy initializers would read
+     localStorage during SSR and mismatch hydration. */
   useEffect(() => {
     setSymbol(loadString(STORAGE_KEYS.lastSymbol, DEFAULT_SYMBOL));
     const savedInterval = loadString(STORAGE_KEYS.lastInterval, DEFAULT_INTERVAL);
@@ -67,6 +74,7 @@ export default function Home() {
     );
     setHydrated(true);
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Persist state changes (skip until the first load has run).
   useEffect(() => {
@@ -115,6 +123,19 @@ export default function Home() {
     );
   }, []);
 
+  const handleToolChange = useCallback(
+    (tool: DrawingTool | null, continuous: boolean) => {
+      setActiveTool(tool);
+      setDrawContinuous(tool === null ? false : continuous);
+    },
+    [],
+  );
+
+  const handleHistoryChange = useCallback((u: boolean, r: boolean) => {
+    setCanUndo(u);
+    setCanRedo(r);
+  }, []);
+
   return (
     <div className="flex h-dvh flex-col bg-[#0b0e11] text-[#d1d4dc]">
       <Toolbar
@@ -125,10 +146,14 @@ export default function Home() {
           setActiveTool(null);
         }}
         activeTool={activeTool}
-        onToolChange={setActiveTool}
+        onToolChange={handleToolChange}
         indicators={indicators}
         onToggleIndicator={toggleIndicator}
         onClearDrawings={() => chartRef.current?.clearDrawings()}
+        onUndo={() => chartRef.current?.undo()}
+        onRedo={() => chartRef.current?.redo()}
+        canUndo={canUndo}
+        canRedo={canRedo}
         connectionStatus={connectionStatus}
         onOpenWatchlist={() => setMobileWatchlistOpen(true)}
       />
@@ -157,6 +182,8 @@ export default function Home() {
             onToolDone={() => setActiveTool(null)}
             indicators={indicators}
             onConnectionStatus={setConnectionStatus}
+            continuousDraw={drawContinuous}
+            onHistoryChange={handleHistoryChange}
           />
         </main>
       </div>
