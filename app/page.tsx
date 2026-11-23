@@ -9,6 +9,11 @@
  *   │ Watchlist    │ Chart (fills the rest)        │
  *   └──────────────┴───────────────────────────────┘
  *
+ * Mobile (<md): the toolbar wraps into rows, the watchlist becomes a
+ * slide-over drawer opened from the toolbar (☰ 自選), and the chart
+ * takes the full width. The root uses h-dvh so the mobile browser
+ * chrome does not cut the layout off.
+ *
  * Symbol, interval, watchlist and indicator settings are persisted in
  * localStorage and restored on the next visit. Drawings are persisted by
  * the Chart component, keyed by symbol + interval.
@@ -43,6 +48,7 @@ export default function Home() {
   const [connectionStatus, setConnectionStatus] =
     useState<BinanceSocketStatus>('closed');
   const [hydrated, setHydrated] = useState(false);
+  const [mobileWatchlistOpen, setMobileWatchlistOpen] = useState(false);
   const chartRef = useRef<ChartHandle | null>(null);
 
   // Load persisted state once on the client (localStorage is not available
@@ -110,7 +116,7 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="flex h-full flex-col bg-[#0b0e11] text-[#d1d4dc]">
+    <div className="flex h-dvh flex-col bg-[#0b0e11] text-[#d1d4dc]">
       <Toolbar
         symbol={symbol}
         interval={interval}
@@ -124,14 +130,23 @@ export default function Home() {
         onToggleIndicator={toggleIndicator}
         onClearDrawings={() => chartRef.current?.clearDrawings()}
         connectionStatus={connectionStatus}
+        onOpenWatchlist={() => setMobileWatchlistOpen(true)}
       />
       <div className="flex min-h-0 flex-1">
         <Watchlist
           symbols={watchlist}
           activeSymbol={symbol}
-          onSelect={selectSymbol}
-          onAdd={addSymbol}
+          onSelect={(next) => {
+            selectSymbol(next);
+            setMobileWatchlistOpen(false);
+          }}
+          onAdd={(next) => {
+            addSymbol(next);
+            setMobileWatchlistOpen(false);
+          }}
           onRemove={removeSymbol}
+          mobileOpen={mobileWatchlistOpen}
+          onCloseMobile={() => setMobileWatchlistOpen(false)}
         />
         <main className="min-w-0 flex-1">
           <Chart

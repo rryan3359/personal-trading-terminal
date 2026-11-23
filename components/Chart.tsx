@@ -211,6 +211,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     chartRef.current = chart;
 
+    // Narrow screens: the always-on OHLC line is wider than the chart
+    // and gets clipped at the right edge, so only show it while the
+    // crosshair is active (tap / drag). Desktop keeps it always on.
+    if (window.innerWidth < 768) {
+      chart.setStyles({ candle: { tooltip: { showRule: 'follow_cross' } } });
+    }
+
     // Debug handle for browser-console inspection
     // (e.g. __pttChart.getOverlays(), __pttChart.getVisibleRange()).
     (window as unknown as { __pttChart?: Chart }).__pttChart = chart;

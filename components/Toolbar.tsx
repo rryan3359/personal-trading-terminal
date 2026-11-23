@@ -25,6 +25,8 @@ export interface ToolbarProps {
   onToggleIndicator: (name: string) => void;
   onClearDrawings: () => void;
   connectionStatus: BinanceSocketStatus;
+  /** Mobile only: open the watchlist drawer. */
+  onOpenWatchlist: () => void;
 }
 
 const STATUS_META: Record<BinanceSocketStatus, { dot: string; text: string }> = {
@@ -44,11 +46,19 @@ export default function Toolbar({
   onToggleIndicator,
   onClearDrawings,
   connectionStatus,
+  onOpenWatchlist,
 }: ToolbarProps) {
   const status = STATUS_META[connectionStatus];
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-[#2a2e39] bg-[#131722] px-3">
+    <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[#2a2e39] bg-[#131722] px-3 py-1.5 md:h-12 md:flex-nowrap md:gap-3 md:py-0">
+      <button
+        onClick={onOpenWatchlist}
+        className="rounded px-2 py-1 text-xs text-[#b2b5be] hover:bg-[#1e222d] hover:text-white md:hidden"
+      >
+        ☰ 自選
+      </button>
+
       <span className="text-sm font-semibold tracking-wide text-white">
         {symbol}
       </span>
@@ -69,7 +79,7 @@ export default function Toolbar({
         ))}
       </div>
 
-      <span className="h-5 w-px bg-[#2a2e39]" />
+      <span className="hidden h-5 w-px bg-[#2a2e39] md:block" />
 
       <div className="flex items-center gap-0.5">
         {DRAWING_TOOLS.map((tool) => (
@@ -95,7 +105,7 @@ export default function Toolbar({
         </button>
       </div>
 
-      <span className="h-5 w-px bg-[#2a2e39]" />
+      <span className="hidden h-5 w-px bg-[#2a2e39] md:block" />
 
       <div className="flex items-center gap-0.5">
         {INDICATOR_OPTIONS.map((ind) => {

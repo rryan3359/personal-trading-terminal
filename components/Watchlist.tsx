@@ -16,6 +16,10 @@ export interface WatchlistProps {
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => void;
   onRemove: (symbol: string) => void;
+  /** Mobile only: whether the slide-over drawer is open. */
+  mobileOpen?: boolean;
+  /** Mobile only: close the drawer. */
+  onCloseMobile?: () => void;
 }
 
 export default function Watchlist({
@@ -24,6 +28,8 @@ export default function Watchlist({
   onSelect,
   onAdd,
   onRemove,
+  mobileOpen = false,
+  onCloseMobile,
 }: WatchlistProps) {
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
@@ -41,7 +47,20 @@ export default function Watchlist({
   };
 
   return (
-    <aside className="flex h-full w-56 shrink-0 flex-col border-r border-[#2a2e39] bg-[#131722]">
+    <>
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={onCloseMobile}
+        />
+      )}
+      <aside
+        className={`flex h-full w-72 shrink-0 flex-col border-r border-[#2a2e39] bg-[#131722] transition-transform duration-200 md:w-56 ${
+          mobileOpen
+            ? 'max-md:translate-x-0'
+            : 'max-md:-translate-x-full'
+        } max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:shadow-2xl`}
+      >
       <div className="border-b border-[#2a2e39] p-2">
         <div className="flex gap-1.5">
           <input
@@ -58,6 +77,13 @@ export default function Watchlist({
             className="shrink-0 rounded bg-[#2962ff] px-2.5 text-xs font-medium text-white hover:bg-[#1e53e5]"
           >
             新增
+          </button>
+          <button
+            aria-label="關閉自選清單"
+            onClick={onCloseMobile}
+            className="shrink-0 rounded px-2 text-base leading-none text-[#b2b5be] hover:bg-[#1e222d] hover:text-white md:hidden"
+          >
+            ×
           </button>
         </div>
         {error && <p className="mt-1 text-[11px] text-[#ef5350]">{error}</p>}
@@ -107,6 +133,7 @@ export default function Watchlist({
         <br />
         加密貨幣即時行情
       </p>
-    </aside>
+      </aside>
+    </>
   );
 }
