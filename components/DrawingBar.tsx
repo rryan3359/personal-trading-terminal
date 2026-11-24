@@ -3,11 +3,15 @@
 /**
  * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
  *
- * Icon-only buttons (inline SVG) for the 10 DRAWING_TOOLS in the
- * existing order, a divider, then magnet (click cycles off -> weak ->
- * strong, highlighted when on) and clear. Single click arms a tool
- * (click again to disarm); double-click or Shift+click keeps it armed
- * for continuous drawing. Active tool: bg #2a2e39, text #2962ff.
+ * Top: cursor/select tool (active when no drawing tool is armed;
+ * clicking it exits drawing mode). Then the 10 DRAWING_TOOLS grouped
+ * by logic — trend lines, horizontal/vertical lines, shapes,
+ * Fibonacci/measure — with a divider between groups. Bottom: magnet
+ * (click cycles off -> weak -> strong, current strength shown under
+ * the icon) and clear. Single click arms a tool (click again to
+ * disarm); double-click or Shift+click keeps it armed for continuous
+ * drawing. Active tool: bg #2a2e39, text #2962ff, plus a left accent
+ * bar.
  *
  * Undo / redo live in the top Toolbar now (TradingView puts them there).
  */
@@ -15,6 +19,15 @@
 import { useState } from 'react';
 import { DRAWING_TOOLS, type DrawingTool } from '@/lib/chart-config';
 import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
+
+/** Logical groups for the toolbar, in display order. */
+const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
+  { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine', 'parallelStraightLine'] },
+  { title: '水平／垂直線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'verticalStraightLine'] },
+  { title: '圖形', ids: ['rectangle'] },
+  { title: '斐波那契／測量', ids: ['fibonacciRetracement', 'measure'] },
+];
+const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
 
 export interface DrawingBarProps {
   activeTool: DrawingTool | null;
@@ -122,6 +135,20 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
   }
 }
 
+function CursorIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M5.5 3.5 L15.5 12 L11.3 12.8 L13.4 18 L11 19 L8.9 13.8 L5.5 17.2 Z" />
+    </svg>
+  );
+}
+
 function MagnetIcon() {
   return (
     <svg
@@ -148,7 +175,21 @@ function ClearIcon() {
 }
 
 const BUTTON_BASE =
-  'flex h-9 w-9 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
+  'relative flex h-9 w-9 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
+
+/** Magnet button: taller, icon + current strength label underneath. */
+const MAGNET_BUTTON_BASE =
+  'relative flex h-11 w-9 shrink-0 flex-col items-center justify-center gap-px rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white';
+
+/** Left accent bar marking the active tool / cursor. */
+function ActiveBar() {
+  return (
+    <span
+      className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-[#2962ff]"
+      aria-hidden="true"
+    />
+  );
+}
 
 export default function DrawingBar({
   activeTool,
@@ -166,20 +207,51 @@ export default function DrawingBar({
 
   return (
     <aside className="flex w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1">
-      {DRAWING_TOOLS.map((tool) => (
-        <button
-          key={tool.id}
-          title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
-          onClick={(e) =>
-            onToolChange(activeTool === tool.id ? null : tool.id, e.shiftKey)
-          }
-          onDoubleClick={() => onToolChange(tool.id, true)}
-          className={`${BUTTON_BASE} ${
-            activeTool === tool.id ? 'bg-[#2a2e39] text-[#2962ff]' : ''
-          }`}
+      <button
+        title="游標／選取（退出繪製模式）"
+        onClick={() => onToolChange(null, false)}
+        className={`${BUTTON_BASE} ${
+          activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+        }`}
+      >
+        {activeTool === null && <ActiveBar />}
+        <CursorIcon />
+      </button>
+
+      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+
+      {TOOL_GROUPS.map((group, gi) => (
+        <div
+          key={group.title}
+          className="flex flex-col items-center gap-0.5"
+          role="group"
+          aria-label={group.title}
         >
-          <ToolIcon tool={tool.id} />
-        </button>
+          {group.ids.map((id) => {
+            const tool = TOOL_BY_ID.get(id);
+            if (!tool) return null;
+            const active = activeTool === id;
+            return (
+              <button
+                key={id}
+                title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
+                onClick={(e) =>
+                  onToolChange(active ? null : id, e.shiftKey)
+                }
+                onDoubleClick={() => onToolChange(id, true)}
+                className={`${BUTTON_BASE} ${
+                  active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+                }`}
+              >
+                {active && <ActiveBar />}
+                <ToolIcon tool={id} />
+              </button>
+            );
+          })}
+          {gi < TOOL_GROUPS.length - 1 && (
+            <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+          )}
+        </div>
       ))}
 
       <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
@@ -187,11 +259,14 @@ export default function DrawingBar({
       <button
         onClick={cycleMagnet}
         title={`磁吸：${MAGNET_LABELS[magnet]}（點擊切換，關 → 弱 → 強）`}
-        className={`${BUTTON_BASE} ${
+        className={`${MAGNET_BUTTON_BASE} ${
           magnet !== 'off' ? 'bg-[#2a2e39] text-[#2962ff]' : ''
         }`}
       >
         <MagnetIcon />
+        <span className="text-[8px] leading-none">
+          {MAGNET_LABELS[magnet]}
+        </span>
       </button>
       <button
         onClick={onClear}

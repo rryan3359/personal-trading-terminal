@@ -45,6 +45,7 @@ import {
   dispose,
   init,
   type Chart,
+  type Crosshair,
   type DataLoader,
   type DeepPartial,
   type KLineData,
@@ -300,6 +301,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const [loadError, setLoadError] = useState<string | null>(null);
   /** Last loaded / live candle, shown in the top-left legend overlay. */
   const [lastKline, setLastKline] = useState<KLineData | null>(null);
+  /**
+   * Candle under the crosshair, or null when the mouse is off the
+   * chart. The legend shows this while hovering (TradingView-style)
+   * and falls back to the last candle otherwise.
+   */
+  const [hoverKline, setHoverKline] = useState<KLineData | null>(null);
   /** Whether the last init load delivered data (gates the live socket). */
   const initOkRef = useRef(true);
   const setSelectedState = (s: SelectedOverlayState | null) => {
@@ -734,12 +741,38 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     chartRef.current = chart;
 
-    // The top-left legend (Chart.tsx) already shows the last candle's
-    // OHLC, so the built-in tooltip would print the same line on top of
-    // it. Show the tooltip only while the crosshair is active (hover /
-    // tap / drag), on every screen size — it then reads the hovered
-    // candle instead of duplicating the legend.
-    chart.setStyles({ candle: { tooltip: { showRule: 'follow_cross' } } });
+    // The top-left legend is the only OHLC readout: the built-in
+    // tooltip draws its own line at the same spot and the two overlap
+    // (screenshot 2026-11-24). Hide it entirely; the legend follows
+    // the crosshair instead (subscribed below).
+    chart.setStyles({ candle: { tooltip: { showRule: 'none' } } });
+
+    // Legend follows the crosshair (TradingView behaviour): while the
+    // mouse hovers a candle the legend shows that candle; when the
+    // mouse leaves it falls back to the last candle. Note the action
+    // payload is only { x, y, paneId } (no kLineData despite the
+    // Crosshair type), so the hovered candle is resolved through
+    // convertFromPixel -> dataIndex into the loaded list.
+    const onCrosshairChange = (data?: unknown) => {
+      const cross = data as Crosshair | undefined;
+      if (cross?.x === undefined) {
+        setHoverKline(null);
+        return;
+      }
+      const point = chart.convertFromPixel(
+        [{ x: cross.x, y: cross.y ?? 0 }],
+        cross.paneId ? { paneId: cross.paneId } : undefined,
+      );
+      const p = Array.isArray(point) ? point[0] : point;
+      const list = chart.getDataList();
+      const idx = p?.dataIndex;
+      setHoverKline(
+        idx !== undefined && idx >= 0 && idx < list.length
+          ? list[idx]
+          : null,
+      );
+    };
+    chart.subscribeAction('onCrosshairChange', onCrosshairChange);
 
     // Debug handle for browser-console inspection
     // (e.g. __pttChart.getOverlays(), __pttChart.getVisibleRange()).
@@ -854,6 +887,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
     return () => {
       resizeObserver.disconnect();
+      chart.unsubscribeAction('onCrosshairChange', onCrosshairChange);
       socketRef.current?.disconnect();
       socketRef.current = null;
       liveCallbackRef.current = null;
@@ -874,9 +908,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const chart = chartRef.current;
     if (!chart) return;
     // A new symbol/interval is about to load: drop any stale error
-    // and legend.
+    // and legend (including a hovered candle from the old symbol).
     setLoadError(null);
     setLastKline(null);
+    setHoverKline(null);
     const prev = prevSymbolIntervalRef.current;
     if (prev === null) {
       prevSymbolIntervalRef.current = { symbol, interval };
@@ -1052,10 +1087,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }, 0);
   };
 
-  // Legend: change of the last candle vs its open.
+  // Legend candle: the hovered candle while the crosshair is on the
+  // chart, otherwise the last candle. Its change is vs its own open.
+  const legendKline = hoverKline ?? lastKline;
   const legendChangePct =
-    lastKline !== null && lastKline.open !== 0
-      ? ((lastKline.close - lastKline.open) / lastKline.open) * 100
+    legendKline !== null && legendKline.open !== 0
+      ? ((legendKline.close - legendKline.open) / legendKline.open) * 100
       : 0;
 
   return (
@@ -1063,23 +1100,24 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       <div
         ref={containerRef}
         onClick={handleContainerClick}
+        onMouseLeave={() => setHoverKline(null)}
         className="h-full w-full bg-[#131722]"
         data-testid="chart-container"
       />
-      {lastKline !== null && loadError === null && (
+      {legendKline !== null && loadError === null && (
         <div className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed">
           <div className="text-xs font-semibold text-white">
             {symbol} · {INTERVAL_LABELS[interval]} · Binance
           </div>
           <div className="text-[11px] text-[#b2b5be]">
-            開 {formatPrice(lastKline.open)} 高 {formatPrice(lastKline.high)}{' '}
-            低 {formatPrice(lastKline.low)} 收{' '}
+            開 {formatPrice(legendKline.open)} 高 {formatPrice(legendKline.high)}{' '}
+            低 {formatPrice(legendKline.low)} 收{' '}
             <span
               className={
                 legendChangePct >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
               }
             >
-              {formatPrice(lastKline.close)}{' '}
+              {formatPrice(legendKline.close)}{' '}
               {legendChangePct >= 0 ? '+' : ''}
               {legendChangePct.toFixed(2)}%
             </span>
