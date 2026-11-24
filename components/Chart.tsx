@@ -63,8 +63,12 @@ import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
   FIB_LEVEL_COLORS,
+  fibExtendOf,
+  fibLevelsOf,
   hexToRgba,
+  isFibTool,
   registerFibonacciRetracementOverlay,
+  registerFibonacciToolsOverlays,
   registerGeometryOverlays,
   registerMeasureOverlay,
   registerRectangleOverlay,
@@ -216,6 +220,8 @@ interface SelectedOverlayState {
   fibExtend: 'left' | 'right' | 'both';
   fibBackground: boolean;
   fibLevelText: boolean;
+  /** Fibonacci levels (ratios, or sequence numbers for time zones). */
+  fibLevels: number[];
 }
 
 /** Horizontal tools show their price on the right Y axis. */
@@ -238,7 +244,7 @@ function defaultPriceLabel(name: string): boolean {
   return (
     isHorizontalTool(name) ||
     name === 'rectangle' ||
-    name === 'fibonacciRetracement'
+    isFibTool(name)
   );
 }
 
@@ -867,7 +873,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       delete ext.text;
     }
     const isRect = saved.name === 'rectangle';
-    const isFib = saved.name === 'fibonacciRetracement';
+    const isFib = isFibTool(saved.name);
     const isShape = saved.name === 'ellipse' || saved.name === 'triangle';
     if (isRect) {
       ext.fillOpacity =
@@ -886,17 +892,27 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.fill = ext.fill === true;
     }
     if (isFib) {
+      // Levels: keep a valid saved list, else the tool's default
+      // (spiral has no levels). Level colours likewise.
+      if (saved.name !== 'fibSpiral') {
+        ext.levels = fibLevelsOf({ extendData: ext }, saved.name);
+      }
       ext.levelColors =
         Array.isArray(ext.levelColors) &&
         (ext.levelColors as unknown[]).every((v) => typeof v === 'string')
           ? ext.levelColors
           : FIB_LEVEL_COLORS;
-      ext.fibExtend =
-        ext.fibExtend === 'left' || ext.fibExtend === 'right'
-          ? ext.fibExtend
-          : 'both';
-      ext.fibBackground = ext.fibBackground === true;
-      ext.showTrendline = ext.showTrendline === true;
+      if (
+        saved.name === 'fibonacciRetracement' ||
+        saved.name === 'fibChannel' ||
+        saved.name === 'fibFan'
+      ) {
+        ext.fibExtend = fibExtendOf({ extendData: ext }, saved.name);
+      }
+      if (saved.name === 'fibonacciRetracement') {
+        ext.fibBackground = ext.fibBackground === true;
+        ext.showTrendline = ext.showTrendline === true;
+      }
       ext.fibLevelText = ext.fibLevelText !== false;
     }
     // Price label (needDefaultYAxisFigure). Horizontal tools, rectangles
@@ -1157,12 +1173,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       fill: ext.fill === true,
       fibTrendline: ext.showTrendline === true,
       fibLevelColors,
-      fibExtend:
-        ext.fibExtend === 'left' || ext.fibExtend === 'right'
-          ? ext.fibExtend
-          : 'both',
+      fibExtend: fibExtendOf({ extendData: ext }, o.name),
       fibBackground: ext.fibBackground === true,
       fibLevelText: ext.fibLevelText !== false,
+      fibLevels: fibLevelsOf({ extendData: ext }, o.name),
     });
   };
 
@@ -1207,11 +1221,39 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.fill = next.fill;
       ext.fillOpacity = next.fillOpacity;
     }
-    if (next.name === 'fibonacciRetracement') {
-      ext.levelColors = next.fibLevelColors;
-      ext.fibExtend = next.fibExtend;
-      ext.fibBackground = next.fibBackground;
-      ext.showTrendline = next.fibTrendline;
+    if (isFibTool(next.name)) {
+      if (next.name !== 'fibSpiral') {
+        ext.levels = next.fibLevels;
+      }
+      // The floating-bar colour is the overlay's main colour, but the
+      // level lines are drawn in per-level colours, so a colour pick
+      // would otherwise change nothing visible on a fib tool. For the
+      // new fib tools, sync the primary (first) level's colour with
+      // the pick so the change shows on the chart. The spiral draws
+      // its line in the main colour already, and the retracement keeps
+      // its existing behaviour (its trend line is in the main colour).
+      let levelColors = next.fibLevelColors;
+      if (
+        patch.color !== undefined &&
+        next.name !== 'fibSpiral' &&
+        next.name !== 'fibonacciRetracement' &&
+        levelColors
+      ) {
+        levelColors = [...levelColors];
+        levelColors[0] = next.color;
+      }
+      ext.levelColors = levelColors;
+      if (
+        next.name === 'fibonacciRetracement' ||
+        next.name === 'fibChannel' ||
+        next.name === 'fibFan'
+      ) {
+        ext.fibExtend = next.fibExtend;
+      }
+      if (next.name === 'fibonacciRetracement') {
+        ext.fibBackground = next.fibBackground;
+        ext.showTrendline = next.fibTrendline;
+      }
       ext.fibLevelText = next.fibLevelText;
     }
     chart.overrideOverlay({
@@ -1364,6 +1406,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     fibExtend: cur.fibExtend,
     fibBackground: cur.fibBackground,
     fibLevelText: cur.fibLevelText,
+    fibLevels: [...cur.fibLevels],
     text: cur.text ? { ...cur.text } : null,
     points: cur.points.map((p) => ({ ...p })),
     visibleIntervals: cur.visibleIntervals
@@ -1465,11 +1508,22 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.fill = draft.fill;
       ext.fillOpacity = draft.fillOpacity;
     }
-    if (o.name === 'fibonacciRetracement') {
+    if (isFibTool(o.name)) {
+      if (o.name !== 'fibSpiral') {
+        ext.levels = draft.fibLevels;
+      }
       ext.levelColors = draft.fibLevelColors;
-      ext.fibExtend = draft.fibExtend;
-      ext.fibBackground = draft.fibBackground;
-      ext.showTrendline = draft.fibTrendline;
+      if (
+        o.name === 'fibonacciRetracement' ||
+        o.name === 'fibChannel' ||
+        o.name === 'fibFan'
+      ) {
+        ext.fibExtend = draft.fibExtend;
+      }
+      if (o.name === 'fibonacciRetracement') {
+        ext.fibBackground = draft.fibBackground;
+        ext.showTrendline = draft.fibTrendline;
+      }
       ext.fibLevelText = draft.fibLevelText;
     }
     const points = draft.points.map((p) => ({
@@ -1485,12 +1539,33 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       },
       draft.fillOpacity,
     );
-    if (family !== null && draft.extend !== currentExtend) {
+    // klinecharts overrideOverlay deep-merges extendData arrays by
+    // index (merge() recurses into arrays), so a SHORTER levels list
+    // would keep the old tail (e.g. [0,0.5,1] over 9 levels leaves 6
+    // stale entries). A levels change therefore recreates the overlay
+    // (same id), like an extend change, so the new list replaces the
+    // old one wholesale.
+    const levelsChanged =
+      isFibTool(o.name) &&
+      o.name !== 'fibSpiral' &&
+      JSON.stringify(fibLevelsOf(o, o.name)) !==
+        JSON.stringify(draft.fibLevels);
+    if (
+      (family !== null && draft.extend !== currentExtend) ||
+      levelsChanged
+    ) {
       // Extend changes the overlay name: delete + recreate, keeping the
       // same id, points and styles, ordered so the ray still points
-      // from p0 through p1.
-      const ordered = orderPointsForExtend(points, draft.extend, family);
-      const newName = overlayNameForExtend(family, draft.extend);
+      // from p0 through p1. A levels change keeps the same name and
+      // point order (fib tools have no extend family).
+      const ordered =
+        family !== null && draft.extend !== currentExtend
+          ? orderPointsForExtend(points, draft.extend, family)
+          : points;
+      const newName =
+        family !== null && draft.extend !== currentExtend
+          ? overlayNameForExtend(family, draft.extend)
+          : o.name;
       const recreate: SavedOverlay = {
         id: cur.id,
         name: newName,
@@ -1614,6 +1689,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
     registerRectangleOverlay();
     registerFibonacciRetracementOverlay();
+    registerFibonacciToolsOverlays();
     registerMeasureOverlay();
     registerTextAnnotationOverlay();
     registerSimpleTagOverlay();

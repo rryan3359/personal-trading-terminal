@@ -47,6 +47,23 @@
  *   pen                  -> like path but the line figure smooths
  *                           through the points
  *   arrow                -> 2 points, line + filled triangular head
+ *   Fibonacci batch (TV-only tools, share the retracement's level
+ *   options in extendData — levels / levelColors / fibExtend /
+ *   fibLevelText; see the section header):
+ *   fibChannel           -> 2 points, parallel lines at fib ratios
+ *                           of the price move, extendable left/right
+ *   fibTimeZones         -> 2 points (anchor + unit), vertical lines
+ *                           at fib sequence numbers of the unit
+ *   fibFan               -> 2 points, rays from the first point at
+ *                           fib ratios of the price move
+ *   fibArc               -> 2 points, semicircles centred on the
+ *                           first point at fib ratios of the distance
+ *   fibSpiral            -> 2 points (centre + radius point),
+ *                           logarithmic spiral growing by φ per
+ *                           quarter turn
+ *   fibWedge             -> 3 points (apex + two boundary points),
+ *                           rays splitting the wedge angle at fib
+ *                           ratios, extended to the pane edge
  */
 
 import {
@@ -806,27 +823,40 @@ function geomLineFigureStyles(
 }
 
 /** 'polygon' figure for a closed shape: border from the line style,
- *  optional fill at extendData.fillOpacity. */
+ *  optional fill at extendData.fillOpacity. A second 'line' figure
+ *  traces the same border: the polygon's hit test is pure
+ *  point-in-polygon with zero tolerance, so a click exactly on the
+ *  border (e.g. a triangle edge midpoint) is a ray-casting coin flip
+ *  and misses, while the line figure's hit test carries the
+ *  library's ±2px DEVIATION. Same colour/size/style, so the extra
+ *  figure is visually identical — it only widens the hit target. */
 function geomPolygonFigure(
   coordinates: Array<{ x: number; y: number }>,
   overlay: Overlay,
-): Record<string, unknown> {
+): Array<Record<string, unknown>> {
   const line = geomLineStyle(overlay);
   const { fill, fillOpacity } = geomFillOf(overlay);
-  return {
-    type: 'polygon',
-    attrs: { coordinates },
-    styles: {
-      style: fill ? 'stroke_fill' : 'stroke',
-      color: hexToRgba(line.color, fillOpacity),
-      borderColor: line.color,
-      borderSize: line.size,
-      borderStyle: line.style,
-      ...(line.dashedValue
-        ? { borderDashedValue: line.dashedValue }
-        : {}),
+  return [
+    {
+      type: 'polygon',
+      attrs: { coordinates },
+      styles: {
+        style: fill ? 'stroke_fill' : 'stroke',
+        color: hexToRgba(line.color, fillOpacity),
+        borderColor: line.color,
+        borderSize: line.size,
+        borderStyle: line.style,
+        ...(line.dashedValue
+          ? { borderDashedValue: line.dashedValue }
+          : {}),
+      },
     },
-  };
+    {
+      type: 'line',
+      attrs: { coordinates: [...coordinates, coordinates[0]] },
+      styles: geomLineFigureStyles(line),
+    },
+  ];
 }
 
 /** Ellipse outline sampled as a polygon (no ellipse figure exists in
@@ -943,12 +973,10 @@ export function registerGeometryOverlays(): void {
       const rx = Math.abs(b.x - a.x) / 2;
       const ry = Math.abs(b.y - a.y) / 2;
       if (rx < 1 || ry < 1) return [];
-      return [
-        geomPolygonFigure(
-          sampleEllipsePoints((a.x + b.x) / 2, (a.y + b.y) / 2, rx, ry),
-          overlay,
-        ),
-      ] as never;
+      return geomPolygonFigure(
+        sampleEllipsePoints((a.x + b.x) / 2, (a.y + b.y) / 2, rx, ry),
+        overlay,
+      ) as never;
     },
   });
 
@@ -960,7 +988,7 @@ export function registerGeometryOverlays(): void {
     needDefaultYAxisFigure: true,
     createPointFigures: ({ coordinates, overlay }) => {
       if (coordinates.length < 3) return [];
-      return [geomPolygonFigure(coordinates.slice(0, 3), overlay)] as never;
+      return geomPolygonFigure(coordinates.slice(0, 3), overlay) as never;
     },
   });
 
@@ -1104,6 +1132,533 @@ export function registerGeometryOverlays(): void {
           styles: { style: 'fill', color: line.color },
         },
       ] as never;
+    },
+  });
+}
+
+// ---- fibonacci tools batch (TV-only tools) ------------------------------
+
+/**
+ * Fibonacci tools: the retracement plus 6 TV-only tools, all custom
+ * overlays (klinecharts has no built-ins for them). They share the
+ * level options in extendData:
+ *   levels      -> number[] (ratios, or fib sequence numbers for
+ *                  fibTimeZones); extendData.levels overrides the
+ *                  per-tool default below
+ *   levelColors -> per-level line colours (fallback: FIB_LEVEL_COLORS)
+ *   fibExtend   -> 'left' | 'right' | 'both' (channel / fan only;
+ *                  fan defaults to 'right', the rest to 'both')
+ *   fibLevelText -> show the level labels (default true)
+ * Levels are data-space ratios: a level r of a price move dv = v1-v0
+ * sits at v0 + r*dv. All geometry is computed in pixel space from
+ * `coordinates` (the overlay's pixel points), so a saved overlay
+ * restores correctly on any symbol / interval.
+ */
+
+/** Default levels per fib tool. */
+export const FIB_CHANNEL_LEVELS = [
+  0, 0.382, 0.5, 0.618, 1, 1.618, 2.618, 3.618, 4.236,
+];
+export const FIB_TIMEZONE_LEVELS = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55];
+export const FIB_FAN_LEVELS = [0, 0.382, 0.5, 0.618, 1];
+export const FIB_ARC_LEVELS = [0.382, 0.5, 0.618, 1, 1.618];
+export const FIB_WEDGE_LEVELS = [0, 0.382, 0.5, 0.618, 1];
+
+/** The fib family: retracement + the 6 new tools. */
+export const FIB_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'fibonacciRetracement',
+  'fibChannel',
+  'fibTimeZones',
+  'fibFan',
+  'fibArc',
+  'fibSpiral',
+  'fibWedge',
+]);
+
+export function isFibTool(name: string): boolean {
+  return FIB_TOOL_NAMES.has(name);
+}
+
+/** Whether the tool has editable levels (all fib tools except the
+ *  spiral, whose shape is a single curve). */
+export function fibHasLevels(name: string): boolean {
+  return isFibTool(name) && name !== 'fibSpiral';
+}
+
+export function fibDefaultLevels(name: string): number[] {
+  switch (name) {
+    case 'fibChannel':
+      return FIB_CHANNEL_LEVELS;
+    case 'fibTimeZones':
+      return FIB_TIMEZONE_LEVELS;
+    case 'fibFan':
+      return FIB_FAN_LEVELS;
+    case 'fibArc':
+      return FIB_ARC_LEVELS;
+    case 'fibWedge':
+      return FIB_WEDGE_LEVELS;
+    default:
+      return FIB_LEVELS;
+  }
+}
+
+/** Levels for one fib overlay: extendData.levels when it is a
+ *  non-empty finite-number array, else the tool's default. */
+export function fibLevelsOf(
+  overlay: { extendData?: unknown },
+  name?: string,
+): number[] {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  if (Array.isArray(ext.levels)) {
+    const list = (ext.levels as unknown[]).filter(
+      (v): v is number => typeof v === 'number' && Number.isFinite(v),
+    );
+    if (list.length > 0) return list;
+  }
+  return fibDefaultLevels(
+    name ?? (overlay as { name?: string }).name ?? '',
+  );
+}
+
+/** Per-level line colour: extendData.levelColors[i], else the shared
+ *  FIB_LEVEL_COLORS cycle (same fallback as the retracement). */
+export function fibLevelColorOf(
+  overlay: { extendData?: unknown },
+  i: number,
+): string {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  const colors = Array.isArray(ext.levelColors)
+    ? (ext.levelColors as unknown[])
+    : [];
+  return typeof colors[i] === 'string'
+    ? (colors[i] as string)
+    : FIB_LEVEL_COLORS[i % FIB_LEVEL_COLORS.length];
+}
+
+/** Level labels on/off (default true). */
+export function fibLevelTextOf(overlay: { extendData?: unknown }): boolean {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  return ext.fibLevelText !== false;
+}
+
+/** Level-line horizontal extent (channel / fan). Fan defaults to
+ *  'right' (rays run forward in time); the rest default to 'both'. */
+export function fibExtendOf(
+  overlay: { extendData?: unknown },
+  name: string,
+): 'left' | 'right' | 'both' {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  if (ext.fibExtend === 'left' || ext.fibExtend === 'right')
+    return ext.fibExtend;
+  return name === 'fibFan' ? 'right' : 'both';
+}
+
+type FibPt = { x: number; y: number };
+
+/** 'line' figure styles for one fib level: the level colour, the
+ *  overlay's width / dash. */
+function fibLineFigureStyles(
+  overlay: Overlay,
+  color: string,
+): Record<string, unknown> {
+  const line = geomLineStyle(overlay);
+  return geomLineFigureStyles({ ...line, color });
+}
+
+/** Non-hittable level label (same shape as the retracement's labels:
+ *  built-in 'text' figure, isCheckEvent false — a click on a label
+ *  still selects the overlay, it just never steals a drag). */
+function fibLevelLabel(
+  x: number,
+  y: number,
+  text: string,
+  color: string,
+): Record<string, unknown> {
+  return {
+    type: 'text',
+    isCheckEvent: false,
+    attrs: [{ x, y, text, baseline: 'bottom' }],
+    styles: { color },
+  };
+}
+
+/** Horizontal span of level lines for a fibExtend option, from the
+ *  two anchor pixels (same convention as the retracement). */
+function fibXSpan(
+  x0: number,
+  x1: number,
+  width: number,
+  extend: 'left' | 'right' | 'both',
+): { xStart: number; xEnd: number } {
+  const minX = Math.min(x0, x1);
+  const maxX = Math.max(x0, x1);
+  return {
+    xStart: extend === 'right' ? minX : 0,
+    xEnd: extend === 'left' ? maxX : width,
+  };
+}
+
+/** Line figure through two pixel points, extended horizontally to
+ *  [xStart, xEnd] along the line's slope (the channel / fan
+ *  pattern). Falls back to the raw segment for a (near-)vertical
+ *  line, which has no slope to extend along. */
+function fibExtendedLineFigure(
+  a: FibPt,
+  b: FibPt,
+  xStart: number,
+  xEnd: number,
+  styles: Record<string, unknown>,
+): Record<string, unknown> {
+  const dx = b.x - a.x;
+  if (Math.abs(dx) < 1e-6) {
+    return { type: 'line', attrs: { coordinates: [a, b] }, styles };
+  }
+  const m = (b.y - a.y) / dx;
+  const yAt = (x: number) => a.y + m * (x - a.x);
+  return {
+    type: 'line',
+    attrs: {
+      coordinates: [
+        { x: xStart, y: yAt(xStart) },
+        { x: xEnd, y: yAt(xEnd) },
+      ],
+    },
+    styles,
+  };
+}
+
+/** Ray from `origin` in direction `dir` (unit vector) to the edge of
+ *  the [0, width] x [0, height] box, or null when it never leaves
+ *  (zero direction). Used by the wedge's boundary / ratio rays. */
+function fibRayToBoxEdge(
+  origin: FibPt,
+  dir: FibPt,
+  width: number,
+  height: number,
+): FibPt | null {
+  let t = Infinity;
+  if (dir.x > 1e-9) t = Math.min(t, (width - origin.x) / dir.x);
+  else if (dir.x < -1e-9) t = Math.min(t, -origin.x / dir.x);
+  if (dir.y > 1e-9) t = Math.min(t, (height - origin.y) / dir.y);
+  else if (dir.y < -1e-9) t = Math.min(t, -origin.y / dir.y);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  return { x: origin.x + dir.x * t, y: origin.y + dir.y * t };
+}
+
+let fibonacciToolsRegistered = false;
+
+/**
+ * Register the 6 fib tools once per page load (see the section header
+ * for the per-tool notes). fibChannel / fibTimeZones / fibFan /
+ * fibArc / fibSpiral take 2 clicks (totalStep 3); fibWedge takes 3
+ * (totalStep 4: apex + two boundary points).
+ */
+export function registerFibonacciToolsOverlays(): void {
+  if (fibonacciToolsRegistered) return;
+  fibonacciToolsRegistered = true;
+
+  registerOverlay({
+    name: 'fibChannel',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ chart, coordinates, bounding, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [c0, c1] = coordinates;
+      const p0 = overlay.points[0];
+      const p1 = overlay.points[1];
+      if (p0?.value === undefined || p1?.value === undefined) return [];
+      // A vertical trend has no slope to offset parallel lines along:
+      // the level lines would all coincide on the trend itself.
+      if (Math.abs(c1.x - c0.x) < 1) {
+        return [
+          {
+            type: 'line',
+            attrs: { coordinates: [c0, c1] },
+            styles: fibLineFigureStyles(
+              overlay,
+              overlay.styles?.line?.color ?? '#2962ff',
+            ),
+          },
+        ] as never;
+      }
+      const precision = chart.getSymbol()?.pricePrecision ?? 2;
+      const v0 = p0.value;
+      const dv = p1.value - v0;
+      const levels = fibLevelsOf(overlay, 'fibChannel');
+      const extend = fibExtendOf(overlay, 'fibChannel');
+      const { xStart, xEnd } = fibXSpan(
+        c0.x,
+        c1.x,
+        bounding.width,
+        extend,
+      );
+      const showText = fibLevelTextOf(overlay);
+      const figures: Array<Record<string, unknown>> = [];
+      levels.forEach((r, i) => {
+        const color = fibLevelColorOf(overlay, i);
+        // Level r shifts the trend line vertically by r * the pixel
+        // price move: through (c0.x, c0.y + r*(c1.y-c0.y)) and
+        // (c1.x, c1.y + r*(c1.y-c0.y)).
+        const a = { x: c0.x, y: c0.y + r * (c1.y - c0.y) };
+        const b = { x: c1.x, y: c1.y + r * (c1.y - c0.y) };
+        figures.push(
+          fibExtendedLineFigure(
+            a,
+            b,
+            xStart,
+            xEnd,
+            fibLineFigureStyles(overlay, color),
+          ),
+        );
+        if (showText) {
+          // Price where the label sits: the level line's data-space
+          // value at xStart (timestamp is linear in x).
+          const value =
+            v0 + dv * (r + (xStart - c0.x) / (c1.x - c0.x));
+          const m = (b.y - a.y) / (b.x - a.x);
+          figures.push(
+            fibLevelLabel(
+              xStart,
+              a.y + m * (xStart - a.x),
+              `${value.toFixed(precision)} (${(r * 100).toFixed(1)}%)`,
+              color,
+            ),
+          );
+        }
+      });
+      return figures as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'fibTimeZones',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, bounding, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [c0, c1] = coordinates;
+      const unit = c1.x - c0.x;
+      // The two points share a timestamp: no time unit to repeat.
+      if (Math.abs(unit) < 1) return [];
+      const levels = fibLevelsOf(overlay, 'fibTimeZones');
+      const showText = fibLevelTextOf(overlay);
+      const figures: Array<Record<string, unknown>> = [];
+      levels.forEach((n, i) => {
+        const x = c0.x + n * unit;
+        if (x < -1 || x > bounding.width + 1) return;
+        const color = fibLevelColorOf(overlay, i);
+        figures.push({
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x, y: 0 },
+              { x, y: bounding.height },
+            ],
+          },
+          styles: fibLineFigureStyles(overlay, color),
+        });
+        if (showText) {
+          figures.push({
+            type: 'text',
+            isCheckEvent: false,
+            attrs: [{ x, y: 6, text: `${n}`, baseline: 'top' }],
+            styles: { color },
+          });
+        }
+      });
+      return figures as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'fibFan',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ chart, coordinates, bounding, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [c0, c1] = coordinates;
+      const p0 = overlay.points[0];
+      const p1 = overlay.points[1];
+      if (p0?.value === undefined || p1?.value === undefined) return [];
+      if (Math.abs(c1.x - c0.x) < 1) return [];
+      const precision = chart.getSymbol()?.pricePrecision ?? 2;
+      const v0 = p0.value;
+      const dv = p1.value - v0;
+      const levels = fibLevelsOf(overlay, 'fibFan');
+      const extend = fibExtendOf(overlay, 'fibFan');
+      const showText = fibLevelTextOf(overlay);
+      const figures: Array<Record<string, unknown>> = [];
+      levels.forEach((r, i) => {
+        const color = fibLevelColorOf(overlay, i);
+        // Ray from the apex through (c1.x, c0.y + r*(c1.y-c0.y)) —
+        // the point at the second anchor's time, r of the price move.
+        const end = { x: c1.x, y: c0.y + r * (c1.y - c0.y) };
+        const { xStart, xEnd } = fibXSpan(c0.x, end.x, bounding.width, extend);
+        figures.push(
+          fibExtendedLineFigure(
+            c0,
+            end,
+            xStart,
+            xEnd,
+            fibLineFigureStyles(overlay, color),
+          ),
+        );
+        if (showText) {
+          figures.push(
+            fibLevelLabel(
+              end.x,
+              end.y,
+              `${(v0 + r * dv).toFixed(precision)} (${(r * 100).toFixed(1)}%)`,
+              color,
+            ),
+          );
+        }
+      });
+      return figures as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'fibArc',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [c0, c1] = coordinates;
+      const dist = Math.hypot(c1.x - c0.x, c1.y - c0.y);
+      if (dist < 2) return [];
+      // Arcs are semicircles centred on the first point, bulging to
+      // the side of the trend line the retracement runs toward:
+      // the sweep [trend - π, trend] passes through trend - π/2.
+      const trend = Math.atan2(c1.y - c0.y, c1.x - c0.x);
+      const levels = fibLevelsOf(overlay, 'fibArc');
+      const showText = fibLevelTextOf(overlay);
+      const figures: Array<Record<string, unknown>> = [];
+      levels.forEach((r, i) => {
+        if (r <= 0) return;
+        const radius = r * dist;
+        const color = fibLevelColorOf(overlay, i);
+        figures.push({
+          type: 'arc',
+          attrs: {
+            x: c0.x,
+            y: c0.y,
+            r: radius,
+            startAngle: trend - Math.PI,
+            endAngle: trend,
+          },
+          styles: fibLineFigureStyles(overlay, color),
+        });
+        if (showText) {
+          const mid = trend - Math.PI / 2;
+          figures.push(
+            fibLevelLabel(
+              c0.x + radius * Math.cos(mid),
+              c0.y + radius * Math.sin(mid),
+              `${(r * 100).toFixed(1)}%`,
+              color,
+            ),
+          );
+        }
+      });
+      return figures as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'fibSpiral',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, bounding, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [c0, c1] = coordinates;
+      const r0 = Math.hypot(c1.x - c0.x, c1.y - c0.y);
+      if (r0 < 2) return [];
+      // Logarithmic spiral through the second point: the radius grows
+      // by the golden ratio every quarter turn (b = ln φ / (π/2)),
+      // wound from the second point's direction outward until it
+      // leaves the pane (at most 3 full turns).
+      const phi = (1 + Math.sqrt(5)) / 2;
+      const b = Math.log(phi) / (Math.PI / 2);
+      const a0 = Math.atan2(c1.y - c0.y, c1.x - c0.x);
+      const maxR = Math.hypot(bounding.width, bounding.height);
+      const pts: Array<{ x: number; y: number }> = [];
+      const step = 0.05;
+      for (let th = 0; th <= Math.PI * 6; th += step) {
+        const r = r0 * Math.exp(b * th);
+        if (r > maxR) break;
+        pts.push({
+          x: c0.x + r * Math.cos(a0 + th),
+          y: c0.y + r * Math.sin(a0 + th),
+        });
+      }
+      if (pts.length < 2) return [];
+      return [
+        {
+          type: 'line',
+          attrs: { coordinates: pts },
+          styles: fibLineFigureStyles(
+            overlay,
+            overlay.styles?.line?.color ?? '#2962ff',
+          ),
+        },
+      ] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'fibWedge',
+    totalStep: 4,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, bounding, overlay }) => {
+      if (coordinates.length < 3) return [];
+      const [a, b, c] = coordinates;
+      const d1 = { x: b.x - a.x, y: b.y - a.y };
+      const d2 = { x: c.x - a.x, y: c.y - a.y };
+      const len1 = Math.hypot(d1.x, d1.y);
+      const len2 = Math.hypot(d2.x, d2.y);
+      if (len1 < 2 || len2 < 2) return [];
+      // Intermediate rays split the (short-way) angle between the
+      // two boundary directions at the fib ratios.
+      const a1 = Math.atan2(d1.y, d1.x);
+      const a2 = Math.atan2(d2.y, d2.x);
+      let diff = a2 - a1;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff <= -Math.PI) diff += Math.PI * 2;
+      if (Math.abs(diff) < 1e-6) return [];
+      const levels = fibLevelsOf(overlay, 'fibWedge');
+      const showText = fibLevelTextOf(overlay);
+      const figures: Array<Record<string, unknown>> = [];
+      levels.forEach((r, i) => {
+        const color = fibLevelColorOf(overlay, i);
+        const angle = a1 + r * diff;
+        const dir = { x: Math.cos(angle), y: Math.sin(angle) };
+        const end = fibRayToBoxEdge(a, dir, bounding.width, bounding.height);
+        if (!end) return;
+        figures.push({
+          type: 'line',
+          attrs: { coordinates: [a, end] },
+          styles: fibLineFigureStyles(overlay, color),
+        });
+        if (showText) {
+          figures.push(
+            fibLevelLabel(end.x, end.y, `${(r * 100).toFixed(1)}%`, color),
+          );
+        }
+      });
+      return figures as never;
     },
   });
 }

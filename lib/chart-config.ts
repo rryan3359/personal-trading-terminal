@@ -22,6 +22,11 @@
  * Geometry batch (custom overlays, klinecharts has no built-ins for
  * them): `ellipse`, `triangle`, `arc`, `curve`, `path`, `pen`,
  * `arrow` — also registered in lib/chart-theme.ts.
+ * Fibonacci batch (custom overlays, TV-only): `fibChannel`,
+ * `fibTimeZones`, `fibFan`, `fibArc`, `fibSpiral`, `fibWedge` —
+ * also registered in lib/chart-theme.ts; they share the fib level
+ * options (levels / levelColors / fibExtend / fibLevelText) with
+ * `fibonacciRetracement` in extendData.
  */
 export type DrawingTool =
   | 'segment'
@@ -40,6 +45,12 @@ export type DrawingTool =
   | 'simpleTag'
   | 'textAnnotation'
   | 'fibonacciRetracement'
+  | 'fibChannel'
+  | 'fibTimeZones'
+  | 'fibFan'
+  | 'fibArc'
+  | 'fibSpiral'
+  | 'fibWedge'
   | 'rectangle'
   | 'measure'
   | 'ellipse'
@@ -53,6 +64,12 @@ export type DrawingTool =
 /** Custom overlays (registered in lib/chart-theme.ts, not klinecharts built-ins). */
 export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'fibonacciRetracement',
+  'fibChannel',
+  'fibTimeZones',
+  'fibFan',
+  'fibArc',
+  'fibSpiral',
+  'fibWedge',
   'rectangle',
   'measure',
   'textAnnotation',
@@ -91,6 +108,12 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'simpleTag', label: '價位標籤' },
   { id: 'textAnnotation', label: '文字標註' },
   { id: 'fibonacciRetracement', label: '斐波那契' },
+  { id: 'fibChannel', label: '斐波那契通道' },
+  { id: 'fibTimeZones', label: '斐波那契時間週期' },
+  { id: 'fibFan', label: '斐波那契扇形' },
+  { id: 'fibArc', label: '斐波那契弧線' },
+  { id: 'fibSpiral', label: '斐波那契螺旋' },
+  { id: 'fibWedge', label: '斐波那契楔形' },
   { id: 'rectangle', label: '矩形' },
   { id: 'measure', label: '量測' },
   { id: 'ellipse', label: '橢圓' },
@@ -227,6 +250,12 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   simpleTag: '價位標籤',
   textAnnotation: '文字標註',
   fibonacciRetracement: '斐波那契',
+  fibChannel: '斐波那契通道',
+  fibTimeZones: '斐波那契時間週期',
+  fibFan: '斐波那契扇形',
+  fibArc: '斐波那契弧線',
+  fibSpiral: '斐波那契螺旋',
+  fibWedge: '斐波那契楔形',
   rectangle: '矩形',
   measure: '量測',
   ellipse: '橢圓',

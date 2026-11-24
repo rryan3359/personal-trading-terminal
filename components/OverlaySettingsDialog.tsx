@@ -11,7 +11,10 @@
 
 import { useEffect, useState } from 'react';
 import ColorPicker from '@/components/ColorPicker';
-import { FIB_LEVELS } from '@/lib/chart-theme';
+import {
+  fibHasLevels,
+  isFibTool,
+} from '@/lib/chart-theme';
 import {
   LINE_STYLE_OPTIONS,
   TOOL_LABELS_BY_NAME,
@@ -48,6 +51,8 @@ export interface OverlayDialogDraft {
   fibBackground: boolean;
   /** Fibonacci: show the level price labels. */
   fibLevelText: boolean;
+  /** Fibonacci levels (ratios, or sequence numbers for time zones). */
+  fibLevels: number[];
   /** Attached text. null = no text. */
   text: OverlayText | null;
   points: Array<{ timestamp: number; value: number }>;
@@ -176,6 +181,17 @@ function coordLabel(toolName: string, i: number): string {
     return `#${i + 1}（${['起點', '終點', '弧上點'][i] ?? '點'}）`;
   if (toolName === 'curve')
     return `#${i + 1}（${['起點', '控制點', '終點'][i] ?? '點'}）`;
+  if (
+    toolName === 'fibChannel' ||
+    toolName === 'fibFan' ||
+    toolName === 'fibArc' ||
+    toolName === 'fibSpiral'
+  )
+    return `#${i + 1}（${['起點', '終點'][i] ?? '點'}）`;
+  if (toolName === 'fibTimeZones')
+    return `#${i + 1}（${['起點', '間距點'][i] ?? '點'}）`;
+  if (toolName === 'fibWedge')
+    return `#${i + 1}（${['頂點', '邊界 1', '邊界 2'][i] ?? '點'}）`;
   return `#${i + 1}（價格，K棒）`;
 }
 
@@ -190,7 +206,31 @@ export default function OverlaySettingsDialog({
   const [tab, setTab] = useState<DialogTab>(initialTab);
   const [draft, setDraft] = useState<OverlayDialogDraft>(initial);
   const family: LineFamily | null = lineFamilyOf(toolName);
-  const isFib = toolName === 'fibonacciRetracement';
+  const isFib = isFibTool(toolName);
+  const isRetracement = toolName === 'fibonacciRetracement';
+  const isTimeZones = toolName === 'fibTimeZones';
+  /** Fib tools with editable levels (all except the spiral). */
+  const hasFibLevels = fibHasLevels(toolName);
+  /** Fib tools whose level lines extend horizontally (channel, fan). */
+  const hasFibExtend =
+    toolName === 'fibChannel' || toolName === 'fibFan';
+  /** Levels editor text (comma-separated); committed on blur. */
+  const [levelsText, setLevelsText] = useState(
+    initial.fibLevels.join(', '),
+  );
+  const commitLevels = () => {
+    const parsed = levelsText
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
+    const uniq = [...new Set(parsed)].sort((a, b) => a - b).slice(0, 12);
+    if (uniq.length === 0) {
+      setLevelsText(draft.fibLevels.join(', '));
+      return;
+    }
+    setLevelsText(uniq.join(', '));
+    patch({ fibLevels: uniq });
+  };
   const isRect = toolName === 'rectangle';
   /** Closed geometry shapes with a fill switch (ellipse, triangle). */
   const isShape = toolName === 'ellipse' || toolName === 'triangle';
@@ -516,77 +556,108 @@ export default function OverlaySettingsDialog({
                   )}
                 </div>
               )}
-              {isFib && (
+              {isFib &&
+                (isRetracement || hasFibLevels || hasFibExtend) && (
                 <div className="space-y-3 rounded border border-[#2a2e39] p-2">
-                  <label className={CHECK_ROW}>
-                    <input
-                      type="checkbox"
-                      checked={draft.fibTrendline}
-                      onChange={(e) =>
-                        patch({ fibTrendline: e.target.checked })
-                      }
-                      className="accent-[#2962ff]"
-                    />
-                    趨勢線（連接兩端點的斜線）
-                  </label>
-                  <div>
-                    <span className={FIELD_LABEL}>各層級線色</span>
-                    <div className="space-y-1">
-                      {FIB_LEVELS.map((level, i) => (
-                        <div
-                          key={level}
-                          className="flex items-center gap-2"
-                        >
-                          <span className="w-16 text-xs text-[#b2b5be]">
-                            {(level * 100).toFixed(1)}%
-                          </span>
-                          <input
-                            type="color"
-                            value={draft.fibLevelColors[i] ?? '#787b86'}
-                            onChange={(e) => {
-                              const next = [...draft.fibLevelColors];
-                              next[i] = e.target.value;
-                              patch({ fibLevelColors: next });
-                            }}
-                            className="h-6 w-8 cursor-pointer bg-transparent p-0"
-                          />
-                          <span className="font-mono text-xs uppercase">
-                            {draft.fibLevelColors[i] ?? '#787b86'}
-                          </span>
+                  {isRetracement && (
+                    <label className={CHECK_ROW}>
+                      <input
+                        type="checkbox"
+                        checked={draft.fibTrendline}
+                        onChange={(e) =>
+                          patch({ fibTrendline: e.target.checked })
+                        }
+                        className="accent-[#2962ff]"
+                      />
+                      趨勢線（連接兩端點的斜線）
+                    </label>
+                  )}
+                  {hasFibLevels && (
+                    <>
+                      <div>
+                        <label className={FIELD_LABEL}>
+                          層級（以逗號分隔
+                          {isTimeZones
+                            ? '，數列序號'
+                            : '，比例 0–4.236'}）
+                        </label>
+                        <input
+                          type="text"
+                          value={levelsText}
+                          onChange={(e) => setLevelsText(e.target.value)}
+                          onBlur={commitLevels}
+                          className={INPUT}
+                        />
+                        <p className="mt-1 text-xs leading-relaxed text-[#787b86]">
+                          修改後按其他處確認；空白或無效值會恢復原層級。
+                        </p>
+                      </div>
+                      <div>
+                        <span className={FIELD_LABEL}>各層級線色</span>
+                        <div className="space-y-1">
+                          {draft.fibLevels.map((level, i) => (
+                            <div
+                              key={`${level}-${i}`}
+                              className="flex items-center gap-2"
+                            >
+                              <span className="w-16 text-xs text-[#b2b5be]">
+                                {isTimeZones
+                                  ? `×${level}`
+                                  : `${(level * 100).toFixed(1)}%`}
+                              </span>
+                              <input
+                                type="color"
+                                value={draft.fibLevelColors[i] ?? '#787b86'}
+                                onChange={(e) => {
+                                  const next = [...draft.fibLevelColors];
+                                  next[i] = e.target.value;
+                                  patch({ fibLevelColors: next });
+                                }}
+                                className="h-6 w-8 cursor-pointer bg-transparent p-0"
+                              />
+                              <span className="font-mono text-xs uppercase">
+                                {draft.fibLevelColors[i] ?? '#787b86'}
+                              </span>
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      </div>
+                    </>
+                  )}
+                  {(isRetracement || hasFibExtend) && (
+                    <div>
+                      <label className={FIELD_LABEL}>層級線延伸</label>
+                      <select
+                        value={draft.fibExtend}
+                        onChange={(e) =>
+                          patch({
+                            fibExtend: e.target.value as
+                              | 'left'
+                              | 'right'
+                              | 'both',
+                          })
+                        }
+                        className={SELECT}
+                      >
+                        <option value="left">向左</option>
+                        <option value="right">向右</option>
+                        <option value="both">雙向</option>
+                      </select>
                     </div>
-                  </div>
-                  <div>
-                    <label className={FIELD_LABEL}>層級線延伸</label>
-                    <select
-                      value={draft.fibExtend}
-                      onChange={(e) =>
-                        patch({
-                          fibExtend: e.target.value as
-                            | 'left'
-                            | 'right'
-                            | 'both',
-                        })
-                      }
-                      className={SELECT}
-                    >
-                      <option value="left">向左</option>
-                      <option value="right">向右</option>
-                      <option value="both">雙向</option>
-                    </select>
-                  </div>
-                  <label className={CHECK_ROW}>
-                    <input
-                      type="checkbox"
-                      checked={draft.fibBackground}
-                      onChange={(e) =>
-                        patch({ fibBackground: e.target.checked })
-                      }
-                      className="accent-[#2962ff]"
-                    />
-                    背景填色（0–100% 區間）
-                  </label>
+                  )}
+                  {isRetracement && (
+                    <label className={CHECK_ROW}>
+                      <input
+                        type="checkbox"
+                        checked={draft.fibBackground}
+                        onChange={(e) =>
+                          patch({ fibBackground: e.target.checked })
+                        }
+                        className="accent-[#2962ff]"
+                      />
+                      背景填色（0–100% 區間）
+                    </label>
+                  )}
                 </div>
               )}
                 </>
@@ -594,7 +665,7 @@ export default function OverlaySettingsDialog({
             </>
           )}
 
-          {tab === 'text' && !isFib && (
+          {tab === 'text' && (!isFib || toolName === 'fibSpiral') && (
             <>
               <label className={CHECK_ROW}>
                 <input
@@ -726,7 +797,7 @@ export default function OverlaySettingsDialog({
             </>
           )}
 
-          {tab === 'text' && isFib && (
+          {tab === 'text' && isFib && toolName !== 'fibSpiral' && (
             <>
               <label className={CHECK_ROW}>
                 <input

@@ -4,14 +4,14 @@
  * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
  *
  * Top: cursor/select tool (active when no drawing tool is armed;
- * clicking it exits drawing mode). Then the 25 DRAWING_TOOLS grouped
+ * clicking it exits drawing mode). Then the 31 DRAWING_TOOLS grouped
  * by logic — trend lines, horizontal lines, vertical lines, shapes,
- * freehand/annotation, Fibonacci/measure — with a divider between
- * groups. Bottom: magnet (click cycles off -> weak -> strong, current
- * strength shown under the icon) and clear. Single click arms a tool
- * (click again to disarm); double-click or Shift+click keeps it armed
- * for continuous drawing. Active tool: bg #2a2e39, text #2962ff, plus
- * a left accent bar.
+ * geometry, freehand/annotation, Fibonacci, measure — with a divider
+ * between groups. Bottom: magnet (click cycles off -> weak -> strong,
+ * current strength shown under the icon) and clear. Single click arms
+ * a tool (click again to disarm); double-click or Shift+click keeps it
+ * armed for continuous drawing. Active tool: bg #2a2e39, text #2962ff,
+ * plus a left accent bar.
  *
  * Undo / redo live in the top Toolbar now (TradingView puts them there).
  */
@@ -28,7 +28,8 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '圖形', ids: ['rectangle'] },
   { title: '幾何', ids: ['ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
   { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
-  { title: '斐波那契／測量', ids: ['fibonacciRetracement', 'measure'] },
+  { title: '斐波那契', ids: ['fibonacciRetracement', 'fibChannel', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
+  { title: '測量', ids: ['measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
 
@@ -193,6 +194,55 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
           <line x1="4" y1="5" x2="16" y2="5" />
           <line x1="4" y1="10" x2="13" y2="10" />
           <line x1="4" y1="15" x2="10" y2="15" />
+        </svg>
+      );
+    case 'fibChannel':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="3" y1="16" x2="17" y2="4" />
+          <line x1="3" y1="12.5" x2="17" y2="0.5" opacity="0.65" />
+          <line x1="3" y1="19.5" x2="14" y2="10.5" opacity="0.65" />
+        </svg>
+      );
+    case 'fibTimeZones':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="4" x2="4" y2="16" />
+          <line x1="8" y1="4" x2="8" y2="16" opacity="0.85" />
+          <line x1="12.5" y1="4" x2="12.5" y2="16" opacity="0.7" />
+          <line x1="17" y1="4" x2="17" y2="16" opacity="0.55" />
+        </svg>
+      );
+    case 'fibFan':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="16" />
+          <line x1="4" y1="16" x2="17" y2="10" opacity="0.8" />
+          <line x1="4" y1="16" x2="17" y2="4" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'fibArc':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M4 16 A 6 6 0 0 1 16 16" />
+          <path d="M6.5 16 A 3.5 3.5 0 0 1 13.5 16" opacity="0.7" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'fibSpiral':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M10 10 m-1.5 0 a1.5 1.5 0 1 1 3 0 a3 3 0 1 1 -6 0 a5 5 0 1 1 10 0 a7 7 0 1 1 -13 2.5" />
+        </svg>
+      );
+    case 'fibWedge':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="6" />
+          <line x1="4" y1="16" x2="17" y2="15" />
+          <line x1="4" y1="16" x2="17" y2="10.5" opacity="0.6" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
         </svg>
       );
     case 'rectangle':
