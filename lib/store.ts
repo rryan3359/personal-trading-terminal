@@ -80,7 +80,9 @@ export function saveMagnetMode(mode: MagnetMode): void {
 export interface LastOverlayStyle {
   color: string;
   size: number;
-  style: 'solid' | 'dashed';
+  style: 'solid' | 'dashed' | 'dotted';
+  /** Line opacity (0–1). The line color is stored as hex + this opacity. */
+  opacity: number;
   /** Rectangle fill opacity (0.05–0.4). */
   fillOpacity: number;
 }
@@ -89,6 +91,7 @@ export const DEFAULT_OVERLAY_STYLE: LastOverlayStyle = {
   color: '#2962ff',
   size: 1,
   style: 'solid',
+  opacity: 1,
   fillOpacity: 0.08,
 };
 
@@ -112,8 +115,10 @@ export interface OverlayStylePatch {
   color: string;
   /** Line width in px (1–4). */
   size: number;
-  /** Line type. */
-  style: 'solid' | 'dashed';
+  /** Line type. 'dotted' renders as dashed + dashedValue [1, 4]. */
+  style: 'solid' | 'dashed' | 'dotted';
+  /** Line opacity (0–1). Defaults to 1 when missing (old saves). */
+  opacity?: number;
 }
 
 /**
@@ -135,6 +140,11 @@ export interface SavedOverlay {
   scope?: OverlayScope;
   /** Interval this overlay belongs to when scope is 'interval'. */
   interval?: string;
+  /**
+   * Draw level (klinecharts zLevel). Missing = 0 (old saves). Bring to
+   * front / send to back move this above the current max / below the min.
+   */
+  zLevel?: number;
 }
 
 /**
