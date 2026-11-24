@@ -58,7 +58,7 @@ import {
 } from 'klinecharts';
 import type { Interval, Kline } from '@/lib/types';
 import { INTERVAL_LABELS } from '@/lib/types';
-import { formatPrice } from '@/lib/format';
+import { formatCountdown, formatPrice } from '@/lib/format';
 import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
@@ -151,6 +151,12 @@ export interface ChartProps {
   /** Candle render style: 蠟燭圖 / 美國線 / 面積圖. */
   chartType: ChartType;
   onConnectionStatus?: (status: BinanceSocketStatus) => void;
+  /**
+   * Called when a live tick arrives (throttled to at most once per
+   * second inside Chart): the page shows it as the last-tick time in
+   * the status bar. Never called while the socket is down.
+   */
+  onLastTick?: (atMs: number) => void;
   /** Keep the tool armed after each drawing (double-click / Shift-click). */
   continuousDraw?: boolean;
   /** Called when undo/redo availability changes. */
@@ -364,6 +370,21 @@ function isInView(o: SavedOverlay, interval: string): boolean {
   );
 }
 
+/** Distance from a point to the segment a–b (px). Touch tap fallback. */
+function distToSegment(
+  px: number,
+  py: number,
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 === 0 ? 0 : ((px - a.x) * dx + (py - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+}
+
 /** Deterministic id of a main line's accompanying text annotation. */
 const textAnnotationId = (mainId: string): string => `${mainId}:text`;
 
@@ -464,6 +485,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     indicators,
     chartType,
     onConnectionStatus,
+    onLastTick,
     continuousDraw = false,
     onHistoryChange,
   },
@@ -480,6 +502,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const intervalRef = useRef(interval);
   const onToolDoneRef = useRef(onToolDone);
   const onConnectionStatusRef = useRef(onConnectionStatus);
+  const onLastTickRef = useRef(onLastTick);
+  /** Last time onLastTick was reported (throttle: at most once a second). */
+  const lastTickReportRef = useRef(0);
   const activeToolRef = useRef(activeTool);
   const continuousDrawRef = useRef(continuousDraw);
   const onHistoryChangeRef = useRef(onHistoryChange);
@@ -487,6 +512,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   intervalRef.current = interval;
   onToolDoneRef.current = onToolDone;
   onConnectionStatusRef.current = onConnectionStatus;
+  onLastTickRef.current = onLastTick;
   activeToolRef.current = activeTool;
   continuousDrawRef.current = continuousDraw;
   onHistoryChangeRef.current = onHistoryChange;
@@ -502,6 +528,32 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const lastOverlayClickRef = useRef(0);
   /** Guards the fill-opacity slider against one history push per drag. */
   const sliderHistoryPushedRef = useRef(false);
+  /** Touch tap-to-select fallback (mobile): the tap that started the
+   *  current touch, with the selection that was active before it. */
+  const touchTapStartRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    time: number;
+    selectedId: string | null;
+  } | null>(null);
+  /** Pending fallback timer (one at most); cleared on unmount. */
+  const touchFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  /** Previous touch tap, for the double-tap-to-open-dialog gesture. */
+  const lastTouchTapRef = useRef<{ x: number; y: number; time: number } | null>(
+    null,
+  );
+  // Timestamp until which clicks on the floating bar are ignored.
+  // Set when a draw ends and the bar auto-appears: the tap that ended
+  // the draw also produces a browser compatibility click, which lands
+  // on the freshly rendered bar (right under the finger) and would
+  // otherwise trigger whichever button happens to be there (e.g. the
+  // line-style panel popping open, or 刪除 deleting the just-drawn
+  // line). A deliberate tap on a bar button always comes later — the
+  // user has to see the bar first — so a 300ms window is safe.
+  const barIgnoreClicksUntilRef = useRef(0);
 
   const [selected, setSelected] = useState<SelectedOverlayState | null>(null);
   const selectedRef = useRef<SelectedOverlayState | null>(null);
@@ -514,6 +566,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   >(null);
   /** Outer chart wrapper (the floating bar's offset parent). */
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  /** Top-left legend (measured for the narrow-screen bar default). */
+  const legendRef = useRef<HTMLDivElement | null>(null);
   /** Floating bar element (measured while dragging). */
   const barRef = useRef<HTMLDivElement | null>(null);
   /** Active drag state for the floating bar grip. */
@@ -534,6 +588,23 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
    * and falls back to the last candle otherwise.
    */
   const [hoverKline, setHoverKline] = useState<KLineData | null>(null);
+  /** Data-list index of the hovered candle (null when not hovering). */
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  /** Wall clock, ticking once a second: drives the candle countdown. */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  // Clear any pending touch tap-fallback timer on unmount.
+  useEffect(
+    () => () => {
+      if (touchFallbackTimerRef.current) {
+        clearTimeout(touchFallbackTimerRef.current);
+      }
+    },
+    [],
+  );
   /** Whether the last init load delivered data (gates the live socket). */
   const initOkRef = useRef(true);
   const setSelectedState = (s: SelectedOverlayState | null) => {
@@ -1049,6 +1120,25 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         if (continuousDrawRef.current && activeToolRef.current) {
           armOverlay(activeToolRef.current);
         } else {
+          // Select the fresh drawing right away: on a phone a tap
+          // almost never lands on a thin line (the chart's own hit
+          // tolerance is ~±2px), so without this the user draws and
+          // then cannot edit what they just drew. The floating edit
+          // bar appears immediately, no second tap needed. The
+          // measure overlay is transient (dismissed on the next
+          // canvas click) and is never selectable, so it stays out.
+          if (
+            e.overlay.name !== MEASURE_NAME &&
+            e.overlay.points.some(
+              (p) => p.timestamp !== undefined && p.value !== undefined,
+            )
+          ) {
+            refreshSelected(e.overlay.id);
+            // The tap that ended this draw also fires a compatibility
+            // click; the bar renders under the finger before it lands,
+            // so swallow bar clicks briefly (see barIgnoreClicksUntilRef).
+            barIgnoreClicksUntilRef.current = Date.now() + 300;
+          }
           onToolDoneRef.current();
         }
       },
@@ -1892,6 +1982,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       const cross = data as Crosshair | undefined;
       if (cross?.x === undefined) {
         setHoverKline(null);
+        setHoverIndex(null);
         return;
       }
       const point = chart.convertFromPixel(
@@ -1905,6 +1996,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         idx !== undefined && idx >= 0 && idx < list.length
           ? list[idx]
           : null,
+      );
+      setHoverIndex(
+        idx !== undefined && idx >= 0 && idx < list.length ? idx : null,
       );
     };
     chart.subscribeAction('onCrosshairChange', onCrosshairChange);
@@ -2005,6 +2099,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           (kline) => {
             liveCallbackRef.current?.(kline as KLineData);
             setLastKline(kline as KLineData);
+            // Last-tick time for the status bar, throttled to once a
+            // second (the display only has second precision).
+            const now = Date.now();
+            if (now - lastTickReportRef.current >= 1000) {
+              lastTickReportRef.current = now;
+              onLastTickRef.current?.(now);
+            }
           },
           (status) => onConnectionStatusRef.current?.(status),
         );
@@ -2047,6 +2148,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     setLoadError(null);
     setLastKline(null);
     setHoverKline(null);
+    setHoverIndex(null);
     const prev = prevSymbolIntervalRef.current;
     if (prev === null) {
       prevSymbolIntervalRef.current = { symbol, interval };
@@ -2234,6 +2336,142 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }, 0);
   };
 
+  /**
+   * Closest visible overlay to a tap (client coords), within
+   * `radiusPx`. Anchor polyline, segment distance; single-point
+   * tools count as a point. Skipped: the transient measure overlay,
+   * text-annotation companions (':text') and invisible overlays.
+   * Locked overlays stay selectable, exactly like a mouse click
+   * today. Only overlays on this interval's chart exist in the
+   * chart, so the search is already interval-scoped. Anchor points
+   * are converted with convertToPixel({ absolute: true }) — verified
+   * against klinecharts 10.1.1 source: x is container-relative and
+   * absolute y is the pane top + pane-relative y, i.e. also
+   * container-relative.
+   */
+  const nearestOverlayAt = (
+    clientX: number,
+    clientY: number,
+    radiusPx: number,
+  ): { id: string; dist: number } | null => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return null;
+    const rect = container.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    let best: { id: string; dist: number } | null = null;
+    for (const o of chart.getOverlays()) {
+      if (o.visible === false) continue;
+      if (o.name === MEASURE_NAME) continue;
+      if (o.id.endsWith(':text')) continue;
+      const pts = o.points.filter(
+        (p): p is { timestamp: number; value: number } =>
+          p.timestamp !== undefined && p.value !== undefined,
+      );
+      if (pts.length === 0) continue;
+      const raw = chart.convertToPixel(
+        pts.map((p) => ({ timestamp: p.timestamp, value: p.value })),
+        { absolute: true },
+      );
+      const coords = (Array.isArray(raw) ? raw : [raw]).filter(
+        (c): c is { x: number; y: number } =>
+          typeof c?.x === 'number' &&
+          typeof c?.y === 'number' &&
+          Number.isFinite(c.x) &&
+          Number.isFinite(c.y),
+      );
+      if (coords.length === 0) continue;
+      let d: number;
+      if (coords.length === 1) {
+        d = Math.hypot(x - coords[0].x, y - coords[0].y);
+      } else {
+        d = Infinity;
+        for (let i = 0; i < coords.length - 1; i += 1) {
+          d = Math.min(d, distToSegment(x, y, coords[i], coords[i + 1]));
+        }
+      }
+      if (d <= radiusPx && (best === null || d < best.dist)) {
+        best = { id: o.id, dist: d };
+      }
+    }
+    return best;
+  };
+
+  /**
+   * Touch tap-to-select fallback (mobile only — mouse/pen never take
+   * this path; klinecharts only calls preventDefault, never
+   * stopPropagation, so these React pointer handlers still fire).
+   * A tap is pointerdown -> pointerup, <10px movement, <500ms, with
+   * no tool armed and no drawing in progress. The chart's own click
+   * handling gets ~150ms to select something first (its ±2px hit
+   * test wins when it lands); only then do we search for the nearest
+   * overlay within 24 CSS px. A tap on empty space clears the
+   * selection — the fallback never re-selects the overlay it just
+   * cleared, because the search runs once per tap.
+   */
+  const onContainerPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== 'touch') return;
+    touchTapStartRef.current = {
+      pointerId: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      time: Date.now(),
+      selectedId: selectedRef.current?.id ?? null,
+    };
+  };
+
+  const onContainerPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const start = touchTapStartRef.current;
+    touchTapStartRef.current = null;
+    if (!start || e.pointerType !== 'touch' || e.pointerId !== start.pointerId)
+      return;
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) >= 10) return;
+    if (Date.now() - start.time >= 500) return;
+    // A tool is armed or a drawing is in progress: the tap belongs
+    // to the drawing flow, not selection.
+    if (activeToolRef.current || drawingIdRef.current) return;
+    const tap = { x: e.clientX, y: e.clientY, time: Date.now() };
+    const prev = lastTouchTapRef.current;
+    lastTouchTapRef.current = tap;
+    // Double-tap on the selected overlay opens its settings dialog
+    // (touch equivalent of double-click). Armed tools / in-progress
+    // drawings are already excluded above.
+    if (
+      prev &&
+      selectedRef.current &&
+      tap.time - prev.time <= 300 &&
+      Math.hypot(tap.x - prev.x, tap.y - prev.y) <= 20
+    ) {
+      const near = nearestOverlayAt(tap.x, tap.y, 24);
+      if (near && near.id === selectedRef.current.id) {
+        if (touchFallbackTimerRef.current) {
+          clearTimeout(touchFallbackTimerRef.current);
+          touchFallbackTimerRef.current = null;
+        }
+        openDialogFor(selectedRef.current.id, 'style');
+        return;
+      }
+    }
+    if (touchFallbackTimerRef.current) {
+      clearTimeout(touchFallbackTimerRef.current);
+    }
+    const beforeId = start.selectedId;
+    touchFallbackTimerRef.current = setTimeout(() => {
+      touchFallbackTimerRef.current = null;
+      const nowId = selectedRef.current?.id ?? null;
+      // The chart selected a different overlay on this tap: its own
+      // hit test won, leave it alone.
+      if (nowId !== null && nowId !== beforeId) return;
+      const near = nearestOverlayAt(tap.x, tap.y, 24);
+      if (near) {
+        if (near.id !== nowId) refreshSelected(near.id);
+      } else if (nowId !== null) {
+        deselect();
+      }
+    }, 150);
+  };
+
   // ---- floating edit bar: drag + popovers -------------------------------
 
   /** Close any open floating-bar popover when clicking outside the bar. */
@@ -2306,19 +2544,149 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ? ((legendKline.close - legendKline.open) / legendKline.open) * 100
       : 0;
 
+  // ---- candle countdown (TradingView-style) -------------------------
+  // Always for the LAST candle, not the hovered one: the countdown is
+  // about the live bar closing. Close of the candle's interval: 1M is
+  // the 1st of next month UTC (INTERVAL_MS['1M'] is only a 30-day
+  // approximation); every other interval is open + its fixed span.
+  const lastCloseMs =
+    lastKline !== null
+      ? interval === '1M'
+        ? Date.UTC(
+            new Date(lastKline.timestamp).getUTCFullYear(),
+            new Date(lastKline.timestamp).getUTCMonth() + 1,
+            1,
+          )
+        : lastKline.timestamp + (INTERVAL_MS[interval] ?? 0)
+      : null;
+  const countdownRemainingMs =
+    lastCloseMs !== null ? lastCloseMs - nowMs : null;
+  // Stale when the close already passed (socket down, no live tick) or
+  // the clock sits before the candle opened: show '—', never a bogus time.
+  const countdownText =
+    countdownRemainingMs !== null &&
+    lastCloseMs !== null &&
+    lastKline !== null &&
+    countdownRemainingMs > 0 &&
+    countdownRemainingMs <= lastCloseMs - lastKline.timestamp
+      ? formatCountdown(countdownRemainingMs)
+      : '—';
+
+  // ---- legend indicator values ---------------------------------------
+  // Read straight from klinecharts' own computed results (never
+  // re-computed here, so the numbers always match the drawn lines).
+  // result[i] holds the indicator's values for dataList[i]; each
+  // figure is one line keyed into that row. Line colours come from
+  // the theme (styles.indicator.lines[i], verified at runtime); the
+  // volume bar takes the candle's up/down colour, like the drawn bar.
+  const legendIndex =
+    hoverIndex ??
+    (chartRef.current ? chartRef.current.getDataList().length - 1 : -1);
+  const legendIndicators: Array<{
+    name: string;
+    values: Array<{ label: string; text: string; color: string }>;
+  }> = (() => {
+    const chart = chartRef.current;
+    if (!chart || legendIndex < 0) return [];
+    const list = chart.getDataList();
+    if (legendIndex >= list.length) return [];
+    const lineColors = chart.getStyles().indicator?.lines ?? [];
+    const rows: Array<{
+      name: string;
+      values: Array<{ label: string; text: string; color: string }>;
+    }> = [];
+    for (const ind of chart.getIndicators()) {
+      if (!indicators.includes(ind.name)) continue;
+      const row = ind.result?.[legendIndex] as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) continue;
+      const values: Array<{ label: string; text: string; color: string }> =
+        [];
+      for (let fi = 0; fi < ind.figures.length; fi += 1) {
+        const fig = ind.figures[fi];
+        const v = row[fig.key];
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        let text: string;
+        if (ind.shouldFormatBigNumber) {
+          // klinecharts' formatBigNumber only compacts >= 1000 (1.23K);
+          // below that it returns the raw float, so format small
+          // volumes to 2 decimals ourselves.
+          text =
+            Math.abs(v) >= 1000
+              ? chart.getFormatter().formatBigNumber(v)
+              : v.toFixed(2);
+        } else if (ind.series === 'price') {
+          text = formatPrice(v);
+        } else {
+          text = v.toFixed(2);
+        }
+        const color =
+          fig.type === 'bar'
+            ? legendChangePct >= 0
+              ? '#26a69a'
+              : '#ef5350'
+            : (lineColors[fi]?.color ?? '#b2b5be');
+        values.push({
+          label: (fig.title ?? fig.key).replace(/:\s*$/, ''),
+          text,
+          color,
+        });
+      }
+      if (values.length > 0) {
+        rows.push({ name: ind.shortName || ind.name, values });
+      }
+    }
+    return rows;
+  })();
+
+  /**
+   * Narrow-screen default for the floating edit bar: below the
+   * top-left legend (title + OHLC + indicator rows), so the bar
+   * never covers the candle countdown. Measured from the live legend
+   * element, so it adapts to how many indicator rows are shown
+   * (default MA + VOL ≈ 88px tall -> top ≈ 108). Desktop keeps the
+   * old top-centre default. The bar only renders after a selection,
+   * i.e. client-side, so reading window here cannot mismatch SSR.
+   * Narrow screens also span the full width in one scrollable row
+   * (see the bar's style below): left:50% + translateX(-50%) caps
+   * shrink-to-fit width at 50% of the container, which wrapped the
+   * bar into a ~274px tall column that covered the drawn line and
+   * made it untappable.
+   */
+  const defaultBarTop = () => {
+    if (typeof window === 'undefined' || window.innerWidth >= 768) return 8;
+    const h = legendRef.current?.offsetHeight ?? 88;
+    return Math.ceil(h) + 20;
+  };
+
   return (
     <div ref={wrapperRef} className="relative h-full w-full">
       <div
         ref={containerRef}
         onClick={handleContainerClick}
-        onMouseLeave={() => setHoverKline(null)}
+        onPointerDown={onContainerPointerDown}
+        onPointerUp={onContainerPointerUp}
+        onMouseLeave={() => {
+          setHoverKline(null);
+          setHoverIndex(null);
+        }}
         className="h-full w-full bg-[#131722]"
         data-testid="chart-container"
       />
       {legendKline !== null && loadError === null && (
-        <div className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed">
+        <div
+          ref={legendRef}
+          className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed"
+        >
           <div className="text-xs font-semibold text-white">
             {symbol} · {INTERVAL_LABELS[interval]} · Binance
+            <span
+              className="ml-2 font-normal tabular-nums text-[#ffa726]"
+              data-testid="candle-countdown"
+            >
+              收線 {countdownText}
+            </span>
           </div>
           <div className="text-[11px] text-[#b2b5be]">
             開 {formatPrice(legendKline.open)} 高 {formatPrice(legendKline.high)}{' '}
@@ -2333,6 +2701,24 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               {legendChangePct.toFixed(2)}%
             </span>
           </div>
+          {legendIndicators.map((row) => (
+            <div
+              key={row.name}
+              className="text-[11px]"
+              data-testid={`legend-indicator-${row.name}`}
+            >
+              <span className="text-[#787b86]">{row.name} </span>
+              {row.values.map((v) => (
+                <span
+                  key={v.label}
+                  className="tabular-nums"
+                  style={{ color: v.color }}
+                >
+                  {v.label} {v.text}{' '}
+                </span>
+              ))}
+            </div>
+          ))}
         </div>
       )}
       {loadError !== null && (
@@ -2345,18 +2731,33 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       {selected !== null && (
         <div
           ref={barRef}
-          className="absolute z-20 flex max-w-full flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg"
+          onClickCapture={(e) => {
+            // Swallow the compatibility click from the tap that ended
+            // the draw (see barIgnoreClicksUntilRef): the bar renders
+            // under the finger before that click lands.
+            if (Date.now() < barIgnoreClicksUntilRef.current) {
+              e.stopPropagation();
+              e.preventDefault();
+            }
+          }}
+          className="absolute z-20 flex max-w-full flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs max-md:flex-nowrap max-md:gap-2 max-md:overflow-x-auto max-md:px-3 max-md:py-2 text-[#d1d4dc] shadow-lg"
           style={
             barPos
               ? { left: barPos.x, top: barPos.y }
-              : { left: '50%', top: 8, transform: 'translateX(-50%)' }
+              : typeof window !== 'undefined' && window.innerWidth < 768
+                ? { left: 8, right: 8, top: defaultBarTop() }
+                : {
+                    left: '50%',
+                    top: defaultBarTop(),
+                    transform: 'translateX(-50%)',
+                  }
           }
         >
           <button
             title="拖曳移動"
             aria-label="拖曳移動浮動列"
             onPointerDown={onBarGripPointerDown}
-            className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center rounded-sm text-[#80858f] hover:bg-white/10 hover:text-white active:cursor-grabbing"
+            className="flex h-6 w-4 shrink-0 cursor-grab touch-none max-md:h-9 max-md:w-6 items-center justify-center rounded-sm text-[#80858f] hover:bg-white/10 hover:text-white active:cursor-grabbing"
           >
             <svg
               width="10"
@@ -2381,7 +2782,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                 title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
                 aria-label="顏色"
                 onClick={() => togglePanel('color')}
-                className={`flex h-6 w-8 shrink-0 items-center justify-center rounded-sm border px-1 hover:border-white/50 ${
+                className={`flex h-6 w-8 shrink-0 items-center justify-center rounded-sm border px-1 hover:border-white/50 max-md:h-9 max-md:w-9 ${
                   openPanel === 'color'
                     ? 'border-white ring-1 ring-white'
                     : 'border-white/20'
@@ -2408,7 +2809,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   key={w}
                   title={`線寬 ${w}`}
                   onClick={() => applyEdit({ size: w })}
-                  className={`flex h-5 w-6 items-center justify-center rounded-sm ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
+                  className={`flex h-5 w-6 items-center justify-center rounded-sm max-md:h-9 max-md:w-9 ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
                 >
                   <span
                     className="block rounded-full bg-current"
@@ -2420,7 +2821,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                 title="線形"
                 aria-label="線形"
                 onClick={() => togglePanel('lineStyle')}
-                className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 ${
+                className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 max-md:h-9 max-md:px-2 ${
                   openPanel === 'lineStyle' ? 'bg-white/10' : ''
                 }`}
               >
@@ -2446,7 +2847,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
             </>
           )}
-          <label className="flex items-center gap-1">
+          <label className="flex items-center gap-1 whitespace-nowrap max-md:min-h-9">
             <input
               type="checkbox"
               checked={
@@ -2466,7 +2867,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
           <button
             onClick={() => applyEdit({ lock: !selected.lock })}
-            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+            className="whitespace-nowrap rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
           >
             {selected.lock ? '🔒 已鎖定' : '🔓 鎖定'}
           </button>
@@ -2474,7 +2875,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             title="更多"
             aria-label="更多"
             onClick={() => togglePanel('more')}
-            className={`rounded-sm px-1.5 py-0.5 hover:bg-white/10 ${
+            className={`rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:min-h-9 max-md:px-2.5 ${
               openPanel === 'more' ? 'bg-white/10' : ''
             }`}
           >
@@ -2484,7 +2885,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             title="設定"
             aria-label="設定"
             onClick={() => openDialogFor(selected.id, 'style')}
-            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
           >
             ✏️
           </button>
@@ -2492,19 +2893,19 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             title="文字"
             aria-label="文字"
             onClick={() => openDialogFor(selected.id, 'text')}
-            className="rounded-sm px-1.5 py-0.5 font-semibold hover:bg-white/10"
+            className="rounded-sm px-1.5 py-0.5 font-semibold hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
           >
             T
           </button>
           <button
             onClick={deleteSelected}
-            className="rounded-sm px-1.5 py-0.5 text-[#ef5350] hover:bg-white/10"
+            className="rounded-sm px-1.5 py-0.5 text-[#ef5350] hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
           >
             刪除
           </button>
           <button
             onClick={deselect}
-            className="rounded-sm px-1 hover:bg-white/10"
+            className="rounded-sm px-1 hover:bg-white/10 max-md:min-h-9 max-md:min-w-9"
           >
             ✕
           </button>
@@ -2542,7 +2943,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                     applyEdit({ style: opt.id });
                     setOpenPanel(null);
                   }}
-                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-white/10"
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
                 >
                   <span
                     className="block w-8 border-t-2"
@@ -2571,7 +2972,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   copySelected();
                   setOpenPanel(null);
                 }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10"
+                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
               >
                 複製
               </button>
@@ -2580,7 +2981,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   bringToFront();
                   setOpenPanel(null);
                 }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10"
+                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
               >
                 移到前面
               </button>
@@ -2589,7 +2990,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   sendToBack();
                   setOpenPanel(null);
                 }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10"
+                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
               >
                 移到後面
               </button>
@@ -2598,7 +2999,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   applyEdit({ visible: !selected.visible });
                   setOpenPanel(null);
                 }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10"
+                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
               >
                 {selected.visible ? '隱藏' : '顯示'}
               </button>

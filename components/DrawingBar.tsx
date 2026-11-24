@@ -5,9 +5,9 @@
  *
  * Top: cursor/select tool (active when no drawing tool is armed;
  * clicking it exits drawing mode). Then one icon per tool GROUP
- * (trend lines, horizontal lines, vertical lines, shapes, geometry,
+ * (trend lines, horizontal lines / channels, shapes, geometry,
  * freehand/annotation, Fibonacci, Pitchfork, Gann, patterns,
- * measure — 11 groups, 44 tools): each group shows its last-used
+ * measure — 10 groups, 44 tools): each group shows its last-used
  * first tool if none used yet), with a small chevron. Clicking a
  * group opens a flyout panel to the right of the bar listing that
  * group's tools (icon + Chinese label); picking one arms it, closes
@@ -17,6 +17,12 @@
  * it. Single-tool groups (rectangle, measure) render as a plain
  * button with no flyout. Bottom: magnet (click cycles off -> weak ->
  * strong, current strength shown under the icon) and clear.
+ *
+ * The vertical-line tools (verticalStraightLine, verticalSegment,
+ * verticalRayLine) are deliberately NOT in any group: the group was
+ * removed 2026-11-25, but the tools stay registered in
+ * lib/chart-config.ts / lib/chart-theme.ts / Chart.tsx so drawings
+ * saved earlier still render and stay editable.
  *
  * The flyout is rendered through a portal to document.body with
  * fixed positioning, so it is not clipped by the aside's vertical
@@ -31,9 +37,8 @@ import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
 
 /** Logical groups for the toolbar, in display order. */
 const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
-  { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine', 'parallelStraightLine', 'priceChannelLine'] },
-  { title: '水平線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'simpleTag'] },
-  { title: '垂直線', ids: ['verticalStraightLine', 'verticalSegment', 'verticalRayLine'] },
+  { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine'] },
+  { title: '水平線／通道', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'simpleTag', 'parallelStraightLine', 'priceChannelLine'] },
   { title: '圖形', ids: ['rectangle'] },
   { title: '幾何', ids: ['ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
   { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
@@ -561,7 +566,7 @@ function GroupFlyout({
               title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
               onClick={(e) => onSelect(id, e.shiftKey)}
               onDoubleClick={() => onSelect(id, true)}
-              className={`relative flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] hover:bg-[#2a2e39] hover:text-white ${
+              className={`relative flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] hover:bg-[#2a2e39] hover:text-white max-md:py-3 ${
                 active ? 'bg-[#2a2e39] text-[#2962ff]' : 'text-[#d1d4dc]'
               }`}
             >
