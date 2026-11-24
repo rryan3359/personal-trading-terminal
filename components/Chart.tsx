@@ -11,11 +11,11 @@
  *   one (newer timestamp). No manual updateData call is needed.
  * - setSymbol / setPeriod re-trigger getBars("init") automatically.
  *
- * Drawings are persisted per symbol in localStorage (v2 store, see
+ * Drawings are persisted per symbol in localStorage (v3 store, see
  * lib/store.ts) and restored after each init load, so they survive
- * symbol/timeframe switches. Overlays default to scope 'symbol'
- * (shown on every interval); scope 'interval' limits one to its own
- * interval. Crosshair, wheel zoom and drag pan are klinecharts
+ * symbol/timeframe switches. Overlays default to every interval;
+ * the settings dialog can limit one to a chosen set of intervals
+ * (visibleIntervals). Crosshair, wheel zoom and drag pan are klinecharts
  * defaults (explicitly enabled here); the dark theme is applied via
  * setStyles at init.
  *
@@ -62,31 +62,46 @@ import { formatPrice } from '@/lib/format';
 import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
+  FIB_LEVEL_COLORS,
   hexToRgba,
   registerFibonacciRetracementOverlay,
   registerMeasureOverlay,
   registerRectangleOverlay,
+  registerTextAnnotationOverlay,
 } from '@/lib/chart-theme';
 import ColorPicker from '@/components/ColorPicker';
+import OverlaySettingsDialog, {
+  type DialogTab,
+  type OverlayDialogDraft,
+} from '@/components/OverlaySettingsDialog';
 import {
   DRAWING_TOOLS,
   INDICATOR_OPTIONS,
   INTERVAL_MS,
+  LINE_STYLE_OPTIONS,
   RANGES,
+  extendForOverlay,
+  lineFamilyOf,
+  orderPointsForExtend,
+  overlayNameForExtend,
   type ChartType,
   type DrawingTool,
+  type ExtendId,
+  type LineFamily,
+  type LineStyleId,
   type RangeId,
 } from '@/lib/chart-config';
 import {
   DEFAULT_OVERLAY_STYLE,
+  DEFAULT_OVERLAY_TEXT,
   getLastOverlayStyle,
   getMagnetMode,
   loadDrawingsStore,
   newOverlayId,
   saveDrawingsStore,
   saveLastOverlayStyle,
-  type OverlayScope,
   type OverlayStylePatch,
+  type OverlayText,
   type SavedOverlay,
 } from '@/lib/store';
 
@@ -154,16 +169,8 @@ function isMainPaneIndicator(name: string): boolean {
 const MAX_HISTORY = 50;
 const MEASURE_NAME = 'measure';
 const LINE_WIDTHS = [1, 2, 3, 4];
-
-/** Line style ids used by the floating bar. 'dotted' renders as
- *  dashed + dashedValue [1, 4] (klinecharts LineType is solid|dashed). */
-export type LineStyleId = 'solid' | 'dashed' | 'dotted';
-
-const LINE_STYLE_OPTIONS: Array<{ id: LineStyleId; label: string }> = [
-  { id: 'solid', label: '實線' },
-  { id: 'dashed', label: '短虛線' },
-  { id: 'dotted', label: '點虛線' },
-];
+/** Custom overlay name for a drawing's attached text label. */
+const TEXT_ANNOTATION_NAME = 'textAnnotation';
 
 /** Checkerboard behind translucent color swatches (shows opacity). */
 const CHECKER_BG = {
@@ -174,7 +181,9 @@ const CHECKER_BG = {
   backgroundColor: '#f5f5f5',
 };
 
-/** Snapshot of one selected overlay for the floating edit bar. */
+/** Snapshot of one selected overlay for the floating edit bar and the
+ *  settings dialog. Points/text/visibility/extend are read from the
+ *  live overlay (extend is derived from the overlay name + point order). */
 interface SelectedOverlayState {
   id: string;
   name: string;
@@ -184,10 +193,25 @@ interface SelectedOverlayState {
   style: LineStyleId;
   lock: boolean;
   visible: boolean;
-  scope: OverlayScope;
+  /** undefined = shown on every interval. */
+  visibleIntervals: string[] | undefined;
   fillOpacity: number;
   isRect: boolean;
   zLevel: number;
+  points: Array<{ timestamp: number; value: number }>;
+  /** Attached text. null = none. */
+  text: OverlayText | null;
+  extend: ExtendId;
+  /** Show the price on the right Y axis (needDefaultYAxisFigure). */
+  priceLabel: boolean;
+  rectBorder: boolean;
+  rectMiddleLine: boolean;
+  rectFill: boolean;
+  fibTrendline: boolean;
+  fibLevelColors: string[];
+  fibExtend: 'left' | 'right' | 'both';
+  fibBackground: boolean;
+  fibLevelText: boolean;
 }
 
 /** Horizontal tools show their price on the right Y axis. */
@@ -268,14 +292,52 @@ function stylesForOverlay(
   };
 }
 
-/** Whether a saved overlay belongs on the given interval's chart. */
+/** Whether a saved overlay belongs on the given interval's chart.
+ *  undefined visibleIntervals = shown on every interval. */
 function isInView(o: SavedOverlay, interval: string): boolean {
-  return o.scope !== 'interval' || o.interval === interval;
+  return (
+    o.visibleIntervals === undefined ||
+    o.visibleIntervals.includes(interval)
+  );
 }
 
-/** Only fully-drawn overlays (every point has timestamp + value) are saved. */
+/** Deterministic id of a main line's accompanying text annotation. */
+const textAnnotationId = (mainId: string): string => `${mainId}:text`;
+
+/** Validate an extendData.text value into an OverlayText, or null. */
+function parseOverlayText(v: unknown): OverlayText | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const t = v as Record<string, unknown>;
+  if (typeof t.content !== 'string' || t.content.length === 0) return null;
+  return {
+    content: t.content,
+    color:
+      typeof t.color === 'string' ? t.color : DEFAULT_OVERLAY_TEXT.color,
+    size:
+      typeof t.size === 'number' && t.size > 0
+        ? t.size
+        : DEFAULT_OVERLAY_TEXT.size,
+    bold: t.bold === true,
+    italic: t.italic === true,
+    alignV:
+      t.alignV === 'top' || t.alignV === 'bottom' ? t.alignV : 'middle',
+    alignH:
+      t.alignH === 'left' || t.alignH === 'right' ? t.alignH : 'center',
+  };
+}
+
+/** Validate an extendData.visibleIntervals value. */
+function parseVisibleIntervals(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const list = v.filter((x): x is string => typeof x === 'string');
+  return list.length > 0 ? list : [];
+}
+
+/** Only fully-drawn overlays (every point has timestamp + value) are saved.
+ *  The measure tool and the text annotations are never saved: annotations
+ *  are rebuilt from their main line's text on restore. */
 function toSavedOverlay(o: Overlay): SavedOverlay | null {
-  if (o.name === MEASURE_NAME) return null;
+  if (o.name === MEASURE_NAME || o.name === TEXT_ANNOTATION_NAME) return null;
   if (o.points.length === 0) return null;
   const points: SavedOverlay['points'] = [];
   for (const p of o.points) {
@@ -284,9 +346,20 @@ function toSavedOverlay(o: Overlay): SavedOverlay | null {
   }
   const line = o.styles?.line;
   const ext = (o.extendData ?? {}) as Record<string, unknown>;
-  const scope = ext.scope === 'interval' ? 'interval' : 'symbol';
+  // First-class fields live on SavedOverlay, not in extendData.
+  const visibleIntervals = parseVisibleIntervals(ext.visibleIntervals);
+  const legacyIntervals =
+    visibleIntervals === undefined &&
+    ext.scope === 'interval' &&
+    typeof ext.interval === 'string'
+      ? [ext.interval]
+      : undefined;
   const restEntries = Object.entries(ext).filter(
-    ([k]) => k !== 'scope' && k !== 'interval',
+    ([k]) =>
+      k !== 'scope' &&
+      k !== 'interval' &&
+      k !== 'visibleIntervals' &&
+      k !== 'text',
   );
   let styles: OverlayStylePatch | undefined;
   if (line?.color !== undefined) {
@@ -298,6 +371,7 @@ function toSavedOverlay(o: Overlay): SavedOverlay | null {
       ...(opacity < 1 ? { opacity } : {}),
     };
   }
+  const text = parseOverlayText(ext.text);
   return {
     id: o.id,
     // Old saves used the built-in name; the custom overlay replaces it.
@@ -307,8 +381,8 @@ function toSavedOverlay(o: Overlay): SavedOverlay | null {
     lock: o.lock || undefined,
     visible: o.visible === false ? false : undefined,
     extendData: restEntries.length > 0 ? Object.fromEntries(restEntries) : undefined,
-    scope,
-    interval: typeof ext.interval === 'string' ? ext.interval : undefined,
+    visibleIntervals: visibleIntervals ?? legacyIntervals,
+    text: text ?? undefined,
     ...(o.zLevel !== 0 ? { zLevel: o.zLevel } : {}),
   };
 }
@@ -418,7 +492,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   /**
    * Full symbol-level list: stored overlays outside the current view
-   * (other intervals' scope='interval' overlays) + the live overlays on
+   * (overlays not visible on this interval) + the live overlays on
    * this chart. Live overlays win on id collisions.
    */
   const readMergedList = (
@@ -445,10 +519,122 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     saveDrawingsStore(store);
   };
 
+  // ---- text annotation (Phase 2) ---------------------------------------
+
+  /** Midpoint of a two-point drawing — the text annotation's anchor. */
+  const annotationMidpoint = (
+    points: Array<{ timestamp: number; value: number }>,
+  ): { timestamp: number; value: number } | null => {
+    if (points.length < 2) return null;
+    const [a, b] = points;
+    if (
+      a.timestamp === undefined ||
+      b.timestamp === undefined ||
+      a.value === undefined ||
+      b.value === undefined
+    ) {
+      return null;
+    }
+    return {
+      timestamp: Math.round((a.timestamp + b.timestamp) / 2),
+      value: (a.value + b.value) / 2,
+    };
+  };
+
+  /**
+   * Keep a main line's accompanying text annotation in sync: create it
+   * when the line gains text, move it to the line's midpoint when the
+   * line moves, match its visibility/zLevel, and delete it when the
+   * line loses its text. No-op when nothing changed. The annotation is
+   * never persisted on its own (toSavedOverlay excludes it) — it is
+   * always rebuilt from the main line.
+   */
+  const syncTextAnnotation = (mainId: string) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const main = chart.getOverlays({ id: mainId })[0];
+    if (!main || main.name === TEXT_ANNOTATION_NAME) return;
+    const ext = (main.extendData ?? {}) as Record<string, unknown>;
+    const text = parseOverlayText(ext.text);
+    const annId = textAnnotationId(mainId);
+    const existing = chart.getOverlays({ id: annId })[0];
+    if (!text) {
+      if (existing) chart.removeOverlay({ id: annId });
+      return;
+    }
+    const mid = annotationMidpoint(
+      main.points as Array<{ timestamp: number; value: number }>,
+    );
+    if (!mid) return;
+    const weight =
+      text.bold && text.italic
+        ? 'italic bold'
+        : text.bold
+          ? 'bold'
+          : text.italic
+            ? 'italic'
+            : 'normal';
+    if (existing) {
+      const ep = existing.points[0];
+      const samePoint =
+        ep !== undefined &&
+        ep.timestamp === mid.timestamp &&
+        ep.value === mid.value;
+      const sameVisible = existing.visible === main.visible;
+      const sameZ = (existing.zLevel ?? 0) === (main.zLevel ?? 0);
+      const sameText =
+        JSON.stringify(
+          (existing.extendData as Record<string, unknown> | undefined)?.text,
+        ) === JSON.stringify(text);
+      if (samePoint && sameVisible && sameZ && sameText) return;
+      chart.overrideOverlay({
+        id: annId,
+        points: [mid],
+        visible: main.visible,
+        zLevel: main.zLevel ?? 0,
+        fixedZLevel: true,
+        styles: { text: { color: text.color, size: text.size, weight } },
+        extendData: { text },
+      });
+      return;
+    }
+    chart.createOverlay({
+      id: annId,
+      groupId: main.groupId || mainId,
+      name: TEXT_ANNOTATION_NAME,
+      points: [mid],
+      styles: { text: { color: text.color, size: text.size, weight } },
+      lock: true,
+      visible: main.visible,
+      zLevel: main.zLevel ?? 0,
+      fixedZLevel: true,
+      needDefaultPointFigure: false,
+      needDefaultXAxisFigure: false,
+      needDefaultYAxisFigure: false,
+      extendData: { text },
+    });
+  };
+
+  /** Rebuild every text annotation from its main line (after restore /
+   *  undo / redo, which wipe and recreate the mains). */
+  const syncAllTextAnnotations = () => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    for (const o of chart.getOverlays()) {
+      if (o.name === TEXT_ANNOTATION_NAME || o.name === MEASURE_NAME) {
+        continue;
+      }
+      syncTextAnnotation(o.id);
+    }
+  };
+
   // ---- undo / redo -----------------------------------------------------
 
   const undoStackRef = useRef<SavedOverlay[][]>([]);
   const redoStackRef = useRef<SavedOverlay[][]>([]);
+  /** Pre-move snapshot, taken at press start and pushed at move end
+   *  only if the overlay actually moved (see onPressedMoveEnd). */
+  const moveStartSnapshotRef = useRef<SavedOverlay[] | null>(null);
 
   const emitHistoryChange = () => {
     onHistoryChangeRef.current?.(
@@ -468,6 +654,56 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     emitHistoryChange();
   };
 
+  /**
+   * Reset klinecharts' internal "clicked overlay" record after overlays
+   * are removed and recreated with the same ids (undo/redo, restore).
+   * Without this, the chart still believes the (removed) overlay is
+   * the clicked one, so the next click on the recreated overlay fires
+   * neither onSelected nor onDeselected — setClickOverlayInfo
+   * short-circuits when id + figure match — and the line looks
+   * unclickable until the user clicks empty space first (verified
+   * with a headless probe). getChartStore is not in the public types
+   * (10.1.1), so this is guarded: if a future klinecharts removes it,
+   * the reset silently no-ops and selection still recovers after one
+   * empty-space click.
+   */
+  const resetChartClickOverlay = () => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    try {
+      const store = (
+        chart as unknown as {
+          getChartStore?: () => {
+            setClickOverlayInfo?: (
+              info: {
+                paneId: string;
+                overlay: null;
+                figureType: string;
+                figureIndex: number;
+                figure: null;
+              },
+              onSelected: () => boolean,
+              onDeselected: () => boolean,
+            ) => void;
+          };
+        }
+      ).getChartStore?.();
+      store?.setClickOverlayInfo?.(
+        {
+          paneId: 'candle_pane',
+          overlay: null,
+          figureType: 'none',
+          figureIndex: -1,
+          figure: null,
+        },
+        () => false,
+        () => false,
+      );
+    } catch {
+      // Internal API unavailable — see comment above.
+    }
+  };
+
   const applySnapshot = (snapshot: SavedOverlay[]) => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -483,6 +719,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       for (const o of snapshot.filter((o) => isInView(o, interval))) {
         chart.createOverlay(overlayCreate(o));
       }
+      syncAllTextAnnotations();
+      resetChartClickOverlay();
     } finally {
       suppressSaveRef.current = false;
       restoringRef.current = false;
@@ -515,16 +753,54 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const overlayCreate = (saved: SavedOverlay): OverlayCreate => {
     const style = saved.styles ?? getLastOverlayStyle();
     const ext: Record<string, unknown> = { ...(saved.extendData ?? {}) };
-    ext.scope = saved.scope ?? 'symbol';
-    if (ext.scope === 'interval' && saved.interval) {
-      ext.interval = saved.interval;
+    // Legacy v2 fields never go back into extendData.
+    delete ext.scope;
+    delete ext.interval;
+    // Visibility + text are first-class SavedOverlay fields (v3).
+    if (saved.visibleIntervals !== undefined) {
+      ext.visibleIntervals = saved.visibleIntervals;
+    } else {
+      delete ext.visibleIntervals;
     }
-    if (saved.name === 'rectangle') {
+    if (saved.text) {
+      ext.text = saved.text;
+    } else {
+      delete ext.text;
+    }
+    const isRect = saved.name === 'rectangle';
+    const isFib = saved.name === 'fibonacciRetracement';
+    if (isRect) {
       ext.fillOpacity =
         typeof ext.fillOpacity === 'number'
           ? ext.fillOpacity
           : getLastOverlayStyle().fillOpacity;
+      ext.rectBorder = ext.rectBorder !== false;
+      ext.rectMiddleLine = ext.rectMiddleLine === true;
+      ext.rectFill = ext.rectFill === true;
     }
+    if (isFib) {
+      ext.levelColors =
+        Array.isArray(ext.levelColors) &&
+        (ext.levelColors as unknown[]).every((v) => typeof v === 'string')
+          ? ext.levelColors
+          : FIB_LEVEL_COLORS;
+      ext.fibExtend =
+        ext.fibExtend === 'left' || ext.fibExtend === 'right'
+          ? ext.fibExtend
+          : 'both';
+      ext.fibBackground = ext.fibBackground === true;
+      ext.showTrendline = ext.showTrendline === true;
+      ext.fibLevelText = ext.fibLevelText !== false;
+    }
+    // Price label (needDefaultYAxisFigure). Horizontal tools, rectangles
+    // and Fibonacci default to on; other line tools default to off.
+    const priceLabel =
+      ext.priceLabel === false
+        ? false
+        : ext.priceLabel === true
+          ? true
+          : isHorizontalTool(saved.name) || isRect || isFib;
+    ext.priceLabel = priceLabel;
     if (saved.name === MEASURE_NAME) {
       ext.intervalMs = INTERVAL_MS[intervalRef.current] ?? 0;
     }
@@ -540,9 +816,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           }
         : {}),
       mode: currentOverlayMode(),
-      ...(isHorizontalTool(saved.name)
-        ? { needDefaultYAxisFigure: true }
-        : {}),
+      needDefaultYAxisFigure: priceLabel,
       styles: stylesForOverlay(
         style,
         typeof ext.fillOpacity === 'number' ? ext.fillOpacity : undefined,
@@ -575,11 +849,50 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       onPressedMoveStart: () => {
         if (restoringRef.current) return;
         if (saved.name === MEASURE_NAME) return;
-        pushHistory();
+        // Record the pre-move snapshot; history is pushed at move end
+        // only if the overlay actually moved. A plain click on a
+        // drawing starts a press but moves nothing — pushing there
+        // would silently consume one undo step.
+        moveStartSnapshotRef.current = readMergedList(
+          symbolRef.current,
+          intervalRef.current,
+        );
       },
-      onPressedMoveEnd: () => {
+      onPressedMoveEnd: (e) => {
         if (restoringRef.current || suppressSaveRef.current) return;
+        const snapshot = moveStartSnapshotRef.current;
+        moveStartSnapshotRef.current = null;
+        if (snapshot) {
+          const before = snapshot.find((o) => o.id === e.overlay.id);
+          const after = toSavedOverlay(e.overlay);
+          if (
+            before !== undefined &&
+            after !== null &&
+            JSON.stringify(before.points) !== JSON.stringify(after.points)
+          ) {
+            undoStackRef.current.push(snapshot);
+            if (undoStackRef.current.length > MAX_HISTORY) {
+              undoStackRef.current.shift();
+            }
+            redoStackRef.current = [];
+            emitHistoryChange();
+          }
+        }
+        syncTextAnnotation(e.overlay.id);
         persistDrawings(symbolRef.current, intervalRef.current);
+      },
+      onDoubleClick: (e) => {
+        if (restoringRef.current) return;
+        if (e.overlay.name === MEASURE_NAME) return;
+        if (drawingIdRef.current === e.overlay.id) return;
+        if (
+          e.overlay.points.some(
+            (p) => p.timestamp === undefined || p.value === undefined,
+          )
+        ) {
+          return;
+        }
+        openDialogFor(e.overlay.id, 'style');
       },
       onSelected: (e) => {
         if (restoringRef.current) return;
@@ -616,7 +929,6 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         style: style.style,
         opacity: style.opacity,
       },
-      scope: 'symbol',
       extendData:
         tool === 'rectangle' ? { fillOpacity: style.fillOpacity } : undefined,
     };
@@ -648,6 +960,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         };
         chart.createOverlay(overlayCreate(saved));
       }
+      syncAllTextAnnotations();
+      resetChartClickOverlay();
     } finally {
       suppressSaveRef.current = false;
       restoringRef.current = false;
@@ -670,6 +984,19 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const line = o.styles?.line;
     const ext = (o.extendData ?? {}) as Record<string, unknown>;
     const { color, opacity } = parseLineColor(line?.color);
+    const points = (
+      o.points as Array<{ timestamp?: number; value?: number }>
+    ).filter(
+      (p): p is { timestamp: number; value: number } =>
+        p.timestamp !== undefined && p.value !== undefined,
+    );
+    const fibLevelColors = Array.isArray(ext.levelColors)
+      ? (ext.levelColors as unknown[]).map((c, i) =>
+          typeof c === 'string'
+            ? c
+            : FIB_LEVEL_COLORS[i % FIB_LEVEL_COLORS.length],
+        )
+      : [...FIB_LEVEL_COLORS];
     setSelectedState({
       id: o.id,
       name: o.name,
@@ -679,13 +1006,35 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       style: logicalLineStyle(line),
       lock: o.lock,
       visible: o.visible,
-      scope: ext.scope === 'interval' ? 'interval' : 'symbol',
+      visibleIntervals: parseVisibleIntervals(ext.visibleIntervals),
       fillOpacity:
         typeof ext.fillOpacity === 'number'
           ? ext.fillOpacity
           : DEFAULT_OVERLAY_STYLE.fillOpacity,
       isRect: o.name === 'rectangle',
       zLevel: o.zLevel ?? 0,
+      points,
+      text: parseOverlayText(ext.text),
+      extend: extendForOverlay(o.name, points),
+      priceLabel:
+        ext.priceLabel === false
+          ? false
+          : ext.priceLabel === true
+            ? true
+            : isHorizontalTool(o.name) ||
+              o.name === 'rectangle' ||
+              o.name === 'fibonacciRetracement',
+      rectBorder: ext.rectBorder !== false,
+      rectMiddleLine: ext.rectMiddleLine === true,
+      rectFill: ext.rectFill === true,
+      fibTrendline: ext.showTrendline === true,
+      fibLevelColors,
+      fibExtend:
+        ext.fibExtend === 'left' || ext.fibExtend === 'right'
+          ? ext.fibExtend
+          : 'both',
+      fibBackground: ext.fibBackground === true,
+      fibLevelText: ext.fibLevelText !== false,
     });
   };
 
@@ -706,11 +1055,33 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const next = { ...cur, ...patch };
     const ext: Record<string, unknown> = {
       ...((o.extendData ?? {}) as Record<string, unknown>),
-      scope: next.scope,
     };
-    if (next.scope === 'interval') ext.interval = intervalRef.current;
-    else delete ext.interval;
-    if (next.isRect) ext.fillOpacity = next.fillOpacity;
+    delete ext.scope;
+    delete ext.interval;
+    // overrideOverlay deep-merges extendData (klinecharts merge()),
+    // so a deleted key would survive on the live overlay: clear a
+    // field by assigning undefined, which the merge does copy over.
+    if (next.visibleIntervals !== undefined) {
+      ext.visibleIntervals = next.visibleIntervals;
+    } else {
+      ext.visibleIntervals = undefined;
+    }
+    if (next.text) ext.text = next.text;
+    else ext.text = undefined;
+    ext.priceLabel = next.priceLabel;
+    if (next.isRect) {
+      ext.rectBorder = next.rectBorder;
+      ext.rectMiddleLine = next.rectMiddleLine;
+      ext.rectFill = next.rectFill;
+      ext.fillOpacity = next.fillOpacity;
+    }
+    if (next.name === 'fibonacciRetracement') {
+      ext.levelColors = next.fibLevelColors;
+      ext.fibExtend = next.fibExtend;
+      ext.fibBackground = next.fibBackground;
+      ext.showTrendline = next.fibTrendline;
+      ext.fibLevelText = next.fibLevelText;
+    }
     chart.overrideOverlay({
       id: cur.id,
       styles: stylesForOverlay(
@@ -724,6 +1095,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ),
       lock: next.lock,
       visible: next.visible,
+      needDefaultYAxisFigure: next.priceLabel,
       extendData: ext,
       zLevel: next.zLevel,
       fixedZLevel: true,
@@ -743,7 +1115,19 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         fillOpacity: next.fillOpacity,
       });
     }
+    syncTextAnnotation(cur.id);
+    // Persist BEFORE removing a now-hidden overlay: readMergedList can
+    // only see the new visibleIntervals while it is still live; once
+    // removed, the old stored copy (still in view) would drop it.
     persistDrawings(symbolRef.current, intervalRef.current);
+    if (
+      next.visibleIntervals !== undefined &&
+      !next.visibleIntervals.includes(intervalRef.current)
+    ) {
+      chart.removeOverlay({ groupId: cur.id });
+      setSelectedState(null);
+      return;
+    }
     refreshSelected(cur.id);
   };
 
@@ -753,7 +1137,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const chart = chartRef.current;
     if (!chart) return;
     pushHistory();
-    chart.removeOverlay({ id: cur.id });
+    // groupId removes the main line and its text annotation together.
+    chart.removeOverlay({ groupId: cur.id });
     setSelectedState(null);
     persistDrawings(symbolRef.current, intervalRef.current);
   };
@@ -780,7 +1165,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       zLevel: maxZ + 1,
     };
     const id = chart.createOverlay(overlayCreate(copy));
-    if (typeof id === 'string') refreshSelected(id);
+    if (typeof id === 'string') {
+      syncTextAnnotation(id);
+      refreshSelected(id);
+    }
     persistDrawings(symbolRef.current, intervalRef.current);
   };
 
@@ -802,6 +1190,190 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       .getOverlays()
       .reduce((m, o) => Math.min(m, o.zLevel ?? 0), 0);
     applyEdit({ zLevel: min - 1 });
+  };
+
+  // ---- settings dialog (Phase 2) --------------------------------------
+
+  const [dialogDraft, setDialogDraft] = useState<OverlayDialogDraft | null>(
+    null,
+  );
+  const [dialogTab, setDialogTab] = useState<DialogTab>('style');
+  /** Loaded candles at dialog-open time (coordinates tab: bar -> date). */
+  const [dialogBars, setDialogBars] = useState<Array<{ timestamp: number }>>(
+    [],
+  );
+  const dialogOpenRef = useRef(false);
+
+  /** Build the dialog draft from the live overlay (same fields as
+   *  refreshSelected, plus the current points for the coordinates tab). */
+  const dialogDraftFromSelected = (
+    cur: SelectedOverlayState,
+  ): OverlayDialogDraft => ({
+    color: cur.color,
+    opacity: cur.opacity,
+    size: cur.size,
+    style: cur.style,
+    extend: cur.extend,
+    priceLabel: cur.priceLabel,
+    rectBorder: cur.rectBorder,
+    rectMiddleLine: cur.rectMiddleLine,
+    rectFill: cur.rectFill,
+    fillOpacity: cur.fillOpacity,
+    fibTrendline: cur.fibTrendline,
+    fibLevelColors: [...cur.fibLevelColors],
+    fibExtend: cur.fibExtend,
+    fibBackground: cur.fibBackground,
+    fibLevelText: cur.fibLevelText,
+    text: cur.text ? { ...cur.text } : null,
+    points: cur.points.map((p) => ({ ...p })),
+    visibleIntervals: cur.visibleIntervals
+      ? [...cur.visibleIntervals]
+      : undefined,
+  });
+
+  const openDialogFor = (id: string, tab: DialogTab) => {
+    refreshSelected(id);
+    const cur = selectedRef.current;
+    if (!cur || cur.id !== id) return;
+    setDialogBars(chartRef.current?.getDataList() ?? []);
+    setDialogTab(tab);
+    setDialogDraft(dialogDraftFromSelected(cur));
+    dialogOpenRef.current = true;
+  };
+
+  const closeDialog = () => {
+    setDialogDraft(null);
+    dialogOpenRef.current = false;
+  };
+
+  /**
+   * Apply a confirmed dialog draft as one history step: style/price
+   * label/rect/fib options via overrideOverlay, coordinates via
+   * overrideOverlay points, visibility via visibleIntervals, and an
+   * extend change via delete + recreate (same id, points and styles,
+   * new name). Persist BEFORE removing a now-hidden overlay (see
+   * applyEdit).
+   */
+  const applyDialog = (draft: OverlayDialogDraft) => {
+    const cur = selectedRef.current;
+    if (!cur) return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    const o = chart.getOverlays({ id: cur.id })[0];
+    if (!o) {
+      setSelectedState(null);
+      return;
+    }
+    pushHistory();
+    const family: LineFamily | null = lineFamilyOf(o.name);
+    const currentExtend = extendForOverlay(
+      o.name,
+      o.points as Array<{ timestamp: number; value: number }>,
+    );
+    const ext: Record<string, unknown> = {
+      ...((o.extendData ?? {}) as Record<string, unknown>),
+    };
+    delete ext.scope;
+    delete ext.interval;
+    // overrideOverlay deep-merges extendData (see applyEdit).
+    if (draft.visibleIntervals !== undefined) {
+      ext.visibleIntervals = draft.visibleIntervals;
+    } else {
+      ext.visibleIntervals = undefined;
+    }
+    if (draft.text) ext.text = draft.text;
+    else ext.text = undefined;
+    ext.priceLabel = draft.priceLabel;
+    if (o.name === 'rectangle') {
+      ext.rectBorder = draft.rectBorder;
+      ext.rectMiddleLine = draft.rectMiddleLine;
+      ext.rectFill = draft.rectFill;
+      ext.fillOpacity = draft.fillOpacity;
+    }
+    if (o.name === 'fibonacciRetracement') {
+      ext.levelColors = draft.fibLevelColors;
+      ext.fibExtend = draft.fibExtend;
+      ext.fibBackground = draft.fibBackground;
+      ext.showTrendline = draft.fibTrendline;
+      ext.fibLevelText = draft.fibLevelText;
+    }
+    const points = draft.points.map((p) => ({
+      timestamp: p.timestamp,
+      value: p.value,
+    }));
+    const styles = stylesForOverlay(
+      {
+        color: draft.color,
+        size: draft.size,
+        style: draft.style,
+        opacity: draft.opacity,
+      },
+      draft.fillOpacity,
+    );
+    if (family !== null && draft.extend !== currentExtend) {
+      // Extend changes the overlay name: delete + recreate, keeping the
+      // same id, points and styles, ordered so the ray still points
+      // from p0 through p1.
+      const ordered = orderPointsForExtend(points, draft.extend, family);
+      const newName = overlayNameForExtend(family, draft.extend);
+      const recreate: SavedOverlay = {
+        id: cur.id,
+        name: newName,
+        points: ordered,
+        styles: {
+          color: draft.color,
+          size: draft.size,
+          style: draft.style,
+          opacity: draft.opacity,
+        },
+        lock: o.lock || undefined,
+        visible: o.visible === false ? false : undefined,
+        extendData: ext,
+        visibleIntervals: draft.visibleIntervals
+          ? [...draft.visibleIntervals]
+          : undefined,
+        text: draft.text ? { ...draft.text } : undefined,
+        zLevel: o.zLevel ?? 0,
+      };
+      suppressSaveRef.current = true;
+      chart.removeOverlay({ groupId: cur.id });
+      suppressSaveRef.current = false;
+      chart.createOverlay(overlayCreate(recreate));
+      syncTextAnnotation(cur.id);
+    } else {
+      chart.overrideOverlay({
+        id: cur.id,
+        points,
+        styles,
+        lock: o.lock,
+        visible: o.visible,
+        needDefaultYAxisFigure: draft.priceLabel,
+        extendData: ext,
+        zLevel: o.zLevel ?? 0,
+        fixedZLevel: true,
+      });
+      syncTextAnnotation(cur.id);
+    }
+    saveLastOverlayStyle({
+      color: draft.color,
+      size: draft.size,
+      style: draft.style,
+      opacity: draft.opacity,
+      fillOpacity: draft.fillOpacity,
+    });
+    // Persist BEFORE removing a now-hidden overlay (see applyEdit).
+    persistDrawings(symbolRef.current, intervalRef.current);
+    if (
+      draft.visibleIntervals !== undefined &&
+      !draft.visibleIntervals.includes(intervalRef.current)
+    ) {
+      chart.removeOverlay({ groupId: cur.id });
+      setSelectedState(null);
+      closeDialog();
+      return;
+    }
+    refreshSelected(cur.id);
+    closeDialog();
   };
 
   useImperativeHandle(ref, () => ({
@@ -868,6 +1440,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerRectangleOverlay();
     registerFibonacciRetracementOverlay();
     registerMeasureOverlay();
+    registerTextAnnotationOverlay();
 
     const chart = init(container, { styles: DARK_STYLES });
     if (!chart) return;
@@ -1104,15 +1677,24 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   useEffect(() => {
     const isEditableTarget = (t: EventTarget | null): boolean => {
       const el = t as HTMLElement | null;
-      return (
-        !!el &&
-        (el.tagName === 'INPUT' ||
-          el.tagName === 'TEXTAREA' ||
-          el.tagName === 'SELECT' ||
-          el.isContentEditable)
-      );
+      if (!el) return false;
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable) {
+        return true;
+      }
+      if (el.tagName === 'INPUT') {
+        // Checkbox/radio toggles hold focus after a label click but
+        // take no text input: shortcuts (Delete, Ctrl+Z) must still
+        // work while one is focused.
+        const type = (el as HTMLInputElement).type;
+        return type !== 'checkbox' && type !== 'radio';
+      }
+      return false;
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      // While the settings dialog is open, its own key handling owns
+      // Escape/Delete/Backspace/Ctrl+Z (the dialog root stops
+      // propagation); never let a chart shortcut fire behind it.
+      if (dialogOpenRef.current) return;
       if (isEditableTarget(e.target)) return;
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -1425,49 +2007,18 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             </span>
           </button>
           <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
-          {selected.isRect && (
-            <label className="flex items-center gap-1">
-              填色
-              <input
-                type="range"
-                min={0.05}
-                max={0.4}
-                step={0.05}
-                value={selected.fillOpacity}
-                onPointerDown={() => {
-                  if (!sliderHistoryPushedRef.current) {
-                    sliderHistoryPushedRef.current = true;
-                    pushHistory();
-                  }
-                }}
-                onFocus={() => {
-                  if (!sliderHistoryPushedRef.current) {
-                    sliderHistoryPushedRef.current = true;
-                    pushHistory();
-                  }
-                }}
-                onChange={(e) =>
-                  applyEdit({ fillOpacity: Number(e.target.value) }, false)
-                }
-                onPointerUp={() => {
-                  sliderHistoryPushedRef.current = false;
-                }}
-                onBlur={() => {
-                  sliderHistoryPushedRef.current = false;
-                }}
-                className="w-16 accent-[#2962ff]"
-              />
-              <span className="w-8 text-right">
-                {Math.round(selected.fillOpacity * 100)}%
-              </span>
-            </label>
-          )}
           <label className="flex items-center gap-1">
             <input
               type="checkbox"
-              checked={selected.scope === 'interval'}
+              checked={
+                selected.visibleIntervals !== undefined &&
+                selected.visibleIntervals.length === 1 &&
+                selected.visibleIntervals[0] === interval
+              }
               onChange={(e) =>
-                applyEdit({ scope: e.target.checked ? 'interval' : 'symbol' })
+                applyEdit({
+                  visibleIntervals: e.target.checked ? [interval] : undefined,
+                })
               }
               className="accent-[#2962ff]"
             />
@@ -1489,6 +2040,22 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             }`}
           >
             •••
+          </button>
+          <button
+            title="設定"
+            aria-label="設定"
+            onClick={() => openDialogFor(selected.id, 'style')}
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10"
+          >
+            ✏️
+          </button>
+          <button
+            title="文字"
+            aria-label="文字"
+            onClick={() => openDialogFor(selected.id, 'text')}
+            className="rounded-sm px-1.5 py-0.5 font-semibold hover:bg-white/10"
+          >
+            T
           </button>
           <button
             onClick={deleteSelected}
@@ -1593,6 +2160,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             </div>
           )}
         </div>
+      )}
+      {dialogDraft !== null && selected !== null && (
+        <OverlaySettingsDialog
+          toolName={selected.name}
+          initial={dialogDraft}
+          bars={dialogBars}
+          initialTab={dialogTab}
+          onConfirm={applyDialog}
+          onClose={closeDialog}
+        />
       )}
     </div>
   );

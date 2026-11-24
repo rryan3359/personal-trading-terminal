@@ -22,9 +22,20 @@
  *   rectangle            -> opposite corners, styles read from the overlay
  *   fibonacciRetracement -> per-level colours, levels via extendData.levels
  *   measure              -> two points, stats text, never persisted
+ *   textAnnotation       -> one point, text label from extendData.text,
+ *                           never persisted; its label uses the "textNoHit"
+ *                           figure (built-in text draw, never hit-tested)
+ *                           so clicks pass through to the main line.
  */
 
-import { registerOverlay, type DeepPartial, type Styles } from 'klinecharts';
+import {
+  registerFigure,
+  registerOverlay,
+  type DeepPartial,
+  type Styles,
+  type TextAttrs,
+  type TextStyle,
+} from 'klinecharts';
 
 export const DARK_STYLES: DeepPartial<Styles> = {
   grid: {
@@ -111,10 +122,14 @@ let rectangleRegistered = false;
  * border colour at extendData.fillOpacity), so the edit bar can change
  * them per overlay. Corner control points are the library's default
  * point figures (needDefaultPointFigure) — draggable while selected.
+ * extendData options (Phase 2 dialog): rectBorder (default true),
+ * rectFill (default true), rectMiddleLine (default false), text
+ * (OverlayText-like, rendered as an in-box label).
  */
 export function registerRectangleOverlay(): void {
   if (rectangleRegistered) return;
   rectangleRegistered = true;
+  registerTextNoHitFigure();
 
   registerOverlay({
     name: 'rectangle',
@@ -138,17 +153,57 @@ export function registerRectangleOverlay(): void {
       const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
       const fillOpacity =
         typeof ext.fillOpacity === 'number' ? ext.fillOpacity : 0.08;
-      return {
-        type: 'rect',
-        attrs: { x, y, width, height },
-        styles: {
-          style: 'stroke_fill',
-          color: hexToRgba(border, fillOpacity),
-          borderColor: border,
-          borderSize: size,
-          borderStyle,
-        },
-      };
+      const showBorder = ext.rectBorder !== false;
+      const showFill = ext.rectFill !== false;
+      const showMiddleLine = ext.rectMiddleLine === true;
+      const figures: Array<Record<string, unknown>> = [];
+      if (showBorder || showFill) {
+        figures.push({
+          type: 'rect',
+          attrs: { x, y, width, height },
+          styles: {
+            style:
+              showBorder && showFill
+                ? 'stroke_fill'
+                : showBorder
+                  ? 'stroke'
+                  : 'fill',
+            color: hexToRgba(border, fillOpacity),
+            borderColor: border,
+            borderSize: size,
+            borderStyle,
+          },
+        });
+      }
+      if (showMiddleLine) {
+        figures.push({
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x, y: y + height / 2 },
+              { x: x + width, y: y + height / 2 },
+            ],
+          },
+          styles: { color: border, size: 1, style: borderStyle },
+        });
+      }
+      const text = ext.text as OverlayTextLike | undefined;
+      if (text && typeof text.content === 'string' && text.content.length > 0) {
+        const tx =
+          text.alignH === 'left'
+            ? x + 6
+            : text.alignH === 'right'
+              ? x + width - 6
+              : x + width / 2;
+        const ty =
+          text.alignV === 'top'
+            ? y + 6
+            : text.alignV === 'bottom'
+              ? y + height - 6
+              : y + height / 2;
+        figures.push(...textFigures(text.content, tx, ty, text));
+      }
+      return figures as never;
     },
   });
 }
@@ -157,7 +212,7 @@ export function registerRectangleOverlay(): void {
 export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 
 /** One colour per level, in FIB_LEVELS order. */
-const FIB_LEVEL_COLORS = [
+export const FIB_LEVEL_COLORS = [
   '#787b86',
   '#26a69a',
   '#2962ff',
@@ -167,6 +222,216 @@ const FIB_LEVEL_COLORS = [
   '#787b86',
 ];
 
+type OverlayTextLike = {
+  content: string;
+  color?: string;
+  size?: number;
+  bold?: boolean;
+  italic?: boolean;
+  alignV?: string;
+  alignH?: string;
+};
+
+/**
+ * Canvas font weight slot for a text style. klinecharts builds the font
+ * as `${weight} ${size}px ${family}` with no italic slot, so italic is
+ * expressed through the weight string itself ('italic' / 'italic bold'
+ * are valid CSS font shorthands).
+ */
+function textWeightOf(t: OverlayTextLike): string {
+  if (t.bold && t.italic) return 'italic bold';
+  if (t.bold) return 'bold';
+  if (t.italic) return 'italic';
+  return 'normal';
+}
+
+/**
+ * Text figures for one (possibly multi-line) label, anchored at (x, y).
+ * alignH/alignV place the whole block relative to the anchor: top puts
+ * the block's top at y, middle centers it on y, bottom puts its bottom
+ * at y. Lines stack downward at 1.4x the font size.
+ */
+function textFigures(
+  content: string,
+  x: number,
+  y: number,
+  t: OverlayTextLike,
+): Array<Record<string, unknown>> {
+  const lines = content.split('\n');
+  const size = typeof t.size === 'number' && t.size > 0 ? t.size : 12;
+  const lh = Math.round(size * 1.4);
+  const blockH = lines.length * lh;
+  const topY =
+    t.alignV === 'top'
+      ? y
+      : t.alignV === 'bottom'
+        ? y - blockH
+        : y - blockH / 2;
+  const align =
+    t.alignH === 'left' || t.alignH === 'right' ? t.alignH : 'center';
+  const styles = {
+    color: typeof t.color === 'string' ? t.color : '#d1d4dc',
+    size,
+    weight: textWeightOf(t),
+  };
+  return lines.map((line, i) => ({
+    type: 'textNoHit',
+    attrs: { x, y: topY + i * lh, text: line, align, baseline: 'top' },
+    styles,
+  }));
+}
+
+/**
+ * "textNoHit": the built-in "text" figure, but never hit-testable.
+ *
+ * Why: v10.1.1's figure event system ignores `isCheckEvent: false`
+ * (it only gates on `figure.ignoreEvent`, and even that does not stop
+ * setClickOverlayInfo from selecting the overlay). A text annotation's
+ * label sits on its main line's midpoint, so a hittable label steals
+ * the main line's clicks: a single click deselects the main line and a
+ * double-click never reaches the main line's onDoubleClick (verified
+ * with a headless probe: click at the midpoint hid the floating bar,
+ * click at 1/4 along the line kept it). checkEventOn: () => false
+ * makes the label purely visual — clicks pass through to the drawing
+ * underneath. draw is a faithful copy of the built-in text draw
+ * (drawText / getTextRect / createFont / calcTextWidth in the
+ * installed bundle); only the hit test differs.
+ */
+let textNoHitRegistered = false;
+
+function textNoHitFont(
+  size: number,
+  weight: string | number,
+  family?: string,
+): string {
+  return `${weight ?? 'normal'} ${size ?? 12}px ${family ?? 'Helvetica Neue'}`;
+}
+
+let textNoHitMeasureCtx: CanvasRenderingContext2D | null = null;
+
+function textNoHitWidth(
+  text: string,
+  size: number,
+  weight: string | number,
+  family?: string,
+): number {
+  if (textNoHitMeasureCtx === null) {
+    const canvas = document.createElement('canvas');
+    textNoHitMeasureCtx = canvas.getContext('2d');
+  }
+  if (textNoHitMeasureCtx === null) return text.length * size * 0.6;
+  textNoHitMeasureCtx.font = textNoHitFont(size, weight, family);
+  return Math.round(textNoHitMeasureCtx.measureText(text).width);
+}
+
+function textNoHitRect(
+  attrs: TextAttrs,
+  styles: Partial<TextStyle>,
+): { x: number; y: number; width: number; height: number } {
+  const size = styles.size ?? 12;
+  const weight = styles.weight ?? 'normal';
+  const paddingLeft = styles.paddingLeft ?? 0;
+  const paddingTop = styles.paddingTop ?? 0;
+  const paddingRight = styles.paddingRight ?? 0;
+  const paddingBottom = styles.paddingBottom ?? 0;
+  const width =
+    attrs.width ??
+    paddingLeft +
+      textNoHitWidth(attrs.text, size, weight, styles.family) +
+      paddingRight;
+  const height = attrs.height ?? paddingTop + size + paddingBottom;
+  let startX = attrs.x;
+  if (attrs.align === 'right' || attrs.align === 'end') {
+    startX = attrs.x - width;
+  } else if (attrs.align !== 'left' && attrs.align !== 'start') {
+    startX = attrs.x - width / 2;
+  }
+  let startY = attrs.y;
+  if (
+    attrs.baseline === 'bottom' ||
+    attrs.baseline === 'ideographic' ||
+    attrs.baseline === 'alphabetic'
+  ) {
+    startY = attrs.y - height;
+  } else if (attrs.baseline !== 'top' && attrs.baseline !== 'hanging') {
+    startY = attrs.y - height / 2;
+  }
+  return { x: startX, y: startY, width, height };
+}
+
+export function registerTextNoHitFigure(): void {
+  if (textNoHitRegistered) return;
+  textNoHitRegistered = true;
+  registerFigure<TextAttrs | TextAttrs[], Partial<TextStyle>>({
+    name: 'textNoHit',
+    checkEventOn: () => false,
+    draw: (ctx, attrs, styles) => {
+      const texts = Array.isArray(attrs) ? attrs : [attrs];
+      const size = styles.size ?? 12;
+      const weight = styles.weight ?? 'normal';
+      const color = styles.color ?? 'currentColor';
+      const paddingLeft = styles.paddingLeft ?? 0;
+      const paddingTop = styles.paddingTop ?? 0;
+      const paddingRight = styles.paddingRight ?? 0;
+      const rects = texts.map((t) => textNoHitRect(t, styles));
+      if (styles.backgroundColor !== undefined) {
+        ctx.fillStyle = styles.backgroundColor;
+        rects.forEach((r) => ctx.fillRect(r.x, r.y, r.width, r.height));
+      }
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.font = textNoHitFont(size, weight, styles.family);
+      ctx.fillStyle = color;
+      texts.forEach((text, i) => {
+        const rect = rects[i];
+        ctx.fillText(
+          text.text,
+          rect.x + paddingLeft,
+          rect.y + paddingTop,
+          rect.width - paddingLeft - paddingRight,
+        );
+      });
+    },
+  });
+}
+
+let textAnnotationRegistered = false;
+
+/**
+ * Register the custom "textAnnotation" overlay once per page load.
+ * One point (the anchor) + a text label from extendData.text
+ * ({content, color, size, bold, italic, alignV, alignH}). The label is
+ * passive: no control points, no axis figures, and its text figure
+ * ignores pointer events, so it can never be grabbed or selected.
+ * The built-in simpleAnnotation cannot do this — it hardcodes a 50px
+ * arrow + centered text above the point with no size/bold/italic/
+ * alignment control — so the dialog's text rendering uses this custom
+ * overlay instead, with the same lifecycle (same groupId as its main
+ * line, rebuilt from the main line's text, never persisted on its own).
+ */
+export function registerTextAnnotationOverlay(): void {
+  if (textAnnotationRegistered) return;
+  textAnnotationRegistered = true;
+  registerTextNoHitFigure();
+
+  registerOverlay({
+    name: 'textAnnotation',
+    totalStep: 2,
+    needDefaultPointFigure: false,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 1) return [];
+      const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+      const text = ext.text as OverlayTextLike | undefined;
+      if (!text || typeof text.content !== 'string' || text.content.length === 0)
+        return [];
+      const anchor = coordinates[0];
+      return textFigures(text.content, anchor.x, anchor.y, text) as never;
+    },
+  });
+}
+
 let fibonacciRegistered = false;
 
 /**
@@ -174,6 +439,11 @@ let fibonacciRegistered = false;
  * Same levels and "price (xx.x%)" labels as the built-in fibonacciLine,
  * but each level is its own line figure with its own colour. Levels come
  * from extendData.levels when present, otherwise FIB_LEVELS.
+ * Phase 2 dialog options (all in extendData, defaults preserve the old
+ * look): levelColors (per-level colours), fibExtend ('left' | 'right' |
+ * 'both', default 'both' = full width), fibBackground (fill the 0–100%
+ * range, default false), showTrendline (diagonal p0 -> p1, default
+ * false), fibLevelText (show the level labels, default true).
  */
 export function registerFibonacciRetracementOverlay(): void {
   if (fibonacciRegistered) return;
@@ -198,42 +468,81 @@ export function registerFibonacciRetracementOverlay(): void {
         (ext.levels as unknown[]).every((v) => typeof v === 'number')
           ? (ext.levels as number[])
           : FIB_LEVELS;
+      const levelColors = Array.isArray(ext.levelColors)
+        ? (ext.levelColors as unknown[])
+        : [];
       const lineSize = overlay.styles?.line?.size ?? 1;
       const lineStyle = overlay.styles?.line?.style ?? 'solid';
+      const lineColor = overlay.styles?.line?.color ?? '#2962ff';
       const yDif = coordinates[0].y - coordinates[1].y;
       const v0 = p0.value;
       const v1 = p1.value;
       const valueDif = v0 - v1;
+      const minX = Math.min(coordinates[0].x, coordinates[1].x);
+      const maxX = Math.max(coordinates[0].x, coordinates[1].x);
+      const fibExtend = ext.fibExtend === 'left' ? 'left' : ext.fibExtend === 'right' ? 'right' : 'both';
+      const xStart = fibExtend === 'right' ? minX : 0;
+      const xEnd = fibExtend === 'left' ? maxX : bounding.width;
       const figures: Array<Record<string, unknown>> = [];
+      if (ext.fibBackground === true) {
+        const fillOpacity =
+          typeof ext.fillOpacity === 'number' ? ext.fillOpacity : 0.08;
+        figures.push({
+          type: 'rect',
+          attrs: {
+            x: xStart,
+            y: Math.min(coordinates[0].y, coordinates[1].y),
+            width: Math.max(1, xEnd - xStart),
+            height: Math.abs(coordinates[0].y - coordinates[1].y),
+          },
+          styles: {
+            style: 'fill',
+            color: hexToRgba(lineColor, fillOpacity),
+          },
+        });
+      }
+      if (ext.showTrendline === true) {
+        figures.push({
+          type: 'line',
+          attrs: [{ coordinates: [coordinates[0], coordinates[1]] }],
+          styles: { color: lineColor, size: lineSize, style: lineStyle },
+        });
+      }
+      const showLevelText = ext.fibLevelText !== false;
       levels.forEach((percent, i) => {
         const y = coordinates[1].y + yDif * percent;
         const value = v1 + valueDif * percent;
-        const color = FIB_LEVEL_COLORS[i % FIB_LEVEL_COLORS.length];
+        const color =
+          typeof levelColors[i] === 'string'
+            ? (levelColors[i] as string)
+            : FIB_LEVEL_COLORS[i % FIB_LEVEL_COLORS.length];
         figures.push({
           type: 'line',
           attrs: [
             {
               coordinates: [
-                { x: 0, y },
-                { x: bounding.width, y },
+                { x: xStart, y },
+                { x: xEnd, y },
               ],
             },
           ],
           styles: { color, size: lineSize, style: lineStyle },
         });
-        figures.push({
-          type: 'text',
-          isCheckEvent: false,
-          attrs: [
-            {
-              x: 0,
-              y,
-              text: `${value.toFixed(precision)} (${(percent * 100).toFixed(1)}%)`,
-              baseline: 'bottom',
-            },
-          ],
-          styles: { color },
-        });
+        if (showLevelText) {
+          figures.push({
+            type: 'text',
+            isCheckEvent: false,
+            attrs: [
+              {
+                x: xStart,
+                y,
+                text: `${value.toFixed(precision)} (${(percent * 100).toFixed(1)}%)`,
+                baseline: 'bottom',
+              },
+            ],
+            styles: { color },
+          });
+        }
       });
       return figures as never;
     },

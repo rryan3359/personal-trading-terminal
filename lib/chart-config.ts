@@ -47,6 +47,130 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'measure', label: '量測' },
 ];
 
+/** Line style ids. 'dotted' renders as dashed + dashedValue [1, 4]
+ *  (klinecharts LineType is solid|dashed). */
+export type LineStyleId = 'solid' | 'dashed' | 'dotted';
+
+export const LINE_STYLE_OPTIONS: Array<{ id: LineStyleId; label: string }> = [
+  { id: 'solid', label: '實線' },
+  { id: 'dashed', label: '短虛線' },
+  { id: 'dotted', label: '點虛線' },
+];
+
+/**
+ * Extend direction for line overlays. 'up'/'down' are the vertical
+ * family's options (a vertical ray extends up or down); the diagonal
+ * and horizontal families use 'left'/'right'.
+ */
+export type ExtendId = 'none' | 'left' | 'right' | 'up' | 'down' | 'both';
+
+/** Line families that support the extend option. */
+export type LineFamily = 'line' | 'horizontal' | 'vertical';
+
+export function lineFamilyOf(name: string): LineFamily | null {
+  if (name === 'segment' || name === 'straightLine' || name === 'rayLine')
+    return 'line';
+  if (name.startsWith('horizontal')) return 'horizontal';
+  if (name.startsWith('vertical')) return 'vertical';
+  return null;
+}
+
+/** Overlay name for a line family + extend option. */
+export function overlayNameForExtend(
+  family: LineFamily,
+  extend: ExtendId,
+): string {
+  switch (family) {
+    case 'line':
+      return extend === 'none'
+        ? 'segment'
+        : extend === 'both'
+          ? 'straightLine'
+          : 'rayLine';
+    case 'horizontal':
+      return extend === 'none'
+        ? 'horizontalSegment'
+        : extend === 'both'
+          ? 'horizontalStraightLine'
+          : 'horizontalRayLine';
+    case 'vertical':
+      return extend === 'none'
+        ? 'verticalSegment'
+        : extend === 'both'
+          ? 'verticalStraightLine'
+          : 'verticalRayLine';
+  }
+}
+
+/**
+ * Derive the extend option from an overlay name + point order. A ray
+ * runs from p0 toward p1, so the direction follows the point order.
+ */
+export function extendForOverlay(
+  name: string,
+  points: Array<{ timestamp: number; value: number }>,
+): ExtendId {
+  const family = lineFamilyOf(name);
+  if (!family) return 'none';
+  if (
+    name === 'segment' ||
+    name === 'horizontalSegment' ||
+    name === 'verticalSegment'
+  )
+    return 'none';
+  if (
+    name === 'straightLine' ||
+    name === 'horizontalStraightLine' ||
+    name === 'verticalStraightLine'
+  )
+    return 'both';
+  if (points.length < 2) return 'right';
+  const [p0, p1] = points;
+  if (family === 'vertical') return p1.value > p0.value ? 'up' : 'down';
+  return p1.timestamp > p0.timestamp ? 'right' : 'left';
+}
+
+/**
+ * Order the two points for an extend option. Ray direction follows
+ * p0 -> p1, so 'left' puts the later point first (ray extends left),
+ * 'right' the earlier first; vertical 'up' puts the lower value first
+ * (ray extends up), 'down' the higher first. 'none'/'both' normalise
+ * to earlier-first.
+ */
+export function orderPointsForExtend(
+  points: Array<{ timestamp: number; value: number }>,
+  extend: ExtendId,
+  family: LineFamily,
+): Array<{ timestamp: number; value: number }> {
+  if (points.length < 2) return points;
+  const [a, b] = points;
+  if (family === 'vertical') {
+    if (extend === 'up') return a.value <= b.value ? [a, b] : [b, a];
+    if (extend === 'down') return a.value >= b.value ? [a, b] : [b, a];
+    return a.timestamp <= b.timestamp ? [a, b] : [b, a];
+  }
+  if (extend === 'left') return a.timestamp >= b.timestamp ? [a, b] : [b, a];
+  return a.timestamp <= b.timestamp ? [a, b] : [b, a];
+}
+
+/** Settings-dialog titles by overlay name (covers the segment variants
+ *  too, which are not toolbar tools). */
+export const TOOL_LABELS_BY_NAME: Record<string, string> = {
+  segment: '趨勢線',
+  straightLine: '延伸線',
+  rayLine: '射線',
+  horizontalStraightLine: '水平線',
+  horizontalRayLine: '水平射線',
+  horizontalSegment: '水平線',
+  verticalStraightLine: '垂直線',
+  verticalRayLine: '垂直線',
+  verticalSegment: '垂直線',
+  parallelStraightLine: '平行通道',
+  fibonacciRetracement: '斐波那契',
+  rectangle: '矩形',
+  measure: '量測',
+};
+
 /** Indicators offered in the toolbar (all are klinecharts built-ins). */
 export const INDICATOR_OPTIONS: Array<{ id: string; label: string; mainPane: boolean }> = [
   { id: 'MA', label: 'MA', mainPane: true },
