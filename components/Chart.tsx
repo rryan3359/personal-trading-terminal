@@ -71,14 +71,17 @@ import {
   hexToRgba,
   isFibTool,
   isGannTool,
+  isPatternTool,
   isPitchforkTool,
   pitchExtendOf,
   pitchOptionsOf,
+  patternOptionsOf,
   registerFibonacciRetracementOverlay,
   registerFibonacciToolsOverlays,
   registerGannOverlays,
   registerGeometryOverlays,
   registerMeasureOverlay,
+  registerPatternOverlays,
   registerPitchforkOverlays,
   registerRectangleOverlay,
   registerSimpleTagOverlay,
@@ -248,6 +251,11 @@ interface SelectedOverlayState {
   gannShowDiagonal: boolean;
   gannShowMidlines: boolean;
   gannShowLabels: boolean;
+  /** Pattern tools: point labels, neckline, dashed AD/XD, ratios. */
+  patternShowLabels: boolean;
+  patternShowNeckline: boolean;
+  patternShowDashed: boolean;
+  patternShowRatios: boolean;
 }
 
 /** Horizontal tools show their price on the right Y axis. */
@@ -965,6 +973,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.gannShowMidlines = opts.showMidlines;
       ext.gannShowLabels = opts.showLabels;
     }
+    if (isPatternTool(saved.name)) {
+      const opts = patternOptionsOf({ extendData: ext });
+      ext.patternShowLabels = opts.showLabels;
+      ext.patternShowNeckline = opts.showNeckline;
+      ext.patternShowDashed = opts.showDashed;
+      ext.patternShowRatios = opts.showRatios;
+    }
     // Price label (needDefaultYAxisFigure). Horizontal tools, rectangles
     // and Fibonacci default to on; other line tools default to off;
     // simpleTag's own Y-axis tag already shows the price (see
@@ -1213,6 +1228,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           showMidlines: false,
           showLabels: true,
         };
+    const patternOpts = isPatternTool(o.name)
+      ? patternOptionsOf({ extendData: ext })
+      : {
+          showLabels: true,
+          showNeckline: true,
+          showDashed: true,
+          showRatios: true,
+        };
     setSelectedState({
       id: o.id,
       name: o.name,
@@ -1261,6 +1284,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       gannShowDiagonal: gannOpts.showDiagonal,
       gannShowMidlines: gannOpts.showMidlines,
       gannShowLabels: gannOpts.showLabels,
+      patternShowLabels: patternOpts.showLabels,
+      patternShowNeckline: patternOpts.showNeckline,
+      patternShowDashed: patternOpts.showDashed,
+      patternShowRatios: patternOpts.showRatios,
     });
   };
 
@@ -1356,6 +1383,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.gannShowDiagonal = next.gannShowDiagonal;
       ext.gannShowMidlines = next.gannShowMidlines;
       ext.gannShowLabels = next.gannShowLabels;
+    }
+    if (isPatternTool(next.name)) {
+      ext.patternShowLabels = next.patternShowLabels;
+      ext.patternShowNeckline = next.patternShowNeckline;
+      ext.patternShowDashed = next.patternShowDashed;
+      ext.patternShowRatios = next.patternShowRatios;
     }
     chart.overrideOverlay({
       id: cur.id,
@@ -1521,6 +1554,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     gannShowDiagonal: cur.gannShowDiagonal,
     gannShowMidlines: cur.gannShowMidlines,
     gannShowLabels: cur.gannShowLabels,
+    patternShowLabels: cur.patternShowLabels,
+    patternShowNeckline: cur.patternShowNeckline,
+    patternShowDashed: cur.patternShowDashed,
+    patternShowRatios: cur.patternShowRatios,
     text: cur.text ? { ...cur.text } : null,
     points: cur.points.map((p) => ({ ...p })),
     visibleIntervals: cur.visibleIntervals
@@ -1656,6 +1693,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.gannShowDiagonal = draft.gannShowDiagonal;
       ext.gannShowMidlines = draft.gannShowMidlines;
       ext.gannShowLabels = draft.gannShowLabels;
+    }
+    if (isPatternTool(o.name)) {
+      ext.patternShowLabels = draft.patternShowLabels;
+      ext.patternShowNeckline = draft.patternShowNeckline;
+      ext.patternShowDashed = draft.patternShowDashed;
+      ext.patternShowRatios = draft.patternShowRatios;
     }
     const points = draft.points.map((p) => ({
       timestamp: p.timestamp,
@@ -1823,6 +1866,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerFibonacciToolsOverlays();
     registerPitchforkOverlays();
     registerGannOverlays();
+    registerPatternOverlays();
     registerMeasureOverlay();
     registerTextAnnotationOverlay();
     registerSimpleTagOverlay();

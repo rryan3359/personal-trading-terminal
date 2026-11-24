@@ -90,6 +90,20 @@
  *                           diagonals + price / date scale labels
  *   gannBox              -> 2 points (opposite corners), 3x3 grid +
  *                           diagonals + midlines + scale labels
+ *   Pattern batch (TV-only tools; options in extendData —
+ *   patternShowLabels / patternShowNeckline / patternShowDashed /
+ *   patternShowRatios):
+ *   headShoulders        -> 5 points (LS, H, RS, neckline L, neckline
+ *                           R): polyline LS-H-RS + dashed neckline
+ *   elliottImpulse       -> 6 points (0-5): 5-segment polyline
+ *   elliottCorrection    -> 4 points (0, A, B, C): 3-segment polyline
+ *   abcdPattern          -> 4 points (A, B, C, D): AB, BC, CD +
+ *                           dashed AD
+ *   xabcdPattern         -> 5 points (X, A, B, C, D): XA, AB, BC, CD
+ *                           + dashed XD + optional retracement % at
+ *                           each segment midpoint
+ *   threeDrives          -> 6 points (drive, retrace x3): polyline,
+ *                           the three drive points labelled 1/2/3
  */
 
 import {
@@ -2310,5 +2324,268 @@ export function registerGannOverlays(): void {
     needDefaultYAxisFigure: true,
     createPointFigures: ({ chart, coordinates, overlay }) =>
       gannGridFigures(chart, coordinates, overlay, 'gannBox') as never,
+  });
+}
+
+// ---- pattern batch (TV-only tools) ------------------------------------
+
+/**
+ * Pattern tools: 6 TV-only tools, all custom overlays (klinecharts
+ * has no built-ins for them). Every one is a multi-point polyline
+ * through its anchor points (pixel space) plus point labels drawn
+ * with the registered 'textNoHit' figure (never hittable, no
+ * background chip — the built-in 'text' figure paints the label
+ * rect in the overlay's line colour, which is why Gann labels use
+ * textNoHit too). Labels sit above local price highs and below
+ * local price lows (pixel y grows downward), so they stay off the
+ * line. The head-and-shoulders main polyline runs LS-H-RS only;
+ * its neckline is a separate dashed segment through the last two
+ * points. ABCD / XABCD likewise get a dashed AD / XD segment.
+ * Options in extendData:
+ *   patternShowLabels   -> point labels on/off (default true)
+ *   patternShowNeckline -> the head-and-shoulders neckline
+ *                          (default true)
+ *   patternShowDashed   -> the AD / XD dashed line (default true)
+ *   patternShowRatios   -> the XABCD retracement % labels at each
+ *                          segment midpoint (default true)
+ * All lines use the overlay's main line colour, so the floating
+ * bar's colour pick applies directly. Partial coordinates (fewer
+ * points than the tool takes) draw the polyline through the points
+ * placed so far, so the in-progress preview works.
+ */
+
+/** The pattern family. */
+export const PATTERN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'headShoulders',
+  'elliottImpulse',
+  'elliottCorrection',
+  'abcdPattern',
+  'xabcdPattern',
+  'threeDrives',
+]);
+
+export function isPatternTool(name: string): boolean {
+  return PATTERN_TOOL_NAMES.has(name);
+}
+
+/** Point labels, parallel to the tool's points ('' = no label). */
+export const PATTERN_POINT_LABELS: Record<string, string[]> = {
+  headShoulders: ['LS', 'H', 'RS', '', ''],
+  elliottImpulse: ['0', '1', '2', '3', '4', '5'],
+  elliottCorrection: ['0', 'A', 'B', 'C'],
+  abcdPattern: ['A', 'B', 'C', 'D'],
+  xabcdPattern: ['X', 'A', 'B', 'C', 'D'],
+  threeDrives: ['1', '', '2', '', '3', ''],
+};
+
+/** Points the main polyline runs through (headShoulders stops at
+ *  RS; the last two points are the neckline, drawn separately). */
+const PATTERN_MAIN_POINT_COUNT: Record<string, number> = {
+  headShoulders: 3,
+};
+
+export interface PatternOptions {
+  showLabels: boolean;
+  showNeckline: boolean;
+  showDashed: boolean;
+  showRatios: boolean;
+}
+
+/** All pattern options from extendData, with defaults. */
+export function patternOptionsOf(overlay: {
+  extendData?: unknown;
+}): PatternOptions {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  return {
+    showLabels: ext.patternShowLabels !== false,
+    showNeckline: ext.patternShowNeckline !== false,
+    showDashed: ext.patternShowDashed !== false,
+    showRatios: ext.patternShowRatios !== false,
+  };
+}
+
+type PatternPt = { x: number; y: number };
+
+/** Whether the label for point i sits below it: below a local
+ *  price low (pixel y larger than both neighbours), above
+ *  otherwise. Endpoints compare against their single neighbour. */
+function patternLabelBelow(
+  coords: Array<PatternPt>,
+  i: number,
+): boolean {
+  const y = coords[i].y;
+  const prev = i > 0 ? coords[i - 1].y : null;
+  const next = i < coords.length - 1 ? coords[i + 1].y : null;
+  if (prev !== null && next !== null) return y > prev && y > next;
+  const other = prev ?? next;
+  if (other === null) return false;
+  return y > other;
+}
+
+/** One non-hittable point label, offset off the point so it does
+ *  not sit on the line. */
+function patternPointLabel(
+  p: PatternPt,
+  text: string,
+  color: string,
+  below: boolean,
+): Record<string, unknown> {
+  return {
+    type: 'textNoHit',
+    attrs: [
+      {
+        x: p.x,
+        y: below ? p.y + 8 : p.y - 8,
+        text,
+        baseline: below ? 'top' : 'bottom',
+      },
+    ],
+    styles: { color, size: 12, weight: 'bold' },
+  };
+}
+
+/** One retracement % label at a segment midpoint (XABCD): the
+ *  segment's price move as a % of the previous leg's move. */
+function patternRatioLabel(
+  a: PatternPt,
+  b: PatternPt,
+  va: number,
+  vb: number,
+  prevLeg: number,
+  color: string,
+): Record<string, unknown> | null {
+  if (prevLeg <= 0) return null;
+  const pct = (Math.abs(vb - va) / prevLeg) * 100;
+  if (!Number.isFinite(pct)) return null;
+  return {
+    type: 'textNoHit',
+    attrs: [
+      {
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2 - 8,
+        text: `${pct.toFixed(1)}%`,
+        baseline: 'bottom',
+      },
+    ],
+    styles: { color, size: 11 },
+  };
+}
+
+/** All figures for one pattern overlay (shared by the 6 tools). */
+function patternFigures(
+  coordinates: Array<PatternPt>,
+  overlay: Overlay,
+  name: string,
+): Array<Record<string, unknown>> {
+  if (coordinates.length < 2) return [];
+  const line = geomLineStyle(overlay);
+  const styles = geomLineFigureStyles(line);
+  const opts = patternOptionsOf(overlay);
+  const labels = PATTERN_POINT_LABELS[name] ?? [];
+  const figures: Array<Record<string, unknown>> = [];
+  // Main polyline (headShoulders: LS-H-RS only).
+  const mainCount = PATTERN_MAIN_POINT_COUNT[name] ?? coordinates.length;
+  figures.push({
+    type: 'line',
+    attrs: { coordinates: coordinates.slice(0, mainCount) },
+    styles,
+  });
+  // Dashed extra segment: neckline (headShoulders, points 4-5) or
+  // AD (abcd, points 1-4) / XD (xabcd, points 1-5).
+  const dashedStyles = geomLineFigureStyles({
+    ...line,
+    style: 'dashed',
+    dashedValue: [4, 4],
+  });
+  if (name === 'headShoulders' && opts.showNeckline) {
+    if (coordinates.length >= 5) {
+      figures.push({
+        type: 'line',
+        attrs: { coordinates: [coordinates[3], coordinates[4]] },
+        styles: dashedStyles,
+      });
+    }
+  } else if (name === 'abcdPattern' && opts.showDashed) {
+    if (coordinates.length >= 4) {
+      figures.push({
+        type: 'line',
+        attrs: { coordinates: [coordinates[0], coordinates[3]] },
+        styles: dashedStyles,
+      });
+    }
+  } else if (name === 'xabcdPattern' && opts.showDashed) {
+    if (coordinates.length >= 5) {
+      figures.push({
+        type: 'line',
+        attrs: { coordinates: [coordinates[0], coordinates[4]] },
+        styles: dashedStyles,
+      });
+    }
+  }
+  // Point labels.
+  if (opts.showLabels) {
+    coordinates.forEach((p, i) => {
+      const text = labels[i];
+      if (!text) return;
+      figures.push(
+        patternPointLabel(p, text, line.color, patternLabelBelow(coordinates, i)),
+      );
+    });
+  }
+  // XABCD retracement ratios at the AB / BC / CD midpoints.
+  if (name === 'xabcdPattern' && opts.showRatios) {
+    const vals = overlay.points.map((p) => p.value);
+    if (vals.every((v): v is number => typeof v === 'number')) {
+      const legs = [1, 2, 3].map((i) => Math.abs(vals[i] - vals[i - 1]));
+      for (let i = 1; i <= 3; i++) {
+        if (coordinates.length <= i) break;
+        const label = patternRatioLabel(
+          coordinates[i - 1],
+          coordinates[i],
+          vals[i - 1],
+          vals[i],
+          legs[i - 1],
+          line.color,
+        );
+        if (label) figures.push(label);
+      }
+    }
+  }
+  return figures;
+}
+
+let patternRegistered = false;
+
+/**
+ * Register the 6 pattern overlays once per page load (see the
+ * section header). headShoulders takes 5 clicks (totalStep 6),
+ * elliottImpulse / threeDrives 6 clicks (totalStep 7),
+ * elliottCorrection / abcdPattern 4 clicks (totalStep 5),
+ * xabcdPattern 5 clicks (totalStep 6); double-click (or Esc, see
+ * Chart.tsx) force-completes an in-progress overlay.
+ */
+export function registerPatternOverlays(): void {
+  if (patternRegistered) return;
+  patternRegistered = true;
+  registerTextNoHitFigure();
+
+  const defs: Array<{ name: string; totalStep: number }> = [
+    { name: 'headShoulders', totalStep: 6 },
+    { name: 'elliottImpulse', totalStep: 7 },
+    { name: 'elliottCorrection', totalStep: 5 },
+    { name: 'abcdPattern', totalStep: 5 },
+    { name: 'xabcdPattern', totalStep: 6 },
+    { name: 'threeDrives', totalStep: 7 },
+  ];
+  defs.forEach(({ name, totalStep }) => {
+    registerOverlay({
+      name,
+      totalStep,
+      needDefaultPointFigure: true,
+      needDefaultXAxisFigure: true,
+      needDefaultYAxisFigure: true,
+      createPointFigures: ({ coordinates, overlay }) =>
+        patternFigures(coordinates, overlay, name) as never,
+    });
   });
 }

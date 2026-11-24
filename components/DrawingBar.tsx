@@ -6,8 +6,8 @@
  * Top: cursor/select tool (active when no drawing tool is armed;
  * clicking it exits drawing mode). Then one icon per tool GROUP
  * (trend lines, horizontal lines, vertical lines, shapes, geometry,
- * freehand/annotation, Fibonacci, Pitchfork, Gann, measure — 10 groups,
- * 38 tools): each group shows its last-used tool's icon (or the group's
+ * freehand/annotation, Fibonacci, Pitchfork, Gann, patterns,
+ * measure — 11 groups, 44 tools): each group shows its last-used
  * first tool if none used yet), with a small chevron. Clicking a
  * group opens a flyout panel to the right of the bar listing that
  * group's tools (icon + Chinese label); picking one arms it, closes
@@ -40,6 +40,7 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '斐波那契', ids: ['fibonacciRetracement', 'fibChannel', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
   { title: 'Pitchfork', ids: ['pitchfork', 'schiffPitchfork', 'modifiedSchiffPitchfork', 'insidePitchfork'] },
   { title: 'Gann', ids: ['gannFan', 'gannSquare', 'gannBox'] },
+  { title: '形態', ids: ['headShoulders', 'elliottImpulse', 'elliottCorrection', 'abcdPattern', 'xabcdPattern', 'threeDrives'] },
   { title: '測量', ids: ['measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
@@ -319,6 +320,43 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
           <line x1="3.5" y1="10" x2="16.5" y2="10" opacity="0.7" />
           <line x1="3.5" y1="5" x2="16.5" y2="15" opacity="0.5" />
           <line x1="3.5" y1="15" x2="16.5" y2="5" opacity="0.5" />
+        </svg>
+      );
+    case 'headShoulders':
+      return (
+        <svg {...ICON_PROPS}>
+          <polyline points="3,11 7,5 11,12 15,7 17,10" />
+          <line x1="3" y1="15.5" x2="17" y2="15.5" strokeDasharray="2 2" opacity="0.6" />
+        </svg>
+      );
+    case 'elliottImpulse':
+      return (
+        <svg {...ICON_PROPS}>
+          <polyline points="3,15 6,10 8.5,12 11.5,7 14,9 17,4" />
+        </svg>
+      );
+    case 'elliottCorrection':
+      return (
+        <svg {...ICON_PROPS}>
+          <polyline points="3,5 8,12 11,8 17,14" />
+        </svg>
+      );
+    case 'abcdPattern':
+      return (
+        <svg {...ICON_PROPS}>
+          <polyline points="3,15 8,6 11,11 17,4" />
+        </svg>
+      );
+    case 'xabcdPattern':
+      return (
+        <svg {...ICON_PROPS}>
+          <polyline points="3,5 7,13 10,8 13,12 17,5" />
+        </svg>
+      );
+    case 'threeDrives':
+      return (
+        <svg {...ICON_PROPS}>
+          <polyline points="3,14 5.5,8 8,11 10.5,6 13,9 17,4" />
         </svg>
       );
     case 'rectangle':

@@ -37,6 +37,11 @@
  * extendData are gannExtend ('none' | 'right' | 'both', fan only),
  * gannAnglesEnabled, gannMainBold, gannAngleText, gannGrid,
  * gannShowDiagonal, gannShowMidlines, gannShowLabels.
+ * Pattern batch (custom overlays, TV-only): `headShoulders`,
+ * `elliottImpulse`, `elliottCorrection`, `abcdPattern`,
+ * `xabcdPattern`, `threeDrives` — also registered in
+ * lib/chart-theme.ts; options in extendData are patternShowLabels,
+ * patternShowNeckline, patternShowDashed, patternShowRatios.
  */
 export type DrawingTool =
   | 'segment'
@@ -68,6 +73,12 @@ export type DrawingTool =
   | 'gannFan'
   | 'gannSquare'
   | 'gannBox'
+  | 'headShoulders'
+  | 'elliottImpulse'
+  | 'elliottCorrection'
+  | 'abcdPattern'
+  | 'xabcdPattern'
+  | 'threeDrives'
   | 'rectangle'
   | 'measure'
   | 'ellipse'
@@ -94,6 +105,12 @@ export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'gannFan',
   'gannSquare',
   'gannBox',
+  'headShoulders',
+  'elliottImpulse',
+  'elliottCorrection',
+  'abcdPattern',
+  'xabcdPattern',
+  'threeDrives',
   'rectangle',
   'measure',
   'textAnnotation',
@@ -145,6 +162,12 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'gannFan', label: 'Gann 扇形' },
   { id: 'gannSquare', label: 'Gann 方形' },
   { id: 'gannBox', label: 'Gann 箱體' },
+  { id: 'headShoulders', label: '頭肩形態' },
+  { id: 'elliottImpulse', label: '艾略特推動浪' },
+  { id: 'elliottCorrection', label: '艾略特修正浪' },
+  { id: 'abcdPattern', label: 'ABCD 形態' },
+  { id: 'xabcdPattern', label: 'XABCD 諧波形態' },
+  { id: 'threeDrives', label: '三驅動形態' },
   { id: 'rectangle', label: '矩形' },
   { id: 'measure', label: '量測' },
   { id: 'ellipse', label: '橢圓' },
@@ -294,6 +317,12 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   gannFan: 'Gann 扇形',
   gannSquare: 'Gann 方形',
   gannBox: 'Gann 箱體',
+  headShoulders: '頭肩形態',
+  elliottImpulse: '艾略特推動浪',
+  elliottCorrection: '艾略特修正浪',
+  abcdPattern: 'ABCD 形態',
+  xabcdPattern: 'XABCD 諧波形態',
+  threeDrives: '三驅動形態',
   rectangle: '矩形',
   measure: '量測',
   ellipse: '橢圓',

@@ -16,6 +16,7 @@ import {
   fibHasLevels,
   isFibTool,
   isGannTool,
+  isPatternTool,
   isPitchforkTool,
 } from '@/lib/chart-theme';
 import {
@@ -73,6 +74,11 @@ export interface OverlayDialogDraft {
   gannShowDiagonal: boolean;
   gannShowMidlines: boolean;
   gannShowLabels: boolean;
+  /** Pattern tools: point labels, neckline, dashed AD/XD, ratios. */
+  patternShowLabels: boolean;
+  patternShowNeckline: boolean;
+  patternShowDashed: boolean;
+  patternShowRatios: boolean;
   /** Attached text. null = no text. */
   text: OverlayText | null;
   points: Array<{ timestamp: number; value: number }>;
@@ -218,6 +224,18 @@ function coordLabel(toolName: string, i: number): string {
     return `#${i + 1}（${['起點', '方向點'][i] ?? '點'}）`;
   if (toolName === 'gannSquare' || toolName === 'gannBox')
     return `#${i + 1}（${['角 1', '角 2'][i] ?? '點'}）`;
+  if (toolName === 'headShoulders')
+    return `#${i + 1}（${['左肩', '頭', '右肩', '頸線左', '頸線右'][i] ?? '點'}）`;
+  if (toolName === 'elliottImpulse')
+    return `#${i + 1}（${['0', '1', '2', '3', '4', '5'][i] ?? '點'}）`;
+  if (toolName === 'elliottCorrection')
+    return `#${i + 1}（${['0', 'A', 'B', 'C'][i] ?? '點'}）`;
+  if (toolName === 'abcdPattern')
+    return `#${i + 1}（${['A', 'B', 'C', 'D'][i] ?? '點'}）`;
+  if (toolName === 'xabcdPattern')
+    return `#${i + 1}（${['X', 'A', 'B', 'C', 'D'][i] ?? '點'}）`;
+  if (toolName === 'threeDrives')
+    return `#${i + 1}（${['驅動 1', '回調', '驅動 2', '回調', '驅動 3', '終點'][i] ?? '點'}）`;
   return `#${i + 1}（價格，K棒）`;
 }
 
@@ -235,6 +253,7 @@ export default function OverlaySettingsDialog({
   const isFib = isFibTool(toolName);
   const isPitchfork = isPitchforkTool(toolName);
   const isGann = isGannTool(toolName);
+  const isPattern = isPatternTool(toolName);
   const isGannFan = toolName === 'gannFan';
   /** Gann square / box: grid + diagonals + midlines + labels. */
   const isGannGrid = toolName === 'gannSquare' || toolName === 'gannBox';
@@ -916,6 +935,63 @@ export default function OverlaySettingsDialog({
                         刻度標示（價格／日期）
                       </label>
                     </>
+                  )}
+                </div>
+              )}
+              {isPattern && (
+                <div className="space-y-3 rounded border border-[#2a2e39] p-2">
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.patternShowLabels}
+                      onChange={(e) =>
+                        patch({ patternShowLabels: e.target.checked })
+                      }
+                      className="accent-[#2962ff]"
+                    />
+                    顯示點位標籤
+                  </label>
+                  {toolName === 'headShoulders' && (
+                    <label className={CHECK_ROW}>
+                      <input
+                        type="checkbox"
+                        checked={draft.patternShowNeckline}
+                        onChange={(e) =>
+                          patch({
+                            patternShowNeckline: e.target.checked,
+                          })
+                        }
+                        className="accent-[#2962ff]"
+                      />
+                      頸線（虛線）
+                    </label>
+                  )}
+                  {(toolName === 'abcdPattern' ||
+                    toolName === 'xabcdPattern') && (
+                    <label className={CHECK_ROW}>
+                      <input
+                        type="checkbox"
+                        checked={draft.patternShowDashed}
+                        onChange={(e) =>
+                          patch({ patternShowDashed: e.target.checked })
+                        }
+                        className="accent-[#2962ff]"
+                      />
+                      {toolName === 'abcdPattern' ? 'AD 虛線' : 'XD 虛線'}
+                    </label>
+                  )}
+                  {toolName === 'xabcdPattern' && (
+                    <label className={CHECK_ROW}>
+                      <input
+                        type="checkbox"
+                        checked={draft.patternShowRatios}
+                        onChange={(e) =>
+                          patch({ patternShowRatios: e.target.checked })
+                        }
+                        className="accent-[#2962ff]"
+                      />
+                      回撤比例標示（各段中點）
+                    </label>
                   )}
                 </div>
               )}
