@@ -64,6 +64,18 @@
  *   fibWedge             -> 3 points (apex + two boundary points),
  *                           rays splitting the wedge angle at fib
  *                           ratios, extended to the pane edge
+ *   Pitchfork batch (TV-only tools, median + two parallel outer
+ *   lines in pixel space; options in extendData — pitchExtend /
+ *   showMedian / showOuter / medianBold):
+ *   pitchfork            -> 3 points (P0, P1, P2), median from P0
+ *                           through the P1-P2 midpoint; outer lines
+ *                           through P1 and P2, parallel to the median
+ *   schiffPitchfork      -> median origin at the midpoint of P0 and
+ *                           the P1-P2 midpoint (50% from P0 toward M)
+ *   modifiedSchiffPitchfork -> median origin at 25% from P0 toward M
+ *                           (halfway between P0 and the Schiff origin)
+ *   insidePitchfork      -> median origin at M itself; P0 only sets
+ *                           the direction
  */
 
 import {
@@ -644,6 +656,7 @@ export function registerFibonacciRetracementOverlay(): void {
       }
       const showLevelText = ext.fibLevelText !== false;
       levels.forEach((percent, i) => {
+        if (!fibLevelEnabledOf(overlay, i)) return;
         const y = coordinates[1].y + yDif * percent;
         const value = v1 + valueDif * percent;
         const color =
@@ -1241,6 +1254,25 @@ export function fibLevelTextOf(overlay: { extendData?: unknown }): boolean {
   return ext.fibLevelText !== false;
 }
 
+/**
+ * Per-level on/off for the fib level rows (dialog toggle). The flags
+ * live in extendData.levelEnabled, parallel to levels: a missing /
+ * non-boolean entry means enabled, so old saves draw every level. A
+ * disabled level keeps its value AND its colour (same index) — only
+ * the line is not drawn — so toggling never re-maps the other
+ * levels' colours.
+ */
+export function fibLevelEnabledOf(
+  overlay: { extendData?: unknown },
+  i: number,
+): boolean {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  const list = Array.isArray(ext.levelEnabled)
+    ? (ext.levelEnabled as unknown[])
+    : [];
+  return list[i] !== false;
+}
+
 /** Level-line horizontal extent (channel / fan). Fan defaults to
  *  'right' (rays run forward in time); the rest default to 'both'. */
 export function fibExtendOf(
@@ -1397,6 +1429,7 @@ export function registerFibonacciToolsOverlays(): void {
       const showText = fibLevelTextOf(overlay);
       const figures: Array<Record<string, unknown>> = [];
       levels.forEach((r, i) => {
+        if (!fibLevelEnabledOf(overlay, i)) return;
         const color = fibLevelColorOf(overlay, i);
         // Level r shifts the trend line vertically by r * the pixel
         // price move: through (c0.x, c0.y + r*(c1.y-c0.y)) and
@@ -1448,6 +1481,7 @@ export function registerFibonacciToolsOverlays(): void {
       const showText = fibLevelTextOf(overlay);
       const figures: Array<Record<string, unknown>> = [];
       levels.forEach((n, i) => {
+        if (!fibLevelEnabledOf(overlay, i)) return;
         const x = c0.x + n * unit;
         if (x < -1 || x > bounding.width + 1) return;
         const color = fibLevelColorOf(overlay, i);
@@ -1495,6 +1529,7 @@ export function registerFibonacciToolsOverlays(): void {
       const showText = fibLevelTextOf(overlay);
       const figures: Array<Record<string, unknown>> = [];
       levels.forEach((r, i) => {
+        if (!fibLevelEnabledOf(overlay, i)) return;
         const color = fibLevelColorOf(overlay, i);
         // Ray from the apex through (c1.x, c0.y + r*(c1.y-c0.y)) —
         // the point at the second anchor's time, r of the price move.
@@ -1543,6 +1578,7 @@ export function registerFibonacciToolsOverlays(): void {
       const showText = fibLevelTextOf(overlay);
       const figures: Array<Record<string, unknown>> = [];
       levels.forEach((r, i) => {
+        if (!fibLevelEnabledOf(overlay, i)) return;
         if (r <= 0) return;
         const radius = r * dist;
         const color = fibLevelColorOf(overlay, i);
@@ -1642,6 +1678,7 @@ export function registerFibonacciToolsOverlays(): void {
       const showText = fibLevelTextOf(overlay);
       const figures: Array<Record<string, unknown>> = [];
       levels.forEach((r, i) => {
+        if (!fibLevelEnabledOf(overlay, i)) return;
         const color = fibLevelColorOf(overlay, i);
         const angle = a1 + r * diff;
         const dir = { x: Math.cos(angle), y: Math.sin(angle) };
@@ -1660,5 +1697,223 @@ export function registerFibonacciToolsOverlays(): void {
       });
       return figures as never;
     },
+  });
+}
+
+// ---- pitchfork batch (TV-only tools) ------------------------------------
+
+/**
+ * Pitchfork tools: 4 TV-only tools, all custom overlays (klinecharts
+ * has no built-ins for them). Three anchor points (P0, P1, P2):
+ *   pitchfork               -> median from P0 through the midpoint M
+ *                              of P1-P2; outer lines through P1 and
+ *                              P2, parallel to the median
+ *   schiffPitchfork         -> median origin at the midpoint of P0
+ *                              and M (50% from P0 toward M)
+ *   modifiedSchiffPitchfork -> median origin at 25% from P0 toward
+ *                              M (halfway between P0 and the Schiff
+ *                              origin)
+ *   insidePitchfork         -> median origin at M itself; P0 only
+ *                              sets the direction
+ * All three lines run in the median direction and extend per
+ * extendData.pitchExtend ('none' | 'right' | 'both', default
+ * 'right'). Options in extendData: showMedian (default true),
+ * showOuter (default true), medianBold (default false — the median
+ * is drawn one size thicker). All lines use the overlay's main line
+ * colour, so the floating bar's colour pick applies directly.
+ */
+
+/** The pitchfork family. */
+export const PITCHFORK_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'pitchfork',
+  'schiffPitchfork',
+  'modifiedSchiffPitchfork',
+  'insidePitchfork',
+]);
+
+export function isPitchforkTool(name: string): boolean {
+  return PITCHFORK_TOOL_NAMES.has(name);
+}
+
+/** Line extension for a pitchfork ('none' | 'right' | 'both'). */
+export function pitchExtendOf(overlay: {
+  extendData?: unknown;
+}): 'none' | 'right' | 'both' {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  if (ext.pitchExtend === 'none' || ext.pitchExtend === 'both')
+    return ext.pitchExtend;
+  return 'right';
+}
+
+/** Median / outer visibility + median bold, from extendData. */
+export function pitchOptionsOf(overlay: {
+  extendData?: unknown;
+}): { showMedian: boolean; showOuter: boolean; medianBold: boolean } {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  return {
+    showMedian: ext.showMedian !== false,
+    showOuter: ext.showOuter !== false,
+    medianBold: ext.medianBold === true,
+  };
+}
+
+type PitchPt = { x: number; y: number };
+
+/**
+ * Median + outer lines of a pitchfork in pixel space, from the three
+ * anchor pixels. Returns null when P0 and M coincide (no direction).
+ * Each entry is { start, end } in natural (unextended) length: the
+ * median runs S -> M (inside: M -> M + d*|M-P0|), each outer runs
+ * A -> A + d*((M-A)·d), i.e. to M's position along the median
+ * direction. Extension is applied by the caller via
+ * fibExtendedLineFigure with the pitchExtend x-span.
+ */
+function pitchforkLines(
+  p0: PitchPt,
+  p1: PitchPt,
+  p2: PitchPt,
+  name: string,
+): {
+  median: { start: PitchPt; end: PitchPt };
+  outers: Array<{ start: PitchPt; end: PitchPt }>;
+} | null {
+  const m = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+  const dx = m.x - p0.x;
+  const dy = m.y - p0.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 2) return null;
+  const d = { x: dx / len, y: dy / len };
+  let s: PitchPt;
+  let medianEnd: PitchPt;
+  if (name === 'schiffPitchfork') {
+    s = { x: p0.x + dx * 0.5, y: p0.y + dy * 0.5 };
+    medianEnd = m;
+  } else if (name === 'modifiedSchiffPitchfork') {
+    s = { x: p0.x + dx * 0.25, y: p0.y + dy * 0.25 };
+    medianEnd = m;
+  } else if (name === 'insidePitchfork') {
+    s = m;
+    medianEnd = { x: m.x + d.x * len, y: m.y + d.y * len };
+  } else {
+    s = p0;
+    medianEnd = m;
+  }
+  const outerEnd = (a: PitchPt): PitchPt => {
+    const t = (m.x - a.x) * d.x + (m.y - a.y) * d.y;
+    return { x: a.x + d.x * t, y: a.y + d.y * t };
+  };
+  return {
+    median: { start: s, end: medianEnd },
+    outers: [
+      { start: p1, end: outerEnd(p1) },
+      { start: p2, end: outerEnd(p2) },
+    ],
+  };
+}
+
+/** Horizontal span for one pitchfork line: 'none' keeps the natural
+ *  segment, 'right'/'both' extend along the slope like the fib
+ *  tools (fibXSpan). */
+function pitchXSpan(
+  a: PitchPt,
+  b: PitchPt,
+  width: number,
+  extend: 'none' | 'right' | 'both',
+): { xStart: number; xEnd: number } {
+  if (extend === 'none') {
+    return { xStart: Math.min(a.x, b.x), xEnd: Math.max(a.x, b.x) };
+  }
+  return fibXSpan(a.x, b.x, width, extend);
+}
+
+let pitchforkRegistered = false;
+
+/**
+ * Register the 4 pitchfork overlays once per page load (see the
+ * section header). All take 3 clicks (totalStep 4): P0, P1, P2.
+ * The median + outer lines are 'line' figures, so they carry the
+ * library's ±2px hit test; the three anchor points are the default
+ * point figures, draggable while selected.
+ */
+export function registerPitchforkOverlays(): void {
+  if (pitchforkRegistered) return;
+  pitchforkRegistered = true;
+
+  const names = [
+    'pitchfork',
+    'schiffPitchfork',
+    'modifiedSchiffPitchfork',
+    'insidePitchfork',
+  ] as const;
+  names.forEach((name) => {
+    registerOverlay({
+      name,
+      totalStep: 4,
+      needDefaultPointFigure: true,
+      needDefaultXAxisFigure: true,
+      needDefaultYAxisFigure: true,
+      createPointFigures: ({ coordinates, bounding, overlay }) => {
+        if (coordinates.length < 3) return [];
+        const [p0, p1, p2] = coordinates;
+        const line = geomLineStyle(overlay);
+        const lines = pitchforkLines(p0, p1, p2, name);
+        if (!lines) {
+          // No median direction (P0 sits on the P1-P2 midpoint):
+          // draw the P1-P2 segment so the drawing stays visible.
+          return [
+            {
+              type: 'line',
+              attrs: { coordinates: [p1, p2] },
+              styles: geomLineFigureStyles(line),
+            },
+          ] as never;
+        }
+        const { showMedian, showOuter, medianBold } =
+          pitchOptionsOf(overlay);
+        const extend = pitchExtendOf(overlay);
+        const medianStyles = geomLineFigureStyles(
+          medianBold ? { ...line, size: line.size + 1 } : line,
+        );
+        const outerStyles = geomLineFigureStyles(line);
+        const figures: Array<Record<string, unknown>> = [];
+        if (showMedian) {
+          const span = pitchXSpan(
+            lines.median.start,
+            lines.median.end,
+            bounding.width,
+            extend,
+          );
+          figures.push(
+            fibExtendedLineFigure(
+              lines.median.start,
+              lines.median.end,
+              span.xStart,
+              span.xEnd,
+              medianStyles,
+            ),
+          );
+        }
+        if (showOuter) {
+          for (const o of lines.outers) {
+            const span = pitchXSpan(
+              o.start,
+              o.end,
+              bounding.width,
+              extend,
+            );
+            figures.push(
+              fibExtendedLineFigure(
+                o.start,
+                o.end,
+                span.xStart,
+                span.xEnd,
+                outerStyles,
+              ),
+            );
+          }
+        }
+        return figures as never;
+      },
+    });
   });
 }

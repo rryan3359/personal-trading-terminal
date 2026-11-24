@@ -67,10 +67,14 @@ import {
   fibLevelsOf,
   hexToRgba,
   isFibTool,
+  isPitchforkTool,
+  pitchExtendOf,
+  pitchOptionsOf,
   registerFibonacciRetracementOverlay,
   registerFibonacciToolsOverlays,
   registerGeometryOverlays,
   registerMeasureOverlay,
+  registerPitchforkOverlays,
   registerRectangleOverlay,
   registerSimpleTagOverlay,
   registerTextAnnotationOverlay,
@@ -222,6 +226,13 @@ interface SelectedOverlayState {
   fibLevelText: boolean;
   /** Fibonacci levels (ratios, or sequence numbers for time zones). */
   fibLevels: number[];
+  /** Fibonacci: per-level on/off, parallel to fibLevels (missing = on). */
+  fibLevelEnabled: boolean[];
+  /** Pitchfork: line extension, median/outer visibility, median bold. */
+  pitchExtend: 'none' | 'right' | 'both';
+  showMedian: boolean;
+  showOuter: boolean;
+  medianBold: boolean;
 }
 
 /** Horizontal tools show their price on the right Y axis. */
@@ -893,9 +904,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }
     if (isFib) {
       // Levels: keep a valid saved list, else the tool's default
-      // (spiral has no levels). Level colours likewise.
+      // (spiral has no levels). Level colours likewise. Per-level
+      // on/off: parallel to levels, missing entries mean enabled.
       if (saved.name !== 'fibSpiral') {
         ext.levels = fibLevelsOf({ extendData: ext }, saved.name);
+        const levels = ext.levels as number[];
+        const enabled = Array.isArray(ext.levelEnabled)
+          ? (ext.levelEnabled as unknown[])
+          : [];
+        ext.levelEnabled = levels.map((_, i) => enabled[i] !== false);
       }
       ext.levelColors =
         Array.isArray(ext.levelColors) &&
@@ -914,6 +931,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         ext.showTrendline = ext.showTrendline === true;
       }
       ext.fibLevelText = ext.fibLevelText !== false;
+    }
+    if (isPitchforkTool(saved.name)) {
+      ext.pitchExtend = pitchExtendOf({ extendData: ext });
+      const opts = pitchOptionsOf({ extendData: ext });
+      ext.showMedian = opts.showMedian;
+      ext.showOuter = opts.showOuter;
+      ext.medianBold = opts.medianBold;
     }
     // Price label (needDefaultYAxisFigure). Horizontal tools, rectangles
     // and Fibonacci default to on; other line tools default to off;
@@ -1142,6 +1166,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             : FIB_LEVEL_COLORS[i % FIB_LEVEL_COLORS.length],
         )
       : [...FIB_LEVEL_COLORS];
+    const fibLevels = fibLevelsOf({ extendData: ext }, o.name);
+    const fibLevelEnabled = fibLevels.map((_, i) => {
+      const list = Array.isArray(ext.levelEnabled)
+        ? (ext.levelEnabled as unknown[])
+        : [];
+      return list[i] !== false;
+    });
+    const pitchOpts = isPitchforkTool(o.name)
+      ? pitchOptionsOf({ extendData: ext })
+      : { showMedian: true, showOuter: true, medianBold: false };
     setSelectedState({
       id: o.id,
       name: o.name,
@@ -1176,7 +1210,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       fibExtend: fibExtendOf({ extendData: ext }, o.name),
       fibBackground: ext.fibBackground === true,
       fibLevelText: ext.fibLevelText !== false,
-      fibLevels: fibLevelsOf({ extendData: ext }, o.name),
+      fibLevels,
+      fibLevelEnabled,
+      pitchExtend: pitchExtendOf({ extendData: ext }),
+      showMedian: pitchOpts.showMedian,
+      showOuter: pitchOpts.showOuter,
+      medianBold: pitchOpts.medianBold,
     });
   };
 
@@ -1224,6 +1263,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (isFibTool(next.name)) {
       if (next.name !== 'fibSpiral') {
         ext.levels = next.fibLevels;
+        ext.levelEnabled = next.fibLevelEnabled;
       }
       // The floating-bar colour is the overlay's main colour, but the
       // level lines are drawn in per-level colours, so a colour pick
@@ -1255,6 +1295,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         ext.showTrendline = next.fibTrendline;
       }
       ext.fibLevelText = next.fibLevelText;
+    }
+    if (isPitchforkTool(next.name)) {
+      ext.pitchExtend = next.pitchExtend;
+      ext.showMedian = next.showMedian;
+      ext.showOuter = next.showOuter;
+      ext.medianBold = next.medianBold;
     }
     chart.overrideOverlay({
       id: cur.id,
@@ -1407,6 +1453,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     fibBackground: cur.fibBackground,
     fibLevelText: cur.fibLevelText,
     fibLevels: [...cur.fibLevels],
+    fibLevelEnabled: [...cur.fibLevelEnabled],
+    pitchExtend: cur.pitchExtend,
+    showMedian: cur.showMedian,
+    showOuter: cur.showOuter,
+    medianBold: cur.medianBold,
     text: cur.text ? { ...cur.text } : null,
     points: cur.points.map((p) => ({ ...p })),
     visibleIntervals: cur.visibleIntervals
@@ -1511,6 +1562,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (isFibTool(o.name)) {
       if (o.name !== 'fibSpiral') {
         ext.levels = draft.fibLevels;
+        ext.levelEnabled = draft.fibLevelEnabled;
       }
       ext.levelColors = draft.fibLevelColors;
       if (
@@ -1525,6 +1577,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         ext.showTrendline = draft.fibTrendline;
       }
       ext.fibLevelText = draft.fibLevelText;
+    }
+    if (isPitchforkTool(o.name)) {
+      ext.pitchExtend = draft.pitchExtend;
+      ext.showMedian = draft.showMedian;
+      ext.showOuter = draft.showOuter;
+      ext.medianBold = draft.medianBold;
     }
     const points = draft.points.map((p) => ({
       timestamp: p.timestamp,
@@ -1690,6 +1748,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerRectangleOverlay();
     registerFibonacciRetracementOverlay();
     registerFibonacciToolsOverlays();
+    registerPitchforkOverlays();
     registerMeasureOverlay();
     registerTextAnnotationOverlay();
     registerSimpleTagOverlay();

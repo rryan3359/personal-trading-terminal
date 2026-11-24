@@ -4,19 +4,28 @@
  * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
  *
  * Top: cursor/select tool (active when no drawing tool is armed;
- * clicking it exits drawing mode). Then the 31 DRAWING_TOOLS grouped
- * by logic — trend lines, horizontal lines, vertical lines, shapes,
- * geometry, freehand/annotation, Fibonacci, measure — with a divider
- * between groups. Bottom: magnet (click cycles off -> weak -> strong,
- * current strength shown under the icon) and clear. Single click arms
- * a tool (click again to disarm); double-click or Shift+click keeps it
- * armed for continuous drawing. Active tool: bg #2a2e39, text #2962ff,
- * plus a left accent bar.
+ * clicking it exits drawing mode). Then one icon per tool GROUP
+ * (trend lines, horizontal lines, vertical lines, shapes, geometry,
+ * freehand/annotation, Fibonacci, Pitchfork, measure — 9 groups, 35
+ * tools): each group shows its last-used tool's icon (or the group's
+ * first tool if none used yet), with a small chevron. Clicking a
+ * group opens a flyout panel to the right of the bar listing that
+ * group's tools (icon + Chinese label); picking one arms it, closes
+ * the panel and updates the group icon. Clicking the armed tool in
+ * the panel disarms it. Double-click (or Shift+click) arms in
+ * continuous mode. Clicking outside the panel or pressing Esc closes
+ * it. Single-tool groups (rectangle, measure) render as a plain
+ * button with no flyout. Bottom: magnet (click cycles off -> weak ->
+ * strong, current strength shown under the icon) and clear.
  *
- * Undo / redo live in the top Toolbar now (TradingView puts them there).
+ * The flyout is rendered through a portal to document.body with
+ * fixed positioning, so it is not clipped by the aside's vertical
+ * scroll. Undo / redo live in the top Toolbar now (TradingView puts
+ * them there).
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { DRAWING_TOOLS, type DrawingTool } from '@/lib/chart-config';
 import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
 
@@ -29,6 +38,7 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '幾何', ids: ['ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
   { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
   { title: '斐波那契', ids: ['fibonacciRetracement', 'fibChannel', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
+  { title: 'Pitchfork', ids: ['pitchfork', 'schiffPitchfork', 'modifiedSchiffPitchfork', 'insidePitchfork'] },
   { title: '測量', ids: ['measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
@@ -245,6 +255,42 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
           <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
         </svg>
       );
+    case 'pitchfork':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="5" />
+          <line x1="4" y1="16" x2="17" y2="10" />
+          <line x1="4" y1="16" x2="17" y2="15" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'schiffPitchfork':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="6" />
+          <line x1="4" y1="16" x2="17" y2="14" />
+          <line x1="10.5" y1="11" x2="17" y2="10" strokeWidth="2" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'modifiedSchiffPitchfork':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="6" />
+          <line x1="4" y1="16" x2="17" y2="14" />
+          <line x1="7" y1="13.5" x2="17" y2="10" strokeWidth="2" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'insidePitchfork':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="6" />
+          <line x1="4" y1="16" x2="17" y2="14" />
+          <line x1="11" y1="10" x2="17" y2="10" strokeWidth="2" />
+          <circle cx="10.5" cy="10" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
     case 'rectangle':
       return (
         <svg {...ICON_PROPS}>
@@ -352,6 +398,20 @@ function ClearIcon() {
   );
 }
 
+/** Small chevron marking a group button that opens a flyout. */
+function FlyoutChevron() {
+  return (
+    <span
+      className="pointer-events-none absolute bottom-[2px] right-[2px] text-[#787b86]"
+      aria-hidden="true"
+    >
+      <svg width="7" height="7" viewBox="0 0 7 7" fill="currentColor">
+        <path d="M1.2 1.2 L6 3.5 L1.2 5.8 Z" />
+      </svg>
+    </span>
+  );
+}
+
 const BUTTON_BASE =
   'relative flex h-9 w-9 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
 
@@ -369,12 +429,104 @@ function ActiveBar() {
   );
 }
 
+interface FlyoutAnchor {
+  top: number;
+  right: number;
+}
+
+/**
+ * Flyout panel for one tool group, portalled to document.body so the
+ * aside's vertical scroll never clips it. Positioned fixed, to the
+ * right of the group button, clamped inside the viewport.
+ */
+function GroupFlyout({
+  group,
+  anchor,
+  activeTool,
+  onSelect,
+  onClose,
+}: {
+  group: { title: string; ids: DrawingTool[] };
+  anchor: FlyoutAnchor;
+  activeTool: DrawingTool | null;
+  onSelect: (tool: DrawingTool, continuous: boolean) => void;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [top, setTop] = useState(anchor.top);
+
+  // Clamp the panel inside the viewport once its height is known.
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const h = el.offsetHeight;
+    const maxTop = window.innerHeight - h - 8;
+    setTop(Math.max(8, Math.min(anchor.top, maxTop)));
+  }, [anchor.top]);
+
+  return (
+    <>
+      {/* Transparent backdrop: any click outside the panel closes it. */}
+      <div
+        className="fixed inset-0 z-40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        role="menu"
+        aria-label={group.title}
+        className="fixed z-50 w-44 overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d] py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
+        style={{ left: anchor.right + 6, top }}
+      >
+        <div className="px-3 pb-1 pt-1.5 text-[11px] font-medium text-[#787b86]">
+          {group.title}
+        </div>
+        {group.ids.map((id) => {
+          const tool = TOOL_BY_ID.get(id);
+          if (!tool) return null;
+          const active = activeTool === id;
+          return (
+            <button
+              key={id}
+              role="menuitem"
+              title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
+              onClick={(e) => onSelect(id, e.shiftKey)}
+              onDoubleClick={() => onSelect(id, true)}
+              className={`relative flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] hover:bg-[#2a2e39] hover:text-white ${
+                active ? 'bg-[#2a2e39] text-[#2962ff]' : 'text-[#d1d4dc]'
+              }`}
+            >
+              {active && (
+                <span
+                  className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-[#2962ff]"
+                  aria-hidden="true"
+                />
+              )}
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+                <ToolIcon tool={id} />
+              </span>
+              {tool.label}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 export default function DrawingBar({
   activeTool,
   onToolChange,
   onClear,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
+  /** Title of the group whose flyout is open, or null. */
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  /** Last tool picked per group (drives the group icon). */
+  const [lastUsed, setLastUsed] = useState<Record<string, DrawingTool>>({});
+  const [anchor, setAnchor] = useState<FlyoutAnchor | null>(null);
+  const groupBtnRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const cycleMagnet = () => {
     const next =
@@ -382,6 +534,56 @@ export default function DrawingBar({
     setMagnet(next);
     saveMagnetMode(next);
   };
+
+  // Esc / resize / any scroll closes the open flyout (its anchor moves).
+  useEffect(() => {
+    if (!openGroup) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenGroup(null);
+    };
+    const onMove = () => setOpenGroup(null);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onMove);
+    window.addEventListener('scroll', onMove, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onMove);
+      window.removeEventListener('scroll', onMove, true);
+    };
+  }, [openGroup]);
+
+  const openFlyout = (title: string) => {
+    const el = groupBtnRefs.current.get(title);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setAnchor({ top: r.top, right: r.right });
+    setOpenGroup(title);
+  };
+
+  /** Icon shown for a group: the armed tool if it is in this group,
+   *  else the last tool picked from the group, else its first tool. */
+  const displayedToolFor = (group: (typeof TOOL_GROUPS)[number]) => {
+    if (activeTool && group.ids.includes(activeTool)) return activeTool;
+    return lastUsed[group.title] ?? group.ids[0];
+  };
+
+  const handleSelect = (
+    groupTitle: string,
+    id: DrawingTool,
+    continuous: boolean,
+  ) => {
+    setLastUsed((prev) => ({ ...prev, [groupTitle]: id }));
+    setOpenGroup(null);
+    if (!continuous && activeTool === id) {
+      onToolChange(null, false);
+    } else {
+      onToolChange(id, continuous);
+    }
+  };
+
+  const openGroupDef = openGroup
+    ? TOOL_GROUPS.find((g) => g.title === openGroup) ?? null
+    : null;
 
   return (
     <aside className="flex w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1">
@@ -398,39 +600,79 @@ export default function DrawingBar({
 
       <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
 
-      {TOOL_GROUPS.map((group, gi) => (
-        <div
-          key={group.title}
-          className="flex flex-col items-center gap-0.5"
-          role="group"
-          aria-label={group.title}
-        >
-          {group.ids.map((id) => {
-            const tool = TOOL_BY_ID.get(id);
-            if (!tool) return null;
-            const active = activeTool === id;
-            return (
+      {TOOL_GROUPS.map((group, gi) => {
+        const displayed = displayedToolFor(group);
+        const groupActive =
+          activeTool !== null && group.ids.includes(activeTool);
+        const isOpen = openGroup === group.title;
+        // Single-tool groups need no flyout: plain button, old behaviour.
+        if (group.ids.length === 1) {
+          const id = group.ids[0];
+          const tool = TOOL_BY_ID.get(id);
+          if (!tool) return null;
+          return (
+            <div
+              key={group.title}
+              className="flex flex-col items-center gap-0.5"
+              role="group"
+              aria-label={group.title}
+            >
               <button
-                key={id}
                 title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
                 onClick={(e) =>
-                  onToolChange(active ? null : id, e.shiftKey)
+                  onToolChange(groupActive ? null : id, e.shiftKey)
                 }
                 onDoubleClick={() => onToolChange(id, true)}
                 className={`${BUTTON_BASE} ${
-                  active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+                  groupActive ? 'bg-[#2a2e39] text-[#2962ff]' : ''
                 }`}
               >
-                {active && <ActiveBar />}
+                {groupActive && <ActiveBar />}
                 <ToolIcon tool={id} />
               </button>
-            );
-          })}
-          {gi < TOOL_GROUPS.length - 1 && (
-            <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
-          )}
-        </div>
-      ))}
+              {gi < TOOL_GROUPS.length - 1 && (
+                <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+              )}
+            </div>
+          );
+        }
+        return (
+          <div
+            key={group.title}
+            className="flex flex-col items-center gap-0.5"
+            role="group"
+            aria-label={group.title}
+          >
+            <button
+              ref={(el) => {
+                if (el) groupBtnRefs.current.set(group.title, el);
+                else groupBtnRefs.current.delete(group.title);
+              }}
+              title={`${group.title}（點擊展開工具選單）`}
+              aria-haspopup="menu"
+              aria-expanded={isOpen}
+              onClick={() => {
+                if (isOpen) setOpenGroup(null);
+                else openFlyout(group.title);
+              }}
+              onDoubleClick={() => {
+                setOpenGroup(null);
+                handleSelect(group.title, displayed, true);
+              }}
+              className={`${BUTTON_BASE} ${
+                groupActive || isOpen ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+              }`}
+            >
+              {groupActive && <ActiveBar />}
+              <ToolIcon tool={displayed} />
+              <FlyoutChevron />
+            </button>
+            {gi < TOOL_GROUPS.length - 1 && (
+              <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+            )}
+          </div>
+        );
+      })}
 
       <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
 
@@ -453,6 +695,20 @@ export default function DrawingBar({
       >
         <ClearIcon />
       </button>
+
+      {openGroupDef && anchor &&
+        createPortal(
+          <GroupFlyout
+            group={openGroupDef}
+            anchor={anchor}
+            activeTool={activeTool}
+            onSelect={(id, continuous) =>
+              handleSelect(openGroupDef.title, id, continuous)
+            }
+            onClose={() => setOpenGroup(null)}
+          />,
+          document.body,
+        )}
     </aside>
   );
 }

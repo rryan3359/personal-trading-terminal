@@ -14,6 +14,7 @@ import ColorPicker from '@/components/ColorPicker';
 import {
   fibHasLevels,
   isFibTool,
+  isPitchforkTool,
 } from '@/lib/chart-theme';
 import {
   LINE_STYLE_OPTIONS,
@@ -53,6 +54,13 @@ export interface OverlayDialogDraft {
   fibLevelText: boolean;
   /** Fibonacci levels (ratios, or sequence numbers for time zones). */
   fibLevels: number[];
+  /** Fibonacci: per-level on/off, parallel to fibLevels. */
+  fibLevelEnabled: boolean[];
+  /** Pitchfork: line extension, median/outer visibility, median bold. */
+  pitchExtend: 'none' | 'right' | 'both';
+  showMedian: boolean;
+  showOuter: boolean;
+  medianBold: boolean;
   /** Attached text. null = no text. */
   text: OverlayText | null;
   points: Array<{ timestamp: number; value: number }>;
@@ -192,6 +200,8 @@ function coordLabel(toolName: string, i: number): string {
     return `#${i + 1}（${['起點', '間距點'][i] ?? '點'}）`;
   if (toolName === 'fibWedge')
     return `#${i + 1}（${['頂點', '邊界 1', '邊界 2'][i] ?? '點'}）`;
+  if (isPitchforkTool(toolName))
+    return `#${i + 1}（${['P0', 'P1', 'P2'][i] ?? '點'}）`;
   return `#${i + 1}（價格，K棒）`;
 }
 
@@ -207,6 +217,7 @@ export default function OverlaySettingsDialog({
   const [draft, setDraft] = useState<OverlayDialogDraft>(initial);
   const family: LineFamily | null = lineFamilyOf(toolName);
   const isFib = isFibTool(toolName);
+  const isPitchfork = isPitchforkTool(toolName);
   const isRetracement = toolName === 'fibonacciRetracement';
   const isTimeZones = toolName === 'fibTimeZones';
   /** Fib tools with editable levels (all except the spiral). */
@@ -229,7 +240,13 @@ export default function OverlaySettingsDialog({
       return;
     }
     setLevelsText(uniq.join(', '));
-    patch({ fibLevels: uniq });
+    // Keep each surviving level's on/off flag (matched by value);
+    // new levels default to on.
+    const nextEnabled = uniq.map((v) => {
+      const j = draft.fibLevels.indexOf(v);
+      return j >= 0 ? (draft.fibLevelEnabled[j] ?? true) : true;
+    });
+    patch({ fibLevels: uniq, fibLevelEnabled: nextEnabled });
   };
   const isRect = toolName === 'rectangle';
   /** Closed geometry shapes with a fill switch (ellipse, triangle). */
@@ -598,8 +615,26 @@ export default function OverlaySettingsDialog({
                           {draft.fibLevels.map((level, i) => (
                             <div
                               key={`${level}-${i}`}
-                              className="flex items-center gap-2"
+                              className={`flex items-center gap-2 ${
+                                draft.fibLevelEnabled[i] === false
+                                  ? 'opacity-40'
+                                  : ''
+                              }`}
                             >
+                              <input
+                                type="checkbox"
+                                title="顯示此層級"
+                                aria-label={`顯示層級 ${level}`}
+                                checked={
+                                  draft.fibLevelEnabled[i] !== false
+                                }
+                                onChange={(e) => {
+                                  const next = [...draft.fibLevelEnabled];
+                                  next[i] = e.target.checked;
+                                  patch({ fibLevelEnabled: next });
+                                }}
+                                className="accent-[#2962ff]"
+                              />
                               <span className="w-16 text-xs text-[#b2b5be]">
                                 {isTimeZones
                                   ? `×${level}`
@@ -621,6 +656,9 @@ export default function OverlaySettingsDialog({
                             </div>
                           ))}
                         </div>
+                        <p className="mt-1 text-xs leading-relaxed text-[#787b86]">
+                          取消勾選只隱藏該層級的線，數值與顏色會保留。
+                        </p>
                       </div>
                     </>
                   )}
@@ -658,6 +696,62 @@ export default function OverlaySettingsDialog({
                       背景填色（0–100% 區間）
                     </label>
                   )}
+                </div>
+              )}
+              {isPitchfork && (
+                <div className="space-y-3 rounded border border-[#2a2e39] p-2">
+                  <div>
+                    <label className={FIELD_LABEL}>線條延伸</label>
+                    <select
+                      value={draft.pitchExtend}
+                      onChange={(e) =>
+                        patch({
+                          pitchExtend: e.target.value as
+                            | 'none'
+                            | 'right'
+                            | 'both',
+                        })
+                      }
+                      className={SELECT}
+                    >
+                      <option value="none">不要延長</option>
+                      <option value="right">向右</option>
+                      <option value="both">雙向</option>
+                    </select>
+                  </div>
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.showMedian}
+                      onChange={(e) =>
+                        patch({ showMedian: e.target.checked })
+                      }
+                      className="accent-[#2962ff]"
+                    />
+                    中線
+                  </label>
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.showOuter}
+                      onChange={(e) =>
+                        patch({ showOuter: e.target.checked })
+                      }
+                      className="accent-[#2962ff]"
+                    />
+                    外線
+                  </label>
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.medianBold}
+                      onChange={(e) =>
+                        patch({ medianBold: e.target.checked })
+                      }
+                      className="accent-[#2962ff]"
+                    />
+                    中線加粗
+                  </label>
                 </div>
               )}
                 </>

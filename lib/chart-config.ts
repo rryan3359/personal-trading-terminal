@@ -27,6 +27,11 @@
  * also registered in lib/chart-theme.ts; they share the fib level
  * options (levels / levelColors / fibExtend / fibLevelText) with
  * `fibonacciRetracement` in extendData.
+ * Pitchfork batch (custom overlays, TV-only): `pitchfork`,
+ * `schiffPitchfork`, `modifiedSchiffPitchfork`, `insidePitchfork` —
+ * also registered in lib/chart-theme.ts; options in extendData are
+ * pitchExtend ('none' | 'right' | 'both'), showMedian, showOuter,
+ * medianBold.
  */
 export type DrawingTool =
   | 'segment'
@@ -51,6 +56,10 @@ export type DrawingTool =
   | 'fibArc'
   | 'fibSpiral'
   | 'fibWedge'
+  | 'pitchfork'
+  | 'schiffPitchfork'
+  | 'modifiedSchiffPitchfork'
+  | 'insidePitchfork'
   | 'rectangle'
   | 'measure'
   | 'ellipse'
@@ -70,6 +79,10 @@ export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'fibArc',
   'fibSpiral',
   'fibWedge',
+  'pitchfork',
+  'schiffPitchfork',
+  'modifiedSchiffPitchfork',
+  'insidePitchfork',
   'rectangle',
   'measure',
   'textAnnotation',
@@ -114,6 +127,10 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'fibArc', label: '斐波那契弧線' },
   { id: 'fibSpiral', label: '斐波那契螺旋' },
   { id: 'fibWedge', label: '斐波那契楔形' },
+  { id: 'pitchfork', label: 'Pitchfork' },
+  { id: 'schiffPitchfork', label: 'Schiff Pitchfork' },
+  { id: 'modifiedSchiffPitchfork', label: '修正 Schiff Pitchfork' },
+  { id: 'insidePitchfork', label: '內部 Pitchfork' },
   { id: 'rectangle', label: '矩形' },
   { id: 'measure', label: '量測' },
   { id: 'ellipse', label: '橢圓' },
@@ -256,6 +273,10 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   fibArc: '斐波那契弧線',
   fibSpiral: '斐波那契螺旋',
   fibWedge: '斐波那契楔形',
+  pitchfork: 'Pitchfork',
+  schiffPitchfork: 'Schiff Pitchfork',
+  modifiedSchiffPitchfork: '修正 Schiff Pitchfork',
+  insidePitchfork: '內部 Pitchfork',
   rectangle: '矩形',
   measure: '量測',
   ellipse: '橢圓',
