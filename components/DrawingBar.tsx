@@ -6,8 +6,8 @@
  * Top: cursor/select tool (active when no drawing tool is armed;
  * clicking it exits drawing mode). Then one icon per tool GROUP
  * (trend lines, horizontal lines, vertical lines, shapes, geometry,
- * freehand/annotation, Fibonacci, Pitchfork, measure — 9 groups, 35
- * tools): each group shows its last-used tool's icon (or the group's
+ * freehand/annotation, Fibonacci, Pitchfork, Gann, measure — 10 groups,
+ * 38 tools): each group shows its last-used tool's icon (or the group's
  * first tool if none used yet), with a small chevron. Clicking a
  * group opens a flyout panel to the right of the bar listing that
  * group's tools (icon + Chinese label); picking one arms it, closes
@@ -39,6 +39,7 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
   { title: '斐波那契', ids: ['fibonacciRetracement', 'fibChannel', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
   { title: 'Pitchfork', ids: ['pitchfork', 'schiffPitchfork', 'modifiedSchiffPitchfork', 'insidePitchfork'] },
+  { title: 'Gann', ids: ['gannFan', 'gannSquare', 'gannBox'] },
   { title: '測量', ids: ['measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
@@ -289,6 +290,35 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
           <line x1="4" y1="16" x2="17" y2="14" />
           <line x1="11" y1="10" x2="17" y2="10" strokeWidth="2" />
           <circle cx="10.5" cy="10" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'gannFan':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="17" y2="16" />
+          <line x1="4" y1="16" x2="17" y2="11" opacity="0.8" />
+          <line x1="4" y1="16" x2="17" y2="6" opacity="0.65" />
+          <line x1="4" y1="16" x2="17" y2="3.5" />
+          <circle cx="4" cy="16" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'gannSquare':
+      return (
+        <svg {...ICON_PROPS}>
+          <rect x="3.5" y="3.5" width="13" height="13" />
+          <line x1="10" y1="3.5" x2="10" y2="16.5" opacity="0.7" />
+          <line x1="3.5" y1="10" x2="16.5" y2="10" opacity="0.7" />
+          <line x1="3.5" y1="3.5" x2="16.5" y2="16.5" opacity="0.5" />
+        </svg>
+      );
+    case 'gannBox':
+      return (
+        <svg {...ICON_PROPS}>
+          <rect x="3.5" y="5" width="13" height="10" />
+          <line x1="10" y1="5" x2="10" y2="15" opacity="0.7" />
+          <line x1="3.5" y1="10" x2="16.5" y2="10" opacity="0.7" />
+          <line x1="3.5" y1="5" x2="16.5" y2="15" opacity="0.5" />
+          <line x1="3.5" y1="15" x2="16.5" y2="5" opacity="0.5" />
         </svg>
       );
     case 'rectangle':

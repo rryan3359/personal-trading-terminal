@@ -63,15 +63,20 @@ import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
   FIB_LEVEL_COLORS,
+  GANN_FAN_ANGLES,
   fibExtendOf,
   fibLevelsOf,
+  gannExtendOf,
+  gannOptionsOf,
   hexToRgba,
   isFibTool,
+  isGannTool,
   isPitchforkTool,
   pitchExtendOf,
   pitchOptionsOf,
   registerFibonacciRetracementOverlay,
   registerFibonacciToolsOverlays,
+  registerGannOverlays,
   registerGeometryOverlays,
   registerMeasureOverlay,
   registerPitchforkOverlays,
@@ -233,6 +238,16 @@ interface SelectedOverlayState {
   showMedian: boolean;
   showOuter: boolean;
   medianBold: boolean;
+  /** Gann fan: line extension, per-angle visibility, 1x1 bold, angle labels. */
+  gannExtend: 'none' | 'right' | 'both';
+  gannAnglesEnabled: boolean[];
+  gannMainBold: boolean;
+  gannAngleText: boolean;
+  /** Gann square/box: grid divisions, diagonals, midlines, scale labels. */
+  gannGrid: number;
+  gannShowDiagonal: boolean;
+  gannShowMidlines: boolean;
+  gannShowLabels: boolean;
 }
 
 /** Horizontal tools show their price on the right Y axis. */
@@ -939,6 +954,17 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.showOuter = opts.showOuter;
       ext.medianBold = opts.medianBold;
     }
+    if (isGannTool(saved.name)) {
+      ext.gannExtend = gannExtendOf({ extendData: ext });
+      const opts = gannOptionsOf({ extendData: ext }, saved.name);
+      ext.gannAnglesEnabled = opts.anglesEnabled;
+      ext.gannMainBold = opts.mainBold;
+      ext.gannAngleText = opts.angleText;
+      ext.gannGrid = opts.grid;
+      ext.gannShowDiagonal = opts.showDiagonal;
+      ext.gannShowMidlines = opts.showMidlines;
+      ext.gannShowLabels = opts.showLabels;
+    }
     // Price label (needDefaultYAxisFigure). Horizontal tools, rectangles
     // and Fibonacci default to on; other line tools default to off;
     // simpleTag's own Y-axis tag already shows the price (see
@@ -1176,6 +1202,17 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const pitchOpts = isPitchforkTool(o.name)
       ? pitchOptionsOf({ extendData: ext })
       : { showMedian: true, showOuter: true, medianBold: false };
+    const gannOpts = isGannTool(o.name)
+      ? gannOptionsOf({ extendData: ext }, o.name)
+      : {
+          anglesEnabled: GANN_FAN_ANGLES.map(() => true),
+          mainBold: false,
+          angleText: true,
+          grid: 4,
+          showDiagonal: true,
+          showMidlines: false,
+          showLabels: true,
+        };
     setSelectedState({
       id: o.id,
       name: o.name,
@@ -1216,6 +1253,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       showMedian: pitchOpts.showMedian,
       showOuter: pitchOpts.showOuter,
       medianBold: pitchOpts.medianBold,
+      gannExtend: gannExtendOf({ extendData: ext }),
+      gannAnglesEnabled: gannOpts.anglesEnabled,
+      gannMainBold: gannOpts.mainBold,
+      gannAngleText: gannOpts.angleText,
+      gannGrid: gannOpts.grid,
+      gannShowDiagonal: gannOpts.showDiagonal,
+      gannShowMidlines: gannOpts.showMidlines,
+      gannShowLabels: gannOpts.showLabels,
     });
   };
 
@@ -1301,6 +1346,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.showMedian = next.showMedian;
       ext.showOuter = next.showOuter;
       ext.medianBold = next.medianBold;
+    }
+    if (isGannTool(next.name)) {
+      ext.gannExtend = next.gannExtend;
+      ext.gannAnglesEnabled = next.gannAnglesEnabled;
+      ext.gannMainBold = next.gannMainBold;
+      ext.gannAngleText = next.gannAngleText;
+      ext.gannGrid = next.gannGrid;
+      ext.gannShowDiagonal = next.gannShowDiagonal;
+      ext.gannShowMidlines = next.gannShowMidlines;
+      ext.gannShowLabels = next.gannShowLabels;
     }
     chart.overrideOverlay({
       id: cur.id,
@@ -1458,6 +1513,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     showMedian: cur.showMedian,
     showOuter: cur.showOuter,
     medianBold: cur.medianBold,
+    gannExtend: cur.gannExtend,
+    gannAnglesEnabled: [...cur.gannAnglesEnabled],
+    gannMainBold: cur.gannMainBold,
+    gannAngleText: cur.gannAngleText,
+    gannGrid: cur.gannGrid,
+    gannShowDiagonal: cur.gannShowDiagonal,
+    gannShowMidlines: cur.gannShowMidlines,
+    gannShowLabels: cur.gannShowLabels,
     text: cur.text ? { ...cur.text } : null,
     points: cur.points.map((p) => ({ ...p })),
     visibleIntervals: cur.visibleIntervals
@@ -1583,6 +1646,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.showMedian = draft.showMedian;
       ext.showOuter = draft.showOuter;
       ext.medianBold = draft.medianBold;
+    }
+    if (isGannTool(o.name)) {
+      ext.gannExtend = draft.gannExtend;
+      ext.gannAnglesEnabled = draft.gannAnglesEnabled;
+      ext.gannMainBold = draft.gannMainBold;
+      ext.gannAngleText = draft.gannAngleText;
+      ext.gannGrid = draft.gannGrid;
+      ext.gannShowDiagonal = draft.gannShowDiagonal;
+      ext.gannShowMidlines = draft.gannShowMidlines;
+      ext.gannShowLabels = draft.gannShowLabels;
     }
     const points = draft.points.map((p) => ({
       timestamp: p.timestamp,
@@ -1749,6 +1822,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerFibonacciRetracementOverlay();
     registerFibonacciToolsOverlays();
     registerPitchforkOverlays();
+    registerGannOverlays();
     registerMeasureOverlay();
     registerTextAnnotationOverlay();
     registerSimpleTagOverlay();

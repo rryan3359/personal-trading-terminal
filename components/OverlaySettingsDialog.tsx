@@ -12,8 +12,10 @@
 import { useEffect, useState } from 'react';
 import ColorPicker from '@/components/ColorPicker';
 import {
+  GANN_FAN_ANGLES,
   fibHasLevels,
   isFibTool,
+  isGannTool,
   isPitchforkTool,
 } from '@/lib/chart-theme';
 import {
@@ -61,6 +63,16 @@ export interface OverlayDialogDraft {
   showMedian: boolean;
   showOuter: boolean;
   medianBold: boolean;
+  /** Gann fan: line extension, per-angle visibility, 1x1 bold, angle labels. */
+  gannExtend: 'none' | 'right' | 'both';
+  gannAnglesEnabled: boolean[];
+  gannMainBold: boolean;
+  gannAngleText: boolean;
+  /** Gann square/box: grid divisions, diagonals, midlines, scale labels. */
+  gannGrid: number;
+  gannShowDiagonal: boolean;
+  gannShowMidlines: boolean;
+  gannShowLabels: boolean;
   /** Attached text. null = no text. */
   text: OverlayText | null;
   points: Array<{ timestamp: number; value: number }>;
@@ -202,6 +214,10 @@ function coordLabel(toolName: string, i: number): string {
     return `#${i + 1}（${['頂點', '邊界 1', '邊界 2'][i] ?? '點'}）`;
   if (isPitchforkTool(toolName))
     return `#${i + 1}（${['P0', 'P1', 'P2'][i] ?? '點'}）`;
+  if (toolName === 'gannFan')
+    return `#${i + 1}（${['起點', '方向點'][i] ?? '點'}）`;
+  if (toolName === 'gannSquare' || toolName === 'gannBox')
+    return `#${i + 1}（${['角 1', '角 2'][i] ?? '點'}）`;
   return `#${i + 1}（價格，K棒）`;
 }
 
@@ -218,6 +234,10 @@ export default function OverlaySettingsDialog({
   const family: LineFamily | null = lineFamilyOf(toolName);
   const isFib = isFibTool(toolName);
   const isPitchfork = isPitchforkTool(toolName);
+  const isGann = isGannTool(toolName);
+  const isGannFan = toolName === 'gannFan';
+  /** Gann square / box: grid + diagonals + midlines + labels. */
+  const isGannGrid = toolName === 'gannSquare' || toolName === 'gannBox';
   const isRetracement = toolName === 'fibonacciRetracement';
   const isTimeZones = toolName === 'fibTimeZones';
   /** Fib tools with editable levels (all except the spiral). */
@@ -229,6 +249,18 @@ export default function OverlaySettingsDialog({
   const [levelsText, setLevelsText] = useState(
     initial.fibLevels.join(', '),
   );
+  /** Grid divisions editor text; committed on blur (clamped 1–8). */
+  const [gridText, setGridText] = useState(String(initial.gannGrid));
+  const commitGrid = () => {
+    const n = Math.floor(Number(gridText));
+    if (!Number.isFinite(n)) {
+      setGridText(String(draft.gannGrid));
+      return;
+    }
+    const clamped = Math.max(1, Math.min(8, n));
+    setGridText(String(clamped));
+    if (clamped !== draft.gannGrid) patch({ gannGrid: clamped });
+  };
   const commitLevels = () => {
     const parsed = levelsText
       .split(',')
@@ -752,6 +784,139 @@ export default function OverlaySettingsDialog({
                     />
                     中線加粗
                   </label>
+                </div>
+              )}
+              {isGann && (
+                <div className="space-y-3 rounded border border-[#2a2e39] p-2">
+                  {isGannFan && (
+                    <>
+                      <div>
+                        <label className={FIELD_LABEL}>角度線延伸</label>
+                        <select
+                          value={draft.gannExtend}
+                          onChange={(e) =>
+                            patch({
+                              gannExtend: e.target.value as
+                                | 'none'
+                                | 'right'
+                                | 'both',
+                            })
+                          }
+                          className={SELECT}
+                        >
+                          <option value="none">不要延長</option>
+                          <option value="right">向右</option>
+                          <option value="both">雙向</option>
+                        </select>
+                      </div>
+                      <div>
+                        <span className={FIELD_LABEL}>角度線</span>
+                        <div className="space-y-1">
+                          {GANN_FAN_ANGLES.map((a, i) => (
+                            <label
+                              key={a.label}
+                              className={`${CHECK_ROW} ${
+                                draft.gannAnglesEnabled[i] === false
+                                  ? 'opacity-40'
+                                  : ''
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={
+                                  draft.gannAnglesEnabled[i] !== false
+                                }
+                                onChange={(e) => {
+                                  const next = [
+                                    ...draft.gannAnglesEnabled,
+                                  ];
+                                  next[i] = e.target.checked;
+                                  patch({ gannAnglesEnabled: next });
+                                }}
+                                className="accent-[#2962ff]"
+                              />
+                              {a.label}
+                              {a.ratio === 1 ? '（主線）' : ''}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                      <label className={CHECK_ROW}>
+                        <input
+                          type="checkbox"
+                          checked={draft.gannMainBold}
+                          onChange={(e) =>
+                            patch({ gannMainBold: e.target.checked })
+                          }
+                          className="accent-[#2962ff]"
+                        />
+                        1x1 主線加粗
+                      </label>
+                      <label className={CHECK_ROW}>
+                        <input
+                          type="checkbox"
+                          checked={draft.gannAngleText}
+                          onChange={(e) =>
+                            patch({ gannAngleText: e.target.checked })
+                          }
+                          className="accent-[#2962ff]"
+                        />
+                        顯示角度文字（角度與價格）
+                      </label>
+                    </>
+                  )}
+                  {isGannGrid && (
+                    <>
+                      <div>
+                        <label className={FIELD_LABEL}>
+                          網格分割（每邊 1–8）
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={8}
+                          step={1}
+                          value={gridText}
+                          onChange={(e) => setGridText(e.target.value)}
+                          onBlur={commitGrid}
+                          className={INPUT}
+                        />
+                      </div>
+                      <label className={CHECK_ROW}>
+                        <input
+                          type="checkbox"
+                          checked={draft.gannShowDiagonal}
+                          onChange={(e) =>
+                            patch({ gannShowDiagonal: e.target.checked })
+                          }
+                          className="accent-[#2962ff]"
+                        />
+                        對角線
+                      </label>
+                      <label className={CHECK_ROW}>
+                        <input
+                          type="checkbox"
+                          checked={draft.gannShowMidlines}
+                          onChange={(e) =>
+                            patch({ gannShowMidlines: e.target.checked })
+                          }
+                          className="accent-[#2962ff]"
+                        />
+                        中線（十字）
+                      </label>
+                      <label className={CHECK_ROW}>
+                        <input
+                          type="checkbox"
+                          checked={draft.gannShowLabels}
+                          onChange={(e) =>
+                            patch({ gannShowLabels: e.target.checked })
+                          }
+                          className="accent-[#2962ff]"
+                        />
+                        刻度標示（價格／日期）
+                      </label>
+                    </>
+                  )}
                 </div>
               )}
                 </>

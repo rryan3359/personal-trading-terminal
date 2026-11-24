@@ -32,6 +32,11 @@
  * also registered in lib/chart-theme.ts; options in extendData are
  * pitchExtend ('none' | 'right' | 'both'), showMedian, showOuter,
  * medianBold.
+ * Gann batch (custom overlays, TV-only): `gannFan`, `gannSquare`,
+ * `gannBox` — also registered in lib/chart-theme.ts; options in
+ * extendData are gannExtend ('none' | 'right' | 'both', fan only),
+ * gannAnglesEnabled, gannMainBold, gannAngleText, gannGrid,
+ * gannShowDiagonal, gannShowMidlines, gannShowLabels.
  */
 export type DrawingTool =
   | 'segment'
@@ -60,6 +65,9 @@ export type DrawingTool =
   | 'schiffPitchfork'
   | 'modifiedSchiffPitchfork'
   | 'insidePitchfork'
+  | 'gannFan'
+  | 'gannSquare'
+  | 'gannBox'
   | 'rectangle'
   | 'measure'
   | 'ellipse'
@@ -83,6 +91,9 @@ export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'schiffPitchfork',
   'modifiedSchiffPitchfork',
   'insidePitchfork',
+  'gannFan',
+  'gannSquare',
+  'gannBox',
   'rectangle',
   'measure',
   'textAnnotation',
@@ -131,6 +142,9 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'schiffPitchfork', label: 'Schiff Pitchfork' },
   { id: 'modifiedSchiffPitchfork', label: '修正 Schiff Pitchfork' },
   { id: 'insidePitchfork', label: '內部 Pitchfork' },
+  { id: 'gannFan', label: 'Gann 扇形' },
+  { id: 'gannSquare', label: 'Gann 方形' },
+  { id: 'gannBox', label: 'Gann 箱體' },
   { id: 'rectangle', label: '矩形' },
   { id: 'measure', label: '量測' },
   { id: 'ellipse', label: '橢圓' },
@@ -277,6 +291,9 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   schiffPitchfork: 'Schiff Pitchfork',
   modifiedSchiffPitchfork: '修正 Schiff Pitchfork',
   insidePitchfork: '內部 Pitchfork',
+  gannFan: 'Gann 扇形',
+  gannSquare: 'Gann 方形',
+  gannBox: 'Gann 箱體',
   rectangle: '矩形',
   measure: '量測',
   ellipse: '橢圓',

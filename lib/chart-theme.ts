@@ -76,11 +76,26 @@
  *                           (halfway between P0 and the Schiff origin)
  *   insidePitchfork      -> median origin at M itself; P0 only sets
  *                           the direction
+ *   Gann batch (TV-only tools; options in extendData —
+ *   gannExtend / gannAnglesEnabled / gannMainBold / gannAngleText /
+ *   gannGrid / gannShowDiagonal / gannShowMidlines / gannShowLabels):
+ *   gannFan              -> 2 points (anchor + direction point). The
+ *                           P0->P1 line IS the 1x1 line; the other 6
+ *                           angle lines are rays from P0 whose pixel
+ *                           slope is k * the 1x1 pixel slope
+ *                           (k = 1/8, 1/4, 1/2, 2, 4, 8), so the fan
+ *                           is exact in data space (price per bar)
+ *                           whatever the axis scale is
+ *   gannSquare           -> 2 points (opposite corners), 4x4 grid +
+ *                           diagonals + price / date scale labels
+ *   gannBox              -> 2 points (opposite corners), 3x3 grid +
+ *                           diagonals + midlines + scale labels
  */
 
 import {
   registerFigure,
   registerOverlay,
+  type Chart,
   type DeepPartial,
   type Overlay,
   type Styles,
@@ -1915,5 +1930,385 @@ export function registerPitchforkOverlays(): void {
         return figures as never;
       },
     });
+  });
+}
+
+// ---- gann batch (TV-only tools) ------------------------------------
+
+/**
+ * Gann tools: 3 TV-only tools, all custom overlays (klinecharts has
+ * no built-ins for them). All geometry is computed in pixel space
+ * from `coordinates`, so a saved overlay restores correctly on any
+ * symbol / interval.
+ *   gannFan    -> 2 points (anchor + direction point). The P0->P1
+ *                 line IS the 1x1 line; the other 6 angle lines are
+ *                 rays from P0 whose pixel slope is k * the 1x1
+ *                 pixel slope (k = 1/8, 1/4, 1/2, 2, 4, 8), so the
+ *                 fan is exact in data space (price per bar) whatever
+ *                 the axis scale is. Extendable right / both.
+ *   gannSquare -> 2 points (opposite corners of the box), 4x4 grid
+ *                 (default) + diagonals + price / date scale labels.
+ *   gannBox    -> 2 points (opposite corners), 3x3 grid (default) +
+ *                 diagonals + centre midlines + scale labels.
+ * Options in extendData:
+ *   gannExtend        -> 'none' | 'right' | 'both' (fan only,
+ *                        default 'right')
+ *   gannAnglesEnabled -> boolean[7] parallel to GANN_FAN_ANGLES
+ *                        (missing / non-boolean = enabled, so old
+ *                        saves draw every angle)
+ *   gannMainBold      -> the 1x1 line is drawn one size thicker
+ *                        (default false)
+ *   gannAngleText     -> show the angle + price labels (default true)
+ *   gannGrid          -> grid divisions per side, 1-8 (square
+ *                        default 4, box default 3)
+ *   gannShowDiagonal  -> draw both diagonals (default true)
+ *   gannShowMidlines  -> draw the centre cross (box default true,
+ *                        square default false)
+ *   gannShowLabels    -> price labels on the left edge + date labels
+ *                        along the bottom (default true)
+ * All lines use the overlay's main line colour, so the floating
+ * bar's colour pick applies directly.
+ */
+
+/** The Gann fan's 7 angle lines: label + slope ratio vs the 1x1 line. */
+export const GANN_FAN_ANGLES: ReadonlyArray<{
+  label: string;
+  ratio: number;
+}> = [
+  { label: '1x8', ratio: 1 / 8 },
+  { label: '1x4', ratio: 1 / 4 },
+  { label: '1x2', ratio: 1 / 2 },
+  { label: '1x1', ratio: 1 },
+  { label: '2x1', ratio: 2 },
+  { label: '4x1', ratio: 4 },
+  { label: '8x1', ratio: 8 },
+];
+
+/** The Gann family. */
+export const GANN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'gannFan',
+  'gannSquare',
+  'gannBox',
+]);
+
+export function isGannTool(name: string): boolean {
+  return GANN_TOOL_NAMES.has(name);
+}
+
+/** Default grid divisions per side: square 4x4, box 3x3. */
+export function gannDefaultGrid(name: string): number {
+  return name === 'gannBox' ? 3 : 4;
+}
+
+/** Line extension for the fan ('none' | 'right' | 'both'). */
+export function gannExtendOf(overlay: {
+  extendData?: unknown;
+}): 'none' | 'right' | 'both' {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  if (ext.gannExtend === 'none' || ext.gannExtend === 'both')
+    return ext.gannExtend;
+  return 'right';
+}
+
+export interface GannOptions {
+  /** Per-angle on/off, parallel to GANN_FAN_ANGLES. */
+  anglesEnabled: boolean[];
+  mainBold: boolean;
+  angleText: boolean;
+  /** Grid divisions per side (square / box). */
+  grid: number;
+  showDiagonal: boolean;
+  showMidlines: boolean;
+  showLabels: boolean;
+}
+
+/** All Gann options from extendData, with per-tool defaults. */
+export function gannOptionsOf(
+  overlay: { extendData?: unknown },
+  name: string,
+): GannOptions {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  const enabled = Array.isArray(ext.gannAnglesEnabled)
+    ? (ext.gannAnglesEnabled as unknown[])
+    : [];
+  const grid =
+    typeof ext.gannGrid === 'number' &&
+    Number.isFinite(ext.gannGrid) &&
+    ext.gannGrid >= 1 &&
+    ext.gannGrid <= 8
+      ? Math.floor(ext.gannGrid)
+      : gannDefaultGrid(name);
+  return {
+    anglesEnabled: GANN_FAN_ANGLES.map((_, i) => enabled[i] !== false),
+    mainBold: ext.gannMainBold === true,
+    angleText: ext.gannAngleText !== false,
+    grid,
+    showDiagonal: ext.gannShowDiagonal !== false,
+    showMidlines:
+      ext.gannShowMidlines === true ||
+      (ext.gannShowMidlines !== false && name === 'gannBox'),
+    showLabels: ext.gannShowLabels !== false,
+  };
+}
+
+type GannPt = { x: number; y: number };
+
+/** Non-hittable angle label for the fan (the registered 'textNoHit'
+ *  figure: unlike the built-in 'text' figure, it draws no background
+ *  chip when backgroundColor is unset — the built-in paints the
+ *  label's rect in the overlay's line colour — and its checkEventOn
+ *  is false, so clicks pass through to the drawing underneath). */
+function gannAngleLabel(
+  x: number,
+  y: number,
+  text: string,
+  color: string,
+): Record<string, unknown> {
+  return {
+    type: 'textNoHit',
+    attrs: [{ x, y, text, baseline: 'bottom' }],
+    styles: { color },
+  };
+}
+
+/**
+ * Border + grid + diagonals + midlines + scale labels for a Gann
+ * square / box, from the two opposite-corner pixels. Returns [] when
+ * the box is degenerate (under 2px on a side). The price at a
+ * horizontal grid row and the date at a vertical grid column are
+ * interpolated linearly between the two anchor data points, so the
+ * labels stay correct after a restore on any symbol / interval.
+ */
+function gannGridFigures(
+  chart: Chart,
+  coordinates: Array<GannPt>,
+  overlay: Overlay,
+  name: string,
+): Array<Record<string, unknown>> {
+  if (coordinates.length < 2) return [];
+  const [c0, c1] = coordinates;
+  const p0 = overlay.points[0];
+  const p1 = overlay.points[1];
+  if (
+    p0?.value === undefined ||
+    p1?.value === undefined ||
+    p0?.timestamp === undefined ||
+    p1?.timestamp === undefined
+  )
+    return [];
+  const w = Math.abs(c1.x - c0.x);
+  const h = Math.abs(c1.y - c0.y);
+  if (w < 2 || h < 2) return [];
+  const v0 = p0.value;
+  const v1 = p1.value;
+  const t0 = p0.timestamp;
+  const t1 = p1.timestamp;
+  const x0 = Math.min(c0.x, c1.x);
+  const x1 = Math.max(c0.x, c1.x);
+  const y0 = Math.min(c0.y, c1.y);
+  const y1 = Math.max(c0.y, c1.y);
+  const line = geomLineStyle(overlay);
+  const styles = geomLineFigureStyles(line);
+  const opts = gannOptionsOf(overlay, name);
+  const n = opts.grid;
+  const figures: Array<Record<string, unknown>> = [];
+  // Border: the polygon figure carries the ±2px hit line, so the
+  // border is clickable (the polygon's own hit test is zero-
+  // tolerance on the edge).
+  figures.push(
+    ...geomPolygonFigure(
+      [
+        { x: x0, y: y0 },
+        { x: x1, y: y0 },
+        { x: x1, y: y1 },
+        { x: x0, y: y1 },
+      ],
+      overlay,
+    ),
+  );
+  for (let i = 1; i < n; i++) {
+    const x = x0 + (w * i) / n;
+    figures.push({
+      type: 'line',
+      attrs: { coordinates: [{ x, y: y0 }, { x, y: y1 }] },
+      styles,
+    });
+  }
+  for (let i = 1; i < n; i++) {
+    const y = y0 + (h * i) / n;
+    figures.push({
+      type: 'line',
+      attrs: { coordinates: [{ x: x0, y }, { x: x1, y }] },
+      styles,
+    });
+  }
+  if (opts.showDiagonal) {
+    figures.push({
+      type: 'line',
+      attrs: { coordinates: [{ x: x0, y: y0 }, { x: x1, y: y1 }] },
+      styles,
+    });
+    figures.push({
+      type: 'line',
+      attrs: { coordinates: [{ x: x0, y: y1 }, { x: x1, y: y0 }] },
+      styles,
+    });
+  }
+  if (opts.showMidlines) {
+    const mx = (x0 + x1) / 2;
+    const my = (y0 + y1) / 2;
+    figures.push({
+      type: 'line',
+      attrs: { coordinates: [{ x: mx, y: y0 }, { x: mx, y: y1 }] },
+      styles,
+    });
+    figures.push({
+      type: 'line',
+      attrs: { coordinates: [{ x: x0, y: my }, { x: x1, y: my }] },
+      styles,
+    });
+  }
+  if (opts.showLabels) {
+    const precision = chart.getSymbol?.()?.pricePrecision ?? 2;
+    const valueAtY = (y: number) =>
+      v0 + ((y - c0.y) / (c1.y - c0.y)) * (v1 - v0);
+    for (let i = 0; i <= n; i++) {
+      const y = y0 + (h * i) / n;
+      figures.push(
+        gannAngleLabel(
+          x0 + 4,
+          y,
+          `${valueAtY(y).toFixed(precision)}`,
+          line.color,
+        ),
+      );
+    }
+    const timeAtX = (x: number) =>
+      t0 + ((x - c0.x) / (c1.x - c0.x)) * (t1 - t0);
+    // Dates sit just BELOW the box (baseline 'top'), so the first
+    // column never overlaps the bottom row's price label.
+    for (let i = 0; i <= n; i++) {
+      const x = x0 + (w * i) / n;
+      const d = new Date(timeAtX(x));
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      figures.push({
+        type: 'textNoHit',
+        attrs: [{ x, y: y1 + 4, text: `${mm}/${dd}`, baseline: 'top' }],
+        styles: { color: line.color },
+      });
+    }
+  }
+  return figures;
+}
+
+/** Horizontal span for one fan line: 'none' keeps the natural
+ *  segment, 'right'/'both' extend along the slope like the fib
+ *  tools (fibXSpan). */
+function gannFanXSpan(
+  a: GannPt,
+  b: GannPt,
+  width: number,
+  extend: 'none' | 'right' | 'both',
+): { xStart: number; xEnd: number } {
+  if (extend === 'none') {
+    return { xStart: Math.min(a.x, b.x), xEnd: Math.max(a.x, b.x) };
+  }
+  return fibXSpan(a.x, b.x, width, extend);
+}
+
+let gannRegistered = false;
+
+/**
+ * Register the 3 Gann overlays once per page load (see the section
+ * header). All take 2 clicks (totalStep 3).
+ */
+export function registerGannOverlays(): void {
+  if (gannRegistered) return;
+  gannRegistered = true;
+
+  registerOverlay({
+    name: 'gannFan',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ chart, coordinates, bounding, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [c0, c1] = coordinates;
+      const p0 = overlay.points[0];
+      const p1 = overlay.points[1];
+      if (p0?.value === undefined || p1?.value === undefined) return [];
+      const line = geomLineStyle(overlay);
+      // A vertical reference line has no slope to fan from: the
+      // angle lines would all coincide on the reference itself.
+      if (Math.abs(c1.x - c0.x) < 1) {
+        return [
+          {
+            type: 'line',
+            attrs: { coordinates: [c0, c1] },
+            styles: geomLineFigureStyles(line),
+          },
+        ] as never;
+      }
+      const precision = chart.getSymbol()?.pricePrecision ?? 2;
+      const v0 = p0.value;
+      const dv = p1.value - p0.value;
+      const extend = gannExtendOf(overlay);
+      const opts = gannOptionsOf(overlay, 'gannFan');
+      const figures: Array<Record<string, unknown>> = [];
+      GANN_FAN_ANGLES.forEach((a, i) => {
+        if (!opts.anglesEnabled[i]) return;
+        // Ray from the anchor through the point at the second
+        // anchor's time, a.ratio of the price move — the 1x1 line
+        // passes through P1 itself.
+        const end = { x: c1.x, y: c0.y + a.ratio * (c1.y - c0.y) };
+        const { xStart, xEnd } = gannFanXSpan(
+          c0,
+          end,
+          bounding.width,
+          extend,
+        );
+        const styles = geomLineFigureStyles(
+          a.ratio === 1 && opts.mainBold
+            ? { ...line, size: line.size + 1 }
+            : line,
+        );
+        figures.push(
+          fibExtendedLineFigure(c0, end, xStart, xEnd, styles),
+        );
+        if (opts.angleText) {
+          figures.push(
+            gannAngleLabel(
+              end.x,
+              end.y,
+              `${a.label} ${(v0 + a.ratio * dv).toFixed(precision)}`,
+              line.color,
+            ),
+          );
+        }
+      });
+      return figures as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'gannSquare',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ chart, coordinates, overlay }) =>
+      gannGridFigures(chart, coordinates, overlay, 'gannSquare') as never,
+  });
+
+  registerOverlay({
+    name: 'gannBox',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ chart, coordinates, overlay }) =>
+      gannGridFigures(chart, coordinates, overlay, 'gannBox') as never,
   });
 }
