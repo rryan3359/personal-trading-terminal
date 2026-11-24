@@ -19,6 +19,9 @@
  * text overlay (Phase 2), and `simpleTag` is a custom re-registration
  * of the built-in (its Y-axis tag reads extendData as a raw string,
  * which collides with the object extendData this app persists).
+ * Geometry batch (custom overlays, klinecharts has no built-ins for
+ * them): `ellipse`, `triangle`, `arc`, `curve`, `path`, `pen`,
+ * `arrow` — also registered in lib/chart-theme.ts.
  */
 export type DrawingTool =
   | 'segment'
@@ -38,7 +41,14 @@ export type DrawingTool =
   | 'textAnnotation'
   | 'fibonacciRetracement'
   | 'rectangle'
-  | 'measure';
+  | 'measure'
+  | 'ellipse'
+  | 'triangle'
+  | 'arc'
+  | 'curve'
+  | 'path'
+  | 'pen'
+  | 'arrow';
 
 /** Custom overlays (registered in lib/chart-theme.ts, not klinecharts built-ins). */
 export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
@@ -47,7 +57,22 @@ export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'measure',
   'textAnnotation',
   'simpleTag',
+  'ellipse',
+  'triangle',
+  'arc',
+  'curve',
+  'path',
+  'pen',
+  'arrow',
 ]);
+
+/**
+ * Max points for the multi-point step-mode tools (path, pen). Their
+ * totalStep is this + 1, so a drawing auto-finishes at the cap; the
+ * normal finish gesture is a double-click (the library force-
+ * completes an in-progress overlay on double-click).
+ */
+export const MULTI_POINT_MAX_POINTS = 50;
 
 export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'segment', label: '趨勢線' },
@@ -68,6 +93,13 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'fibonacciRetracement', label: '斐波那契' },
   { id: 'rectangle', label: '矩形' },
   { id: 'measure', label: '量測' },
+  { id: 'ellipse', label: '橢圓' },
+  { id: 'triangle', label: '三角形' },
+  { id: 'arc', label: '弧線' },
+  { id: 'curve', label: '曲線' },
+  { id: 'arrow', label: '箭頭' },
+  { id: 'path', label: '路徑' },
+  { id: 'pen', label: '鋼筆' },
 ];
 
 /** Line style ids. 'dotted' renders as dashed + dashedValue [1, 4]
@@ -197,6 +229,13 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   fibonacciRetracement: '斐波那契',
   rectangle: '矩形',
   measure: '量測',
+  ellipse: '橢圓',
+  triangle: '三角形',
+  arc: '弧線',
+  curve: '曲線',
+  arrow: '箭頭',
+  path: '路徑',
+  pen: '鋼筆',
 };
 
 /** Indicators offered in the toolbar (all are klinecharts built-ins). */

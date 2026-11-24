@@ -33,16 +33,32 @@
  *                           reads extendData.tagText (else the price)
  *                           instead of the raw extendData object, and
  *                           the point figure is on so it is selectable.
+ *   Geometry batch (TV-only tools, no klinecharts built-ins):
+ *   ellipse              -> 2 points (bounding-box corners), polygon-
+ *                           sampled ellipse, optional fill
+ *   triangle             -> 3 points, polygon, optional fill
+ *   arc                  -> 3 points (start, end, on-arc), circumcircle
+ *                           arc figure, straight-line fallback when
+ *                           the points are collinear
+ *   curve                -> 3 points (start, control, end), quadratic
+ *                           bezier sampled into a line figure
+ *   path                 -> up to 50 points, polyline; double-click
+ *                           (or Esc, see Chart.tsx) finishes
+ *   pen                  -> like path but the line figure smooths
+ *                           through the points
+ *   arrow                -> 2 points, line + filled triangular head
  */
 
 import {
   registerFigure,
   registerOverlay,
   type DeepPartial,
+  type Overlay,
   type Styles,
   type TextAttrs,
   type TextStyle,
 } from 'klinecharts';
+import { MULTI_POINT_MAX_POINTS } from '@/lib/chart-config';
 
 export const DARK_STYLES: DeepPartial<Styles> = {
   grid: {
@@ -732,6 +748,360 @@ export function registerMeasureOverlay(): void {
             baseline: 'top',
           })),
           styles: { color },
+        },
+      ] as never;
+    },
+  });
+}
+
+// ---- geometry batch (TV-only tools) -------------------------------------
+
+type GeomLineStyle = {
+  color: string;
+  size: number;
+  style: 'solid' | 'dashed';
+  dashedValue?: number[];
+};
+
+/** Border/line style of one geometry drawing, from the overlay itself
+ *  (stylesForOverlay in Chart.tsx already folded opacity into the
+ *  rgba line colour). */
+function geomLineStyle(overlay: Overlay): GeomLineStyle {
+  const line = overlay.styles?.line;
+  return {
+    color: line?.color ?? '#2962ff',
+    size: line?.size ?? 1,
+    style: line?.style === 'dashed' ? 'dashed' : 'solid',
+    dashedValue: Array.isArray(line?.dashedValue)
+      ? (line.dashedValue as number[])
+      : undefined,
+  };
+}
+
+/** Fill switch + opacity for the closed shapes (ellipse, triangle),
+ *  from extendData. Default: border only, like the rectangle. */
+function geomFillOf(overlay: {
+  extendData?: unknown;
+}): { fill: boolean; fillOpacity: number } {
+  const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+  return {
+    fill: ext.fill === true,
+    fillOpacity:
+      typeof ext.fillOpacity === 'number' ? ext.fillOpacity : 0.08,
+  };
+}
+
+/** 'line' figure styles for one geometry drawing. */
+function geomLineFigureStyles(
+  line: GeomLineStyle,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    color: line.color,
+    size: line.size,
+    style: line.style,
+    ...(line.dashedValue ? { dashedValue: line.dashedValue } : {}),
+    ...extra,
+  };
+}
+
+/** 'polygon' figure for a closed shape: border from the line style,
+ *  optional fill at extendData.fillOpacity. */
+function geomPolygonFigure(
+  coordinates: Array<{ x: number; y: number }>,
+  overlay: Overlay,
+): Record<string, unknown> {
+  const line = geomLineStyle(overlay);
+  const { fill, fillOpacity } = geomFillOf(overlay);
+  return {
+    type: 'polygon',
+    attrs: { coordinates },
+    styles: {
+      style: fill ? 'stroke_fill' : 'stroke',
+      color: hexToRgba(line.color, fillOpacity),
+      borderColor: line.color,
+      borderSize: line.size,
+      borderStyle: line.style,
+      ...(line.dashedValue
+        ? { borderDashedValue: line.dashedValue }
+        : {}),
+    },
+  };
+}
+
+/** Ellipse outline sampled as a polygon (no ellipse figure exists in
+ *  klinecharts 10.1.1). 48 segments are indistinguishable from a true
+ *  ellipse at chart scale, and the polygon's point-in-polygon hit test
+ *  makes the whole shape clickable, like the rectangle. */
+function sampleEllipsePoints(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+): Array<{ x: number; y: number }> {
+  const pts: Array<{ x: number; y: number }> = [];
+  const n = 48;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    pts.push({ x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
+  }
+  return pts;
+}
+
+/** Circumcircle of three points, or null when they are collinear
+ *  (determinant ~0). Pixel space — the arc figure works in pixels. */
+function circumcircle(
+  p0: { x: number; y: number },
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+): { x: number; y: number; r: number } | null {
+  const d =
+    2 *
+    (p0.x * (p1.y - p2.y) + p1.x * (p2.y - p0.y) + p2.x * (p0.y - p1.y));
+  if (Math.abs(d) < 1e-9) return null;
+  const sq0 = p0.x * p0.x + p0.y * p0.y;
+  const sq1 = p1.x * p1.x + p1.y * p1.y;
+  const sq2 = p2.x * p2.x + p2.y * p2.y;
+  const x =
+    (sq0 * (p1.y - p2.y) + sq1 * (p2.y - p0.y) + sq2 * (p0.y - p1.y)) / d;
+  const y =
+    (sq0 * (p2.x - p1.x) + sq1 * (p0.x - p2.x) + sq2 * (p1.x - p0.x)) / d;
+  const r = Math.hypot(p0.x - x, p0.y - y);
+  if (!Number.isFinite(r) || r <= 0) return null;
+  return { x, y, r };
+}
+
+/**
+ * Arc angles for a 3-point arc (start p0, end p1, on-arc p2).
+ * ctx.arc strokes with increasing angle, so the returned sweep is
+ * always startAngle -> startAngle + sweep (sweep in (0, 2π)), chosen
+ * so the arc passes through p2. Matches the built-in arc figure's
+ * hit test (checkCoordinateOnArc uses the same sweep convention).
+ */
+function arcAngles(
+  c: { x: number; y: number },
+  p0: { x: number; y: number },
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+): { startAngle: number; endAngle: number } | null {
+  const twoPi = Math.PI * 2;
+  const a0 = Math.atan2(p0.y - c.y, p0.x - c.x);
+  const a1 = Math.atan2(p1.y - c.y, p1.x - c.x);
+  const am = Math.atan2(p2.y - c.y, p2.x - c.x);
+  const norm = (a: number) => ((a % twoPi) + twoPi) % twoPi;
+  const cw = norm(a1 - a0); // increasing-angle sweep p0 -> p1
+  if (cw <= 1e-9 || cw >= twoPi - 1e-9) return null;
+  if (norm(am - a0) <= cw) return { startAngle: a0, endAngle: a0 + cw };
+  const ccw = norm(a0 - a1); // increasing-angle sweep p1 -> p0
+  return { startAngle: a1, endAngle: a1 + ccw };
+}
+
+/** Quadratic bezier p0 -> p2 with control p1, sampled (pixel space). */
+function sampleQuadraticPoints(
+  p0: { x: number; y: number },
+  c: { x: number; y: number },
+  p1: { x: number; y: number },
+): Array<{ x: number; y: number }> {
+  const pts: Array<{ x: number; y: number }> = [];
+  const n = 32;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const u = 1 - t;
+    pts.push({
+      x: u * u * p0.x + 2 * u * t * c.x + t * t * p1.x,
+      y: u * u * p0.y + 2 * u * t * c.y + t * t * p1.y,
+    });
+  }
+  return pts;
+}
+
+let geometryRegistered = false;
+
+/**
+ * Register the 7 geometry overlays once per page load (see the file
+ * header for the per-tool notes). All are step-mode: ellipse/arrow
+ * take 2 clicks (totalStep 3), triangle/arc/curve 3 clicks
+ * (totalStep 4); path/pen take up to MULTI_POINT_MAX_POINTS clicks
+ * (totalStep = max + 1) and finish on double-click — the library
+ * force-completes an in-progress overlay on double-click — or at the
+ * point cap. Esc finishes path/pen too (Chart.tsx drives the same
+ * force-complete through the guarded internal store API).
+ */
+export function registerGeometryOverlays(): void {
+  if (geometryRegistered) return;
+  geometryRegistered = true;
+
+  registerOverlay({
+    name: 'ellipse',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [a, b] = coordinates;
+      const rx = Math.abs(b.x - a.x) / 2;
+      const ry = Math.abs(b.y - a.y) / 2;
+      if (rx < 1 || ry < 1) return [];
+      return [
+        geomPolygonFigure(
+          sampleEllipsePoints((a.x + b.x) / 2, (a.y + b.y) / 2, rx, ry),
+          overlay,
+        ),
+      ] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'triangle',
+    totalStep: 4,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 3) return [];
+      return [geomPolygonFigure(coordinates.slice(0, 3), overlay)] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'arc',
+    totalStep: 4,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 3) return [];
+      const [p0, p1, p2] = coordinates;
+      const line = geomLineStyle(overlay);
+      const lineFigure = {
+        type: 'line',
+        attrs: { coordinates: [p0, p1] },
+        styles: geomLineFigureStyles(line),
+      };
+      const c = circumcircle(p0, p1, p2);
+      const angles = c ? arcAngles(c, p0, p1, p2) : null;
+      if (!c || !angles) return [lineFigure] as never;
+      return [
+        {
+          type: 'arc',
+          attrs: {
+            x: c.x,
+            y: c.y,
+            r: c.r,
+            startAngle: angles.startAngle,
+            endAngle: angles.endAngle,
+          },
+          styles: geomLineFigureStyles(line),
+        },
+      ] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'curve',
+    totalStep: 4,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 3) return [];
+      const [p0, c, p1] = coordinates;
+      const line = geomLineStyle(overlay);
+      return [
+        {
+          type: 'line',
+          attrs: { coordinates: sampleQuadraticPoints(p0, c, p1) },
+          styles: geomLineFigureStyles(line),
+        },
+      ] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'path',
+    totalStep: MULTI_POINT_MAX_POINTS + 1,
+    needDefaultPointFigure: true,
+    // A 50-point path would put a marker per point on both axes.
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const line = geomLineStyle(overlay);
+      return [
+        {
+          type: 'line',
+          attrs: { coordinates },
+          styles: geomLineFigureStyles(line, {
+            lineCap: 'round',
+            lineJoin: 'round',
+          }),
+        },
+      ] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'pen',
+    totalStep: MULTI_POINT_MAX_POINTS + 1,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: false,
+    needDefaultYAxisFigure: false,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const line = geomLineStyle(overlay);
+      // The built-in line figure smooths through the points
+      // (styles.smooth -> bezier via midpoints); the vertices stay
+      // draggable control points. Distinct from brush (freehand drag)
+      // and from path (straight segments).
+      return [
+        {
+          type: 'line',
+          attrs: { coordinates },
+          styles: geomLineFigureStyles(line, { smooth: true }),
+        },
+      ] as never;
+    },
+  });
+
+  registerOverlay({
+    name: 'arrow',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const [p0, p1] = coordinates;
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 2) return [];
+      const line = geomLineStyle(overlay);
+      const ux = dx / len;
+      const uy = dy / len;
+      const nx = -uy;
+      const ny = ux;
+      const headLen = 14;
+      const headHalf = 5.5;
+      const bx = p1.x - ux * headLen;
+      const by = p1.y - uy * headLen;
+      return [
+        {
+          type: 'line',
+          attrs: { coordinates: [p0, p1] },
+          styles: geomLineFigureStyles(line),
+        },
+        {
+          type: 'polygon',
+          attrs: {
+            coordinates: [
+              { x: p1.x, y: p1.y },
+              { x: bx + nx * headHalf, y: by + ny * headHalf },
+              { x: bx - nx * headHalf, y: by - ny * headHalf },
+            ],
+          },
+          styles: { style: 'fill', color: line.color },
         },
       ] as never;
     },

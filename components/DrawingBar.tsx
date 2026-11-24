@@ -4,7 +4,7 @@
  * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
  *
  * Top: cursor/select tool (active when no drawing tool is armed;
- * clicking it exits drawing mode). Then the 18 DRAWING_TOOLS grouped
+ * clicking it exits drawing mode). Then the 25 DRAWING_TOOLS grouped
  * by logic — trend lines, horizontal lines, vertical lines, shapes,
  * freehand/annotation, Fibonacci/measure — with a divider between
  * groups. Bottom: magnet (click cycles off -> weak -> strong, current
@@ -26,6 +26,7 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '水平線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'simpleTag'] },
   { title: '垂直線', ids: ['verticalStraightLine', 'verticalSegment', 'verticalRayLine'] },
   { title: '圖形', ids: ['rectangle'] },
+  { title: '幾何', ids: ['ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
   { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
   { title: '斐波那契／測量', ids: ['fibonacciRetracement', 'measure'] },
 ];
@@ -206,6 +207,57 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
           <line x1="4" y1="10" x2="16" y2="10" />
           <line x1="4" y1="7" x2="4" y2="13" />
           <line x1="16" y1="7" x2="16" y2="13" />
+        </svg>
+      );
+    case 'ellipse':
+      return (
+        <svg {...ICON_PROPS}>
+          <ellipse cx="10" cy="10" rx="7" ry="5" />
+        </svg>
+      );
+    case 'triangle':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M10 4.5 L16.5 15.5 L3.5 15.5 Z" />
+        </svg>
+      );
+    case 'arc':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M3.5 14.5 A 7.5 7.5 0 0 1 16.5 14.5" />
+          <circle cx="3.5" cy="14.5" r="1.4" fill="currentColor" stroke="none" />
+          <circle cx="16.5" cy="14.5" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'curve':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M3 16 Q 10 3 17 14" />
+          <circle cx="3" cy="16" r="1.4" fill="currentColor" stroke="none" />
+          <circle cx="17" cy="14" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'arrow':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="16" x2="15" y2="5" />
+          <path d="M15 5 L11 5.8 M15 5 L14.2 9" />
+        </svg>
+      );
+    case 'path':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M3.5 16 L8 7.5 L12 12.5 L16.5 5" />
+          <circle cx="3.5" cy="16" r="1.3" fill="currentColor" stroke="none" />
+          <circle cx="8" cy="7.5" r="1.3" fill="currentColor" stroke="none" />
+          <circle cx="12" cy="12.5" r="1.3" fill="currentColor" stroke="none" />
+          <circle cx="16.5" cy="5" r="1.3" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'pen':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M3 16 C 7 5, 13 17, 17 6" />
         </svg>
       );
   }

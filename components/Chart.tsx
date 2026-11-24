@@ -65,6 +65,7 @@ import {
   FIB_LEVEL_COLORS,
   hexToRgba,
   registerFibonacciRetracementOverlay,
+  registerGeometryOverlays,
   registerMeasureOverlay,
   registerRectangleOverlay,
   registerSimpleTagOverlay,
@@ -208,6 +209,8 @@ interface SelectedOverlayState {
   rectBorder: boolean;
   rectMiddleLine: boolean;
   rectFill: boolean;
+  /** Closed geometry shapes (ellipse, triangle): fill on/off. */
+  fill: boolean;
   fibTrendline: boolean;
   fibLevelColors: string[];
   fibExtend: 'left' | 'right' | 'both';
@@ -736,6 +739,70 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }
   };
 
+  /**
+   * Finish an in-progress multi-point drawing (path/pen) the way the
+   * library's own double-click handler does: forceComplete the
+   * overlay, complete the chart store's progress record, then run its
+   * onDrawEnd (persist + disarm). Returns false when the overlay is
+   * not a finishable in-progress path/pen (fewer than 2 points, or
+   * the internal API is unavailable) — the caller then cancels it
+   * instead. Guarded like resetChartClickOverlay: if a future
+   * klinecharts removes these internals, the finish silently no-ops.
+   */
+  const finishDrawing = (id: string): boolean => {
+    const chart = chartRef.current;
+    if (!chart) return false;
+    try {
+      const overlay = chart.getOverlays({ id })[0];
+      if (!overlay) return false;
+      if (overlay.name !== 'path' && overlay.name !== 'pen') return false;
+      const complete = overlay.points.filter(
+        (p) => p.timestamp !== undefined && p.value !== undefined,
+      );
+      if (complete.length < 2) return false;
+      const imp = overlay as unknown as {
+        forceComplete?: () => void;
+        onDrawEnd?: (e: { chart: Chart; overlay: Overlay }) => void;
+      };
+      const store = (
+        chart as unknown as {
+          getChartStore?: () => {
+            progressOverlayComplete?: () => void;
+            getProgressOverlayInfo?: () => unknown;
+          };
+        }
+      ).getChartStore?.();
+      if (
+        typeof imp.forceComplete !== 'function' ||
+        typeof store?.progressOverlayComplete !== 'function' ||
+        store?.getProgressOverlayInfo?.() == null
+      ) {
+        return false;
+      }
+      imp.forceComplete();
+      store.progressOverlayComplete();
+      imp.onDrawEnd?.({ chart, overlay });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Programmatic deselect: clear the React selection AND the chart's
+   * stored click-overlay record, so the next click on the same drawing
+   * still fires onSelected — the store short-circuits when id +
+   * figureType + figureIndex are unchanged (the Phase 2 undo case;
+   * a drag + Escape leaves the same stale record behind).
+   * Never call from the chart-initiated onDeselected path: the store
+   * is mid-flight there and resetting would clobber the record the
+   * in-progress click just stored.
+   */
+  const deselect = () => {
+    setSelectedState(null);
+    resetChartClickOverlay();
+  };
+
   const applySnapshot = (snapshot: SavedOverlay[]) => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -801,6 +868,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }
     const isRect = saved.name === 'rectangle';
     const isFib = saved.name === 'fibonacciRetracement';
+    const isShape = saved.name === 'ellipse' || saved.name === 'triangle';
     if (isRect) {
       ext.fillOpacity =
         typeof ext.fillOpacity === 'number'
@@ -809,6 +877,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.rectBorder = ext.rectBorder !== false;
       ext.rectMiddleLine = ext.rectMiddleLine === true;
       ext.rectFill = ext.rectFill === true;
+    }
+    if (isShape) {
+      ext.fillOpacity =
+        typeof ext.fillOpacity === 'number'
+          ? ext.fillOpacity
+          : getLastOverlayStyle().fillOpacity;
+      ext.fill = ext.fill === true;
     }
     if (isFib) {
       ext.levelColors =
@@ -1079,6 +1154,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       rectBorder: ext.rectBorder !== false,
       rectMiddleLine: ext.rectMiddleLine === true,
       rectFill: ext.rectFill === true,
+      fill: ext.fill === true,
       fibTrendline: ext.showTrendline === true,
       fibLevelColors,
       fibExtend:
@@ -1100,7 +1176,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     const o = chart.getOverlays({ id: cur.id })[0];
     if (!o) {
-      setSelectedState(null);
+      deselect();
       return;
     }
     if (pushHist) pushHistory();
@@ -1125,6 +1201,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.rectBorder = next.rectBorder;
       ext.rectMiddleLine = next.rectMiddleLine;
       ext.rectFill = next.rectFill;
+      ext.fillOpacity = next.fillOpacity;
+    }
+    if (next.name === 'ellipse' || next.name === 'triangle') {
+      ext.fill = next.fill;
       ext.fillOpacity = next.fillOpacity;
     }
     if (next.name === 'fibonacciRetracement') {
@@ -1177,7 +1257,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       !next.visibleIntervals.includes(intervalRef.current)
     ) {
       chart.removeOverlay({ groupId: cur.id });
-      setSelectedState(null);
+      deselect();
       return;
     }
     refreshSelected(cur.id);
@@ -1191,7 +1271,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     pushHistory();
     // groupId removes the main line and its text annotation together.
     chart.removeOverlay({ groupId: cur.id });
-    setSelectedState(null);
+    deselect();
     persistDrawings(symbolRef.current, intervalRef.current);
   };
 
@@ -1277,6 +1357,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     rectBorder: cur.rectBorder,
     rectMiddleLine: cur.rectMiddleLine,
     rectFill: cur.rectFill,
+    fill: cur.fill,
     fillOpacity: cur.fillOpacity,
     fibTrendline: cur.fibTrendline,
     fibLevelColors: [...cur.fibLevelColors],
@@ -1315,7 +1396,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       const ext = (o?.extendData ?? {}) as Record<string, unknown>;
       if (o && parseOverlayText(ext.text) === null) {
         chart?.removeOverlay({ id: pendingId });
-        if (selectedRef.current?.id === pendingId) setSelectedState(null);
+        if (selectedRef.current?.id === pendingId) deselect();
         persistDrawings(symbolRef.current, intervalRef.current);
       }
     }
@@ -1338,7 +1419,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     const o = chart.getOverlays({ id: cur.id })[0];
     if (!o) {
-      setSelectedState(null);
+      deselect();
       return;
     }
     // A standalone text annotation confirmed with no text is invisible
@@ -1349,7 +1430,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     ) {
       pushHistory();
       chart.removeOverlay({ id: cur.id });
-      setSelectedState(null);
+      deselect();
       persistDrawings(symbolRef.current, intervalRef.current);
       closeDialog();
       return;
@@ -1378,6 +1459,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.rectBorder = draft.rectBorder;
       ext.rectMiddleLine = draft.rectMiddleLine;
       ext.rectFill = draft.rectFill;
+      ext.fillOpacity = draft.fillOpacity;
+    }
+    if (o.name === 'ellipse' || o.name === 'triangle') {
+      ext.fill = draft.fill;
       ext.fillOpacity = draft.fillOpacity;
     }
     if (o.name === 'fibonacciRetracement') {
@@ -1458,7 +1543,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       !draft.visibleIntervals.includes(intervalRef.current)
     ) {
       chart.removeOverlay({ groupId: cur.id });
-      setSelectedState(null);
+      deselect();
       closeDialog();
       return;
     }
@@ -1477,7 +1562,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       const store = loadDrawingsStore();
       store[symbolRef.current] = [];
       saveDrawingsStore(store);
-      setSelectedState(null);
+      deselect();
     },
     undo() {
       undo();
@@ -1532,6 +1617,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerMeasureOverlay();
     registerTextAnnotationOverlay();
     registerSimpleTagOverlay();
+    registerGeometryOverlays();
 
     const chart = init(container, { styles: DARK_STYLES });
     if (!chart) return;
@@ -1721,7 +1807,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       undoStackRef.current = [];
       redoStackRef.current = [];
       emitHistoryChange();
-      setSelectedState(null);
+      deselect();
       // An unfinished drawing cannot survive the switch: cancel it.
       drawingIdRef.current = null;
       if (activeToolRef.current) onToolDoneRef.current();
@@ -1790,7 +1876,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       if (e.key === 'Escape') {
         e.preventDefault();
         if (drawingIdRef.current) {
-          // Cancel the overlay being drawn, then disarm the tool.
+          // A path/pen with at least 2 points finishes on Esc
+          // (TradingView behaviour); anything else — including a
+          // path/pen with fewer than 2 points — is cancelled.
+          if (finishDrawing(drawingIdRef.current)) return;
           chartRef.current?.removeOverlay({ id: drawingIdRef.current });
           drawingIdRef.current = null;
           onToolDoneRef.current();
@@ -1804,7 +1893,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           return;
         }
         if (selectedRef.current) {
-          setSelectedState(null);
+          deselect();
           return;
         }
         if (activeToolRef.current) onToolDoneRef.current();
@@ -2161,7 +2250,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             刪除
           </button>
           <button
-            onClick={() => setSelectedState(null)}
+            onClick={deselect}
             className="rounded-sm px-1 hover:bg-white/10"
           >
             ✕

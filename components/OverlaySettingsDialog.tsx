@@ -38,6 +38,8 @@ export interface OverlayDialogDraft {
   rectBorder: boolean;
   rectMiddleLine: boolean;
   rectFill: boolean;
+  /** Closed geometry shapes (ellipse, triangle): fill on/off. */
+  fill: boolean;
   fillOpacity: number;
   /** Fibonacci: trend line, per-level colours, level extend, background. */
   fibTrendline: boolean;
@@ -166,6 +168,17 @@ function CoordRow({
   );
 }
 
+/** Endpoint label for the coordinates tab: corner / role per tool. */
+function coordLabel(toolName: string, i: number): string {
+  if (toolName === 'rectangle' || toolName === 'triangle')
+    return `#${i + 1}（角 ${i + 1}）`;
+  if (toolName === 'arc')
+    return `#${i + 1}（${['起點', '終點', '弧上點'][i] ?? '點'}）`;
+  if (toolName === 'curve')
+    return `#${i + 1}（${['起點', '控制點', '終點'][i] ?? '點'}）`;
+  return `#${i + 1}（價格，K棒）`;
+}
+
 export default function OverlaySettingsDialog({
   toolName,
   initial,
@@ -179,8 +192,12 @@ export default function OverlaySettingsDialog({
   const family: LineFamily | null = lineFamilyOf(toolName);
   const isFib = toolName === 'fibonacciRetracement';
   const isRect = toolName === 'rectangle';
-  /** Freehand strokes have too many points for per-point editing. */
-  const isBrush = toolName === 'brush';
+  /** Closed geometry shapes with a fill switch (ellipse, triangle). */
+  const isShape = toolName === 'ellipse' || toolName === 'triangle';
+  /** Freehand / multi-point strokes have too many points for
+   *  per-point editing. */
+  const isMultiPoint =
+    toolName === 'brush' || toolName === 'path' || toolName === 'pen';
   /** A standalone text annotation has no line to style. */
   const isTextTool = toolName === 'textAnnotation';
   /** Its own Y-axis tag already shows the price. */
@@ -468,6 +485,37 @@ export default function OverlaySettingsDialog({
                   )}
                 </div>
               )}
+              {isShape && (
+                <div className="space-y-2 rounded border border-[#2a2e39] p-2">
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.fill}
+                      onChange={(e) => patch({ fill: e.target.checked })}
+                      className="accent-[#2962ff]"
+                    />
+                    填色
+                  </label>
+                  {draft.fill && (
+                    <div>
+                      <label className={FIELD_LABEL}>
+                        填色不透明度 {Math.round(draft.fillOpacity * 100)}%
+                      </label>
+                      <input
+                        type="range"
+                        min={0.05}
+                        max={0.4}
+                        step={0.05}
+                        value={draft.fillOpacity}
+                        onChange={(e) =>
+                          patch({ fillOpacity: Number(e.target.value) })
+                        }
+                        className="w-full accent-[#2962ff]"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
               {isFib && (
                 <div className="space-y-3 rounded border border-[#2a2e39] p-2">
                   <label className={CHECK_ROW}>
@@ -699,9 +747,11 @@ export default function OverlaySettingsDialog({
 
           {tab === 'coords' && (
             <>
-              {isBrush ? (
+              {isMultiPoint ? (
                 <p className="text-xs leading-relaxed text-[#787b86]">
-                  徒手畫線由多個點組成，不支援逐點編輯；拖曳整條線可移動它。
+                  {toolName === 'brush'
+                    ? '徒手畫線由多個點組成，不支援逐點編輯；拖曳整條線可移動它。'
+                    : '路徑／鋼筆由多個點組成，不支援逐點編輯；拖曳個別控制點可調整形狀，拖曳整條線可移動它。'}
                 </p>
               ) : (
                 <>
@@ -712,11 +762,7 @@ export default function OverlaySettingsDialog({
               {draft.points.map((p, i) => (
                 <CoordRow
                   key={i}
-                  label={
-                    isRect
-                      ? `#${i + 1}（角 ${i + 1}）`
-                      : `#${i + 1}（價格，K棒）`
-                  }
+                  label={coordLabel(toolName, i)}
                   point={p}
                   bars={bars}
                   onPointChange={(patchPt) => {
