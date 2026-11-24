@@ -16,11 +16,14 @@ export const BINANCE_REST_BASE = 'https://data-api.binance.vision';
 
 /** Binance interval strings are identical to our Interval type. */
 const BINANCE_INTERVAL: Record<Interval, string> = {
+  '1m': '1m',
+  '5m': '5m',
   '15m': '15m',
   '1h': '1h',
   '4h': '4h',
   '1d': '1d',
   '1w': '1w',
+  '1M': '1M',
 };
 
 export interface FetchBinanceKlinesParams {

@@ -5,9 +5,11 @@
  *
  * Icon-only buttons (inline SVG) for the 10 DRAWING_TOOLS in the
  * existing order, a divider, then magnet (click cycles off -> weak ->
- * strong, highlighted when on), undo, redo and clear. Single click arms
- * a tool (click again to disarm); double-click or Shift+click keeps it
- * armed for continuous drawing. Active tool: bg #2a2e39, text #2962ff.
+ * strong, highlighted when on) and clear. Single click arms a tool
+ * (click again to disarm); double-click or Shift+click keeps it armed
+ * for continuous drawing. Active tool: bg #2a2e39, text #2962ff.
+ *
+ * Undo / redo live in the top Toolbar now (TradingView puts them there).
  */
 
 import { useState } from 'react';
@@ -18,10 +20,6 @@ export interface DrawingBarProps {
   activeTool: DrawingTool | null;
   /** Second arg: keep the tool armed after each drawing (double-click / Shift-click). */
   onToolChange: (tool: DrawingTool | null, continuous: boolean) => void;
-  onUndo: () => void;
-  onRedo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
   /** Remove all drawings on the current symbol. */
   onClear: () => void;
 }
@@ -138,24 +136,6 @@ function MagnetIcon() {
   );
 }
 
-function UndoIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <path d="M8 5L3 10l5 5" />
-      <path d="M3 10h10a4 4 0 0 1 0 8h-3" />
-    </svg>
-  );
-}
-
-function RedoIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <path d="M12 5l5 5-5 5" />
-      <path d="M17 10H7a4 4 0 0 0 0 8h3" />
-    </svg>
-  );
-}
-
 function ClearIcon() {
   return (
     <svg {...ICON_PROPS}>
@@ -173,10 +153,6 @@ const BUTTON_BASE =
 export default function DrawingBar({
   activeTool,
   onToolChange,
-  onUndo,
-  onRedo,
-  canUndo,
-  canRedo,
   onClear,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
@@ -216,22 +192,6 @@ export default function DrawingBar({
         }`}
       >
         <MagnetIcon />
-      </button>
-      <button
-        onClick={onUndo}
-        disabled={!canUndo}
-        title="復原 (Ctrl+Z)"
-        className={BUTTON_BASE}
-      >
-        <UndoIcon />
-      </button>
-      <button
-        onClick={onRedo}
-        disabled={!canRedo}
-        title="重做 (Ctrl+Shift+Z)"
-        className={BUTTON_BASE}
-      >
-        <RedoIcon />
       </button>
       <button
         onClick={onClear}

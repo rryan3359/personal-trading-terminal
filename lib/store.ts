@@ -16,6 +16,7 @@ export const STORAGE_KEYS = {
   lastInterval: 'ptt:last-interval',
   magnet: 'ptt:magnet',
   lastOverlayStyle: 'ptt:last-overlay-style',
+  chartType: 'ptt:chart-type',
 } as const;
 
 /** Current drawings-store format version. v1 was keyed `${symbol}:${interval}`. */

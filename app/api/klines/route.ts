@@ -4,7 +4,7 @@
  * Query params:
  *   source    — data source id, e.g. "binance" (Phase 1: only binance)
  *   symbol    — e.g. "BTCUSDT"
- *   interval  — one of 15m | 1h | 4h | 1d | 1w
+ *   interval  — one of 1m | 5m | 15m | 1h | 4h | 1d | 1w | 1M
  *   limit     — 1..1000, default 500
  *   startTime — optional, ms timestamp (inclusive lower bound, for newer bars)
  *   endTime   — optional, ms timestamp (inclusive upper bound, for history)
@@ -50,7 +50,10 @@ export async function GET(request: NextRequest) {
   }
   if (!isInterval(interval)) {
     return NextResponse.json(
-      { error: `invalid interval: ${interval}`, supported: ['15m', '1h', '4h', '1d', '1w'] },
+      {
+        error: `invalid interval: ${interval}`,
+        supported: ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M'],
+      },
       { status: 400 },
     );
   }

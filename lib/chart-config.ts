@@ -60,11 +60,50 @@ export const INDICATOR_OPTIONS: Array<{ id: string; label: string; mainPane: boo
 /** Indicators enabled on first visit. */
 export const DEFAULT_INDICATORS = ['MA', 'VOL'];
 
-/** Milliseconds per candle for each timeframe (measure tool, copy offset). */
+/** Milliseconds per candle for each timeframe (measure tool, copy offset,
+ *  range bar). '1M' is approximate (30 days) — only used for counts. */
 export const INTERVAL_MS: Record<string, number> = {
+  '1m': 60 * 1000,
+  '5m': 5 * 60 * 1000,
   '15m': 15 * 60 * 1000,
   '1h': 60 * 60 * 1000,
   '4h': 4 * 60 * 60 * 1000,
   '1d': 24 * 60 * 60 * 1000,
   '1w': 7 * 24 * 60 * 60 * 1000,
+  '1M': 30 * 24 * 60 * 60 * 1000,
 };
+
+/** Candle render styles (klinecharts CandleType, verified 10.1.1). */
+export type ChartType = 'candle_solid' | 'ohlc' | 'area';
+
+export const CHART_TYPES: Array<{ id: ChartType; label: string }> = [
+  { id: 'candle_solid', label: '蠟燭圖' },
+  { id: 'ohlc', label: '美國線' },
+  { id: 'area', label: '面積圖' },
+];
+
+export const DEFAULT_CHART_TYPE: ChartType = 'candle_solid';
+
+/**
+ * Bottom range presets (TradingView-style: 1天 5天 1月 3月 6月 YTD 1年
+ * 全部). `ms` is the calendar span the preset covers; the chart shows
+ * that span capped by the candles actually loaded (500 per init load,
+ * more on scroll), pinned to the latest candle.
+ */
+export type RangeId = '1d' | '5d' | '1M' | '3M' | '6M' | 'ytd' | '1y' | 'all';
+
+export const RANGES: Array<{
+  id: RangeId;
+  label: string;
+  /** Calendar span in ms; 'ytd' and 'all' are computed, not fixed. */
+  ms: number | null;
+}> = [
+  { id: '1d', label: '1天', ms: 24 * 60 * 60 * 1000 },
+  { id: '5d', label: '5天', ms: 5 * 24 * 60 * 60 * 1000 },
+  { id: '1M', label: '1月', ms: 30 * 24 * 60 * 60 * 1000 },
+  { id: '3M', label: '3月', ms: 90 * 24 * 60 * 60 * 1000 },
+  { id: '6M', label: '6月', ms: 180 * 24 * 60 * 60 * 1000 },
+  { id: 'ytd', label: 'YTD', ms: null },
+  { id: '1y', label: '1年', ms: 365 * 24 * 60 * 60 * 1000 },
+  { id: 'all', label: '全部', ms: null },
+];

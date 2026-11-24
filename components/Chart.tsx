@@ -19,6 +19,13 @@
  * defaults (explicitly enabled here); the dark theme is applied via
  * setStyles at init.
  *
+ * If an init load delivers no bars (unknown/delisted symbol, or the
+ * request failed), the chart is left empty and an error banner is
+ * shown instead of the previous symbol's candles — and no live socket
+ * is opened for a symbol that has no data. Symbol validation in the
+ * Watchlist normally prevents this path; the banner is the last line
+ * of defence.
+ *
  * Drawing system (all klinecharts 10.1.1 APIs verified against the
  * installed types): createOverlay returns the new overlay id;
  * overrideOverlay(Partial<OverlayCreate>) edits; removeOverlay({ id })
@@ -48,6 +55,8 @@ import {
   type Period,
 } from 'klinecharts';
 import type { Interval, Kline } from '@/lib/types';
+import { INTERVAL_LABELS } from '@/lib/types';
+import { formatPrice } from '@/lib/format';
 import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
@@ -60,7 +69,10 @@ import {
   DRAWING_TOOLS,
   INDICATOR_OPTIONS,
   INTERVAL_MS,
+  RANGES,
+  type ChartType,
   type DrawingTool,
+  type RangeId,
 } from '@/lib/chart-config';
 import {
   DEFAULT_OVERLAY_STYLE,
@@ -82,6 +94,13 @@ export interface ChartHandle {
   undo: () => void;
   /** Redo an undone drawing change. No-op when nothing to redo. */
   redo: () => void;
+  /**
+   * Fit a calendar range into the chart width, pinned to the latest
+   * candle. The span is capped by the candles actually loaded (500 per
+   * init load, more on scroll), so wide ranges on short intervals show
+   * the widest available window.
+   */
+  setRange: (range: RangeId) => void;
 }
 
 export interface ChartProps {
@@ -93,6 +112,8 @@ export interface ChartProps {
   onToolDone: () => void;
   /** Indicator names currently enabled, e.g. ["MA", "VOL"]. */
   indicators: string[];
+  /** Candle render style: 蠟燭圖 / 美國線 / 面積圖. */
+  chartType: ChartType;
   onConnectionStatus?: (status: BinanceSocketStatus) => void;
   /** Keep the tool armed after each drawing (double-click / Shift-click). */
   continuousDraw?: boolean;
@@ -104,6 +125,10 @@ const HISTORY_LIMIT = 500;
 
 function periodFor(interval: Interval): Period {
   switch (interval) {
+    case '1m':
+      return { type: 'minute', span: 1 };
+    case '5m':
+      return { type: 'minute', span: 5 };
     case '15m':
       return { type: 'minute', span: 15 };
     case '1h':
@@ -114,6 +139,8 @@ function periodFor(interval: Interval): Period {
       return { type: 'day', span: 1 };
     case '1w':
       return { type: 'week', span: 1 };
+    case '1M':
+      return { type: 'month', span: 1 };
   }
 }
 
@@ -226,6 +253,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     activeTool,
     onToolDone,
     indicators,
+    chartType,
     onConnectionStatus,
     continuousDraw = false,
     onHistoryChange,
@@ -268,6 +296,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   const [selected, setSelected] = useState<SelectedOverlayState | null>(null);
   const selectedRef = useRef<SelectedOverlayState | null>(null);
+  /** Shown when the current symbol's init load delivered no bars. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  /** Last loaded / live candle, shown in the top-left legend overlay. */
+  const [lastKline, setLastKline] = useState<KLineData | null>(null);
+  /** Whether the last init load delivered data (gates the live socket). */
+  const initOkRef = useRef(true);
   const setSelectedState = (s: SelectedOverlayState | null) => {
     selectedRef.current = s;
     setSelected(s);
@@ -650,6 +684,40 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     redo() {
       redo();
     },
+    setRange(range: RangeId) {
+      const chart = chartRef.current;
+      const container = containerRef.current;
+      if (!chart || !container) return;
+      const data = chart.getDataList();
+      if (data.length === 0) return;
+      const intervalMs = INTERVAL_MS[intervalRef.current] ?? 0;
+      if (intervalMs <= 0) return;
+      const def = RANGES.find((r) => r.id === range);
+      let count: number;
+      if (range === 'all') {
+        count = data.length;
+      } else if (range === 'ytd') {
+        const yearStart = new Date(
+          new Date().getFullYear(),
+          0,
+          1,
+        ).getTime();
+        const inYear = data.filter((d) => d.timestamp >= yearStart).length;
+        count = inYear > 0 ? inYear : data.length;
+      } else if (def?.ms) {
+        count = Math.min(
+          data.length,
+          Math.max(1, Math.ceil(def.ms / intervalMs)),
+        );
+      } else {
+        count = data.length;
+      }
+      const width = container.clientWidth;
+      if (width <= 0) return;
+      const space = Math.min(50, Math.max(2, width / count));
+      chart.setBarSpace(space);
+      chart.scrollToRealTime();
+    },
   }));
 
   // ---- chart init (once) ----------------------------------------------
@@ -666,12 +734,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     chartRef.current = chart;
 
-    // Narrow screens: the always-on OHLC line is wider than the chart
-    // and gets clipped at the right edge, so only show it while the
-    // crosshair is active (tap / drag). Desktop keeps it always on.
-    if (window.innerWidth < 768) {
-      chart.setStyles({ candle: { tooltip: { showRule: 'follow_cross' } } });
-    }
+    // The top-left legend (Chart.tsx) already shows the last candle's
+    // OHLC, so the built-in tooltip would print the same line on top of
+    // it. Show the tooltip only while the crosshair is active (hover /
+    // tap / drag), on every screen size — it then reads the hovered
+    // candle instead of duplicating the legend.
+    chart.setStyles({ candle: { tooltip: { showRule: 'follow_cross' } } });
 
     // Debug handle for browser-console inspection
     // (e.g. __pttChart.getOverlays(), __pttChart.getVisibleRange()).
@@ -719,6 +787,21 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           if (type === 'init') {
             // No newer bars exist beyond the latest (live updates arrive
             // via the WebSocket); older history does exist.
+            if (klines.length === 0) {
+              // Empty init: the chart callback clears the old candles,
+              // so say so instead of leaving a blank chart unexplained,
+              // and do not restore drawings onto a symbol with no data.
+              initOkRef.current = false;
+              setLoadError(
+                `無法載入 ${symbolRef.current} 的 K 線資料，請檢查標的或稍後再試。`,
+              );
+              setLastKline(null);
+              callback(klines, { backward: false, forward: false });
+              return;
+            }
+            initOkRef.current = true;
+            setLoadError(null);
+            setLastKline(klines[klines.length - 1]);
             callback(klines, { backward: false, forward: hasMore });
             restoreDrawings();
           } else if (type === 'forward') {
@@ -728,12 +811,24 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             callback(klines, { backward: hasMore });
           }
         } catch {
+          if (type === 'init') {
+            initOkRef.current = false;
+            setLoadError(
+              `無法載入 ${symbolRef.current} 的 K 線資料，請檢查標的或稍後再試。`,
+            );
+          }
           callback([], { backward: false, forward: false });
         }
       },
       subscribeBar: ({ callback }) => {
         liveCallbackRef.current = callback;
         socketRef.current?.disconnect();
+        // The last init load delivered no data (unknown/delisted symbol):
+        // do not open a socket that can never receive candles.
+        if (!initOkRef.current) {
+          onConnectionStatusRef.current?.('closed');
+          return;
+        }
         const socket = new BinanceKlineSocket();
         socketRef.current = socket;
         socket.connect(
@@ -741,6 +836,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           intervalRef.current,
           (kline) => {
             liveCallbackRef.current?.(kline as KLineData);
+            setLastKline(kline as KLineData);
           },
           (status) => onConnectionStatusRef.current?.(status),
         );
@@ -777,6 +873,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
+    // A new symbol/interval is about to load: drop any stale error
+    // and legend.
+    setLoadError(null);
+    setLastKline(null);
     const prev = prevSymbolIntervalRef.current;
     if (prev === null) {
       prevSymbolIntervalRef.current = { symbol, interval };
@@ -915,6 +1015,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---- chart type -------------------------------------------------------
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.setStyles({ candle: { type: chartType } });
+  }, [chartType]);
+
   // ---- indicators -------------------------------------------------------
 
   useEffect(() => {
@@ -944,6 +1052,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }, 0);
   };
 
+  // Legend: change of the last candle vs its open.
+  const legendChangePct =
+    lastKline !== null && lastKline.open !== 0
+      ? ((lastKline.close - lastKline.open) / lastKline.open) * 100
+      : 0;
+
   return (
     <div className="relative h-full w-full">
       <div
@@ -952,6 +1066,33 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         className="h-full w-full bg-[#131722]"
         data-testid="chart-container"
       />
+      {lastKline !== null && loadError === null && (
+        <div className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed">
+          <div className="text-xs font-semibold text-white">
+            {symbol} · {INTERVAL_LABELS[interval]} · Binance
+          </div>
+          <div className="text-[11px] text-[#b2b5be]">
+            開 {formatPrice(lastKline.open)} 高 {formatPrice(lastKline.high)}{' '}
+            低 {formatPrice(lastKline.low)} 收{' '}
+            <span
+              className={
+                legendChangePct >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
+              }
+            >
+              {formatPrice(lastKline.close)}{' '}
+              {legendChangePct >= 0 ? '+' : ''}
+              {legendChangePct.toFixed(2)}%
+            </span>
+          </div>
+        </div>
+      )}
+      {loadError !== null && (
+        <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-2">
+          <div className="rounded-md border border-[#ef5350]/50 bg-[#1e222d]/95 px-3 py-2 text-xs leading-relaxed text-[#f5c6c6] shadow-lg">
+            {loadError}
+          </div>
+        </div>
+      )}
       {selected !== null && (
         <div className="absolute left-1/2 top-2 z-20 flex max-w-full -translate-x-1/2 flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg">
           {COLOR_PALETTE.map((c) => (
