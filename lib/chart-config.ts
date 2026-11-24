@@ -11,9 +11,14 @@
  * Drawing tool ids. Values are klinecharts 10.1.1 overlay names, verified
  * against the installed bundle (node_modules/klinecharts/dist/index.esm.js):
  * segment, straightLine, rayLine, horizontalStraightLine,
- * horizontalRayLine, verticalStraightLine, parallelStraightLine and
- * fibonacciLine are all built-ins. `rectangle`, `fibonacciRetracement`
- * and `measure` are custom overlays registered in lib/chart-theme.ts.
+ * horizontalRayLine, verticalStraightLine, parallelStraightLine,
+ * horizontalSegment, verticalSegment, verticalRayLine, priceLine,
+ * priceChannelLine, brush and simpleTag are all built-ins.
+ * `rectangle`, `fibonacciRetracement` and `measure` are custom overlays
+ * registered in lib/chart-theme.ts; `textAnnotation` is the custom
+ * text overlay (Phase 2), and `simpleTag` is a custom re-registration
+ * of the built-in (its Y-axis tag reads extendData as a raw string,
+ * which collides with the object extendData this app persists).
  */
 export type DrawingTool =
   | 'segment'
@@ -23,6 +28,14 @@ export type DrawingTool =
   | 'horizontalRayLine'
   | 'verticalStraightLine'
   | 'parallelStraightLine'
+  | 'horizontalSegment'
+  | 'verticalSegment'
+  | 'verticalRayLine'
+  | 'priceLine'
+  | 'priceChannelLine'
+  | 'brush'
+  | 'simpleTag'
+  | 'textAnnotation'
   | 'fibonacciRetracement'
   | 'rectangle'
   | 'measure';
@@ -32,6 +45,8 @@ export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'fibonacciRetracement',
   'rectangle',
   'measure',
+  'textAnnotation',
+  'simpleTag',
 ]);
 
 export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
@@ -42,6 +57,14 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'horizontalRayLine', label: '水平射線' },
   { id: 'verticalStraightLine', label: '垂直線' },
   { id: 'parallelStraightLine', label: '平行通道' },
+  { id: 'horizontalSegment', label: '水平線段' },
+  { id: 'verticalSegment', label: '垂直線段' },
+  { id: 'verticalRayLine', label: '垂直射線' },
+  { id: 'priceLine', label: '價位線' },
+  { id: 'priceChannelLine', label: '價位通道' },
+  { id: 'brush', label: '徒手畫' },
+  { id: 'simpleTag', label: '價位標籤' },
+  { id: 'textAnnotation', label: '文字標註' },
   { id: 'fibonacciRetracement', label: '斐波那契' },
   { id: 'rectangle', label: '矩形' },
   { id: 'measure', label: '量測' },
@@ -161,11 +184,16 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   rayLine: '射線',
   horizontalStraightLine: '水平線',
   horizontalRayLine: '水平射線',
-  horizontalSegment: '水平線',
+  horizontalSegment: '水平線段',
   verticalStraightLine: '垂直線',
-  verticalRayLine: '垂直線',
-  verticalSegment: '垂直線',
+  verticalRayLine: '垂直射線',
+  verticalSegment: '垂直線段',
   parallelStraightLine: '平行通道',
+  priceLine: '價位線',
+  priceChannelLine: '價位通道',
+  brush: '徒手畫',
+  simpleTag: '價位標籤',
+  textAnnotation: '文字標註',
   fibonacciRetracement: '斐波那契',
   rectangle: '矩形',
   measure: '量測',

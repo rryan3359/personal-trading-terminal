@@ -67,6 +67,7 @@ import {
   registerFibonacciRetracementOverlay,
   registerMeasureOverlay,
   registerRectangleOverlay,
+  registerSimpleTagOverlay,
   registerTextAnnotationOverlay,
 } from '@/lib/chart-theme';
 import ColorPicker from '@/components/ColorPicker';
@@ -216,7 +217,26 @@ interface SelectedOverlayState {
 
 /** Horizontal tools show their price on the right Y axis. */
 function isHorizontalTool(name: string): boolean {
-  return name === 'horizontalStraightLine' || name === 'horizontalRayLine';
+  return (
+    name === 'horizontalStraightLine' ||
+    name === 'horizontalRayLine' ||
+    name === 'horizontalSegment' ||
+    name === 'priceLine'
+  );
+}
+
+/**
+ * Default for the Y-axis price label (needDefaultYAxisFigure).
+ * simpleTag is the exception: its own Y-axis tag already shows the
+ * price, so the default price mark would double up on the axis.
+ */
+function defaultPriceLabel(name: string): boolean {
+  if (name === 'simpleTag') return false;
+  return (
+    isHorizontalTool(name) ||
+    name === 'rectangle' ||
+    name === 'fibonacciRetracement'
+  );
 }
 
 /**
@@ -334,10 +354,15 @@ function parseVisibleIntervals(v: unknown): string[] | undefined {
 }
 
 /** Only fully-drawn overlays (every point has timestamp + value) are saved.
- *  The measure tool and the text annotations are never saved: annotations
- *  are rebuilt from their main line's text on restore. */
+ *  The measure tool is never saved. A text annotation is never saved
+ *  when it is a companion (id `${mainId}:text`, rebuilt from its main
+ *  line's text on restore); a STANDALONE text annotation (the 文字標註
+ *  tool) is saved like any other drawing. */
 function toSavedOverlay(o: Overlay): SavedOverlay | null {
-  if (o.name === MEASURE_NAME || o.name === TEXT_ANNOTATION_NAME) return null;
+  if (o.name === MEASURE_NAME) return null;
+  if (o.name === TEXT_ANNOTATION_NAME && o.id.endsWith(':text')) {
+    return null;
+  }
   if (o.points.length === 0) return null;
   const points: SavedOverlay['points'] = [];
   for (const p of o.points) {
@@ -521,16 +546,23 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   // ---- text annotation (Phase 2) ---------------------------------------
 
-  /** Midpoint of a two-point drawing — the text annotation's anchor. */
+  /** Midpoint of a two-point drawing — the text annotation's anchor.
+   *  Single-point tools (priceLine, simpleTag, the standalone text
+   *  annotation) anchor on their only point. */
   const annotationMidpoint = (
     points: Array<{ timestamp: number; value: number }>,
   ): { timestamp: number; value: number } | null => {
-    if (points.length < 2) return null;
+    if (points.length < 1) return null;
     const [a, b] = points;
     if (
       a.timestamp === undefined ||
+      a.value === undefined
+    ) {
+      return null;
+    }
+    if (points.length < 2 || b === undefined) return a;
+    if (
       b.timestamp === undefined ||
-      a.value === undefined ||
       b.value === undefined
     ) {
       return null;
@@ -793,13 +825,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       ext.fibLevelText = ext.fibLevelText !== false;
     }
     // Price label (needDefaultYAxisFigure). Horizontal tools, rectangles
-    // and Fibonacci default to on; other line tools default to off.
+    // and Fibonacci default to on; other line tools default to off;
+    // simpleTag's own Y-axis tag already shows the price (see
+    // defaultPriceLabel).
     const priceLabel =
       ext.priceLabel === false
         ? false
         : ext.priceLabel === true
           ? true
-          : isHorizontalTool(saved.name) || isRect || isFib;
+          : defaultPriceLabel(saved.name);
     ext.priceLabel = priceLabel;
     if (saved.name === MEASURE_NAME) {
       ext.intervalMs = INTERVAL_MS[intervalRef.current] ?? 0;
@@ -817,6 +851,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         : {}),
       mode: currentOverlayMode(),
       needDefaultYAxisFigure: priceLabel,
+      // simpleTag's built-in template has no point figure (OverlayImp
+      // default false) and the text annotation's template turns it off
+      // for companions — both need one as standalone drawings, or they
+      // can never be selected again after placement.
+      ...(saved.name === 'simpleTag' ||
+      saved.name === TEXT_ANNOTATION_NAME
+        ? { needDefaultPointFigure: true }
+        : {}),
       styles: stylesForOverlay(
         style,
         typeof ext.fillOpacity === 'number' ? ext.fillOpacity : undefined,
@@ -832,10 +874,22 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         if (restoringRef.current) return;
         drawingIdRef.current = e.overlay.id;
       },
-      onDrawEnd: () => {
+      onDrawEnd: (e) => {
         if (restoringRef.current) return;
         persistDrawings(symbolRef.current, intervalRef.current);
         drawingIdRef.current = null;
+        // A freshly placed standalone text annotation has no text yet:
+        // open the dialog on the 文字 tab so the user can type it.
+        // (Companion annotations are never drawn interactively.)
+        if (
+          e.overlay.name === TEXT_ANNOTATION_NAME &&
+          !e.overlay.id.endsWith(':text')
+        ) {
+          pendingTextIdRef.current = e.overlay.id;
+          openDialogFor(e.overlay.id, 'text');
+          onToolDoneRef.current();
+          return;
+        }
         if (continuousDrawRef.current && activeToolRef.current) {
           armOverlay(activeToolRef.current);
         } else {
@@ -1021,9 +1075,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           ? false
           : ext.priceLabel === true
             ? true
-            : isHorizontalTool(o.name) ||
-              o.name === 'rectangle' ||
-              o.name === 'fibonacciRetracement',
+            : defaultPriceLabel(o.name),
       rectBorder: ext.rectBorder !== false,
       rectMiddleLine: ext.rectMiddleLine === true,
       rectFill: ext.rectFill === true,
@@ -1203,6 +1255,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     [],
   );
   const dialogOpenRef = useRef(false);
+  /**
+   * Id of a just-drawn standalone text annotation whose dialog is
+   * open. If the user closes it without typing any text, the empty
+   * annotation is removed (it would otherwise be invisible and
+   * unselectable forever).
+   */
+  const pendingTextIdRef = useRef<string | null>(null);
 
   /** Build the dialog draft from the live overlay (same fields as
    *  refreshSelected, plus the current points for the coordinates tab). */
@@ -1237,11 +1296,29 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!cur || cur.id !== id) return;
     setDialogBars(chartRef.current?.getDataList() ?? []);
     setDialogTab(tab);
-    setDialogDraft(dialogDraftFromSelected(cur));
+    const draft = dialogDraftFromSelected(cur);
+    // A fresh standalone text annotation has no text yet: pre-fill the
+    // default so the 文字 tab's inputs are enabled immediately.
+    if (cur.name === TEXT_ANNOTATION_NAME && draft.text === null) {
+      draft.text = { ...DEFAULT_OVERLAY_TEXT };
+    }
+    setDialogDraft(draft);
     dialogOpenRef.current = true;
   };
 
   const closeDialog = () => {
+    const pendingId = pendingTextIdRef.current;
+    pendingTextIdRef.current = null;
+    if (pendingId) {
+      const chart = chartRef.current;
+      const o = chart?.getOverlays({ id: pendingId })[0];
+      const ext = (o?.extendData ?? {}) as Record<string, unknown>;
+      if (o && parseOverlayText(ext.text) === null) {
+        chart?.removeOverlay({ id: pendingId });
+        if (selectedRef.current?.id === pendingId) setSelectedState(null);
+        persistDrawings(symbolRef.current, intervalRef.current);
+      }
+    }
     setDialogDraft(null);
     dialogOpenRef.current = false;
   };
@@ -1262,6 +1339,19 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const o = chart.getOverlays({ id: cur.id })[0];
     if (!o) {
       setSelectedState(null);
+      return;
+    }
+    // A standalone text annotation confirmed with no text is invisible
+    // and unselectable: remove it instead of saving an empty label.
+    if (
+      o.name === TEXT_ANNOTATION_NAME &&
+      (!draft.text || draft.text.content.trim() === '')
+    ) {
+      pushHistory();
+      chart.removeOverlay({ id: cur.id });
+      setSelectedState(null);
+      persistDrawings(symbolRef.current, intervalRef.current);
+      closeDialog();
       return;
     }
     pushHistory();
@@ -1441,6 +1531,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerFibonacciRetracementOverlay();
     registerMeasureOverlay();
     registerTextAnnotationOverlay();
+    registerSimpleTagOverlay();
 
     const chart = init(container, { styles: DARK_STYLES });
     if (!chart) return;
@@ -1940,73 +2031,79 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               <circle cx="7.5" cy="13" r="1.3" />
             </svg>
           </button>
-          <button
-            title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
-            aria-label="顏色"
-            onClick={() => togglePanel('color')}
-            className={`flex h-6 w-8 shrink-0 items-center justify-center rounded-sm border px-1 hover:border-white/50 ${
-              openPanel === 'color'
-                ? 'border-white ring-1 ring-white'
-                : 'border-white/20'
-            }`}
-          >
-            <span
-              className="block h-4 w-6 rounded-[2px]"
-              style={CHECKER_BG}
-            >
-              <span
-                className="block h-full w-full rounded-[2px]"
-                style={{
-                  backgroundColor: hexToRgba(
-                    selected.color,
-                    selected.opacity,
-                  ),
-                }}
-              />
-            </span>
-          </button>
-          <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
-          {LINE_WIDTHS.map((w) => (
-            <button
-              key={w}
-              title={`線寬 ${w}`}
-              onClick={() => applyEdit({ size: w })}
-              className={`flex h-5 w-6 items-center justify-center rounded-sm ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
-            >
-              <span
-                className="block rounded-full bg-current"
-                style={{ height: Math.min(w, 3), width: 14 }}
-              />
-            </button>
-          ))}
-          <button
-            title="線形"
-            aria-label="線形"
-            onClick={() => togglePanel('lineStyle')}
-            className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 ${
-              openPanel === 'lineStyle' ? 'bg-white/10' : ''
-            }`}
-          >
-            <span
-              className="block w-6 border-t-2"
-              style={{
-                borderTopColor: hexToRgba(
-                  selected.color,
-                  selected.opacity,
-                ),
-                borderTopStyle:
-                  selected.style === 'solid'
-                    ? 'solid'
-                    : selected.style === 'dashed'
-                      ? 'dashed'
-                      : 'dotted',
-              }}
-            />
-            <span>
-              {LINE_STYLE_OPTIONS.find((o) => o.id === selected.style)?.label}
-            </span>
-          </button>
-          <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+          {/* A standalone text annotation has no line to style: hide
+              the colour / width / line-style controls for it. */}
+          {selected.name !== TEXT_ANNOTATION_NAME && (
+            <>
+              <button
+                title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
+                aria-label="顏色"
+                onClick={() => togglePanel('color')}
+                className={`flex h-6 w-8 shrink-0 items-center justify-center rounded-sm border px-1 hover:border-white/50 ${
+                  openPanel === 'color'
+                    ? 'border-white ring-1 ring-white'
+                    : 'border-white/20'
+                }`}
+              >
+                <span
+                  className="block h-4 w-6 rounded-[2px]"
+                  style={CHECKER_BG}
+                >
+                  <span
+                    className="block h-full w-full rounded-[2px]"
+                    style={{
+                      backgroundColor: hexToRgba(
+                        selected.color,
+                        selected.opacity,
+                      ),
+                    }}
+                  />
+                </span>
+              </button>
+              <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+              {LINE_WIDTHS.map((w) => (
+                <button
+                  key={w}
+                  title={`線寬 ${w}`}
+                  onClick={() => applyEdit({ size: w })}
+                  className={`flex h-5 w-6 items-center justify-center rounded-sm ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
+                >
+                  <span
+                    className="block rounded-full bg-current"
+                    style={{ height: Math.min(w, 3), width: 14 }}
+                  />
+                </button>
+              ))}
+              <button
+                title="線形"
+                aria-label="線形"
+                onClick={() => togglePanel('lineStyle')}
+                className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 ${
+                  openPanel === 'lineStyle' ? 'bg-white/10' : ''
+                }`}
+              >
+                <span
+                  className="block w-6 border-t-2"
+                  style={{
+                    borderTopColor: hexToRgba(
+                      selected.color,
+                      selected.opacity,
+                    ),
+                    borderTopStyle:
+                      selected.style === 'solid'
+                        ? 'solid'
+                        : selected.style === 'dashed'
+                          ? 'dashed'
+                          : 'dotted',
+                  }}
+                />
+                <span>
+                  {LINE_STYLE_OPTIONS.find((o) => o.id === selected.style)?.label}
+                </span>
+              </button>
+              <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+            </>
+          )}
           <label className="flex items-center gap-1">
             <input
               type="checkbox"
@@ -2074,7 +2171,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               <ColorPicker
                 color={selected.color}
                 opacity={selected.opacity}
-                onColorChange={(c) => applyEdit({ color: c })}
+                // Picking a color closes the panel (same as the line-style
+                // panel): leaving it open covers the chart and swallows
+                // the next click on the canvas.
+                onColorChange={(c) => {
+                  applyEdit({ color: c });
+                  setOpenPanel(null);
+                }}
                 onOpacityChange={(op) => applyEdit({ opacity: op }, false)}
                 onOpacityStart={() => {
                   if (!sliderHistoryPushedRef.current) {

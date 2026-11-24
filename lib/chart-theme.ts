@@ -22,10 +22,17 @@
  *   rectangle            -> opposite corners, styles read from the overlay
  *   fibonacciRetracement -> per-level colours, levels via extendData.levels
  *   measure              -> two points, stats text, never persisted
- *   textAnnotation       -> one point, text label from extendData.text,
- *                           never persisted; its label uses the "textNoHit"
- *                           figure (built-in text draw, never hit-tested)
- *                           so clicks pass through to the main line.
+ *   textAnnotation       -> one point, text label from extendData.text;
+ *                           as a companion (id `${mainId}:text`) it is
+ *                           never persisted and its label uses the
+ *                           "textNoHit" figure so clicks pass through to
+ *                           the main line; as a standalone drawing tool
+ *                           it IS persisted and gets a point figure.
+ *   simpleTag            -> re-registration of the built-in: same
+ *                           full-width line + Y-axis tag, but the tag
+ *                           reads extendData.tagText (else the price)
+ *                           instead of the raw extendData object, and
+ *                           the point figure is on so it is selectable.
  */
 
 import {
@@ -250,12 +257,18 @@ function textWeightOf(t: OverlayTextLike): string {
  * alignH/alignV place the whole block relative to the anchor: top puts
  * the block's top at y, middle centers it on y, bottom puts its bottom
  * at y. Lines stack downward at 1.4x the font size.
+ * `hittable` uses the built-in "text" figure (clickable); otherwise
+ * the "textNoHit" figure (purely visual). Standalone text annotations
+ * need a hittable label — it is their only figure — while companion
+ * labels must stay non-hittable so clicks reach the main line, and
+ * rectangle labels likewise (the rect border is the hit target).
  */
 function textFigures(
   content: string,
   x: number,
   y: number,
   t: OverlayTextLike,
+  hittable = false,
 ): Array<Record<string, unknown>> {
   const lines = content.split('\n');
   const size = typeof t.size === 'number' && t.size > 0 ? t.size : 12;
@@ -275,7 +288,7 @@ function textFigures(
     weight: textWeightOf(t),
   };
   return lines.map((line, i) => ({
-    type: 'textNoHit',
+    type: hittable ? 'text' : 'textNoHit',
     attrs: { x, y: topY + i * lh, text: line, align, baseline: 'top' },
     styles,
   }));
@@ -427,7 +440,95 @@ export function registerTextAnnotationOverlay(): void {
       if (!text || typeof text.content !== 'string' || text.content.length === 0)
         return [];
       const anchor = coordinates[0];
-      return textFigures(text.content, anchor.x, anchor.y, text) as never;
+      // Standalone annotations (groupId === own id) render a hittable
+      // label: it is their only figure, so clicking the text is how
+      // the annotation gets selected. Companions (groupId = main
+      // line's id) keep the non-hittable label so clicks reach the
+      // main line underneath.
+      const hittable = overlay.groupId === overlay.id;
+      return textFigures(text.content, anchor.x, anchor.y, text, hittable) as never;
+    },
+  });
+}
+
+let simpleTagRegistered = false;
+
+/**
+ * Register the custom "simpleTag" overlay once per page load. This
+ * REPLACES the klinecharts built-in of the same name (registerOverlay
+ * is a plain map assignment, so a later registration wins).
+ *
+ * Two built-in defects, both verified against the installed bundle:
+ * 1. Its createYAxisFigures reads `overlay.extendData` as the tag
+ *    text — a raw string or a function returning one. This app always
+ *    persists extendData as an OBJECT (visibleIntervals, text, ...),
+ *    so the built-in tag would render "[object Object]". The custom
+ *    version reads an optional `extendData.tagText` string and falls
+ *    back to the point's price.
+ * 2. It sets no needDefaultPointFigure, and the OverlayImp default is
+ *    false, so the built-in tag has no control point: it can never be
+ *    selected, dragged, edited or deleted. The custom version turns
+ *    the point figure on and leaves the line hittable (the built-in
+ *    line is ignoreEvent, so the tag could never be hovered at all).
+ *    Default point figures only render once an overlay is already
+ *    hovered/selected, so a hittable line figure is what makes the
+ *    tag reachable in the first place.
+ */
+export function registerSimpleTagOverlay(): void {
+  if (simpleTagRegistered) return;
+  simpleTagRegistered = true;
+
+  registerOverlay({
+    name: 'simpleTag',
+    totalStep: 2,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    styles: {
+      line: { style: 'dashed' },
+    },
+    createPointFigures: ({ bounding, coordinates }) => {
+      if (coordinates.length < 1) return [];
+      // The line stays hittable (no ignoreEvent): hovering it is how
+      // the tag gets selected — its only other figure is the Y-axis
+      // tag, and the default point figure only renders once the
+      // overlay is already hovered/selected.
+      return [
+        {
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x: 0, y: coordinates[0].y },
+              { x: bounding.width, y: coordinates[0].y },
+            ],
+          },
+        },
+      ] as never;
+    },
+    createYAxisFigures: ({ chart, overlay, coordinates, bounding, yAxis }) => {
+      const isFromZero = yAxis?.isFromZero() ?? false;
+      const textAlign = isFromZero ? 'left' : 'right';
+      const x = isFromZero ? 0 : bounding.width;
+      const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+      const tagText =
+        typeof ext.tagText === 'string' && ext.tagText.length > 0
+          ? ext.tagText
+          : null;
+      const precision = chart.getSymbol()?.pricePrecision ?? 2;
+      const value = overlay.points[0]?.value;
+      const text =
+        tagText ??
+        (typeof value === 'number' ? value.toFixed(precision) : '');
+      return {
+        type: 'text',
+        attrs: {
+          x,
+          y: coordinates[0].y,
+          text,
+          align: textAlign,
+          baseline: 'middle',
+        },
+      } as never;
     },
   });
 }

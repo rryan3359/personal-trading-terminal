@@ -179,6 +179,13 @@ export default function OverlaySettingsDialog({
   const family: LineFamily | null = lineFamilyOf(toolName);
   const isFib = toolName === 'fibonacciRetracement';
   const isRect = toolName === 'rectangle';
+  /** Freehand strokes have too many points for per-point editing. */
+  const isBrush = toolName === 'brush';
+  /** A standalone text annotation has no line to style. */
+  const isTextTool = toolName === 'textAnnotation';
+  /** Its own Y-axis tag already shows the price. */
+  const isSimpleTag = toolName === 'simpleTag';
+  const isPriceLine = toolName === 'priceLine';
   const title = TOOL_LABELS_BY_NAME[toolName] ?? toolName;
 
   // Escape closes the dialog even when focus is outside it (e.g. on the
@@ -311,6 +318,12 @@ export default function OverlaySettingsDialog({
         <div className="space-y-4 px-4 py-4">
           {tab === 'style' && (
             <>
+              {isTextTool ? (
+                <p className="text-xs leading-relaxed text-[#787b86]">
+                  文字標註沒有線條樣式，文字的顏色、字號與對齊請到「文字」頁籤設定。
+                </p>
+              ) : (
+                <>
               <div>
                 <span className={FIELD_LABEL}>顏色 / 不透明度</span>
                 <ColorPicker
@@ -390,7 +403,8 @@ export default function OverlaySettingsDialog({
                   </select>
                 </div>
               )}
-              {(family !== null || isRect || isFib) && (
+              {(family !== null || isRect || isFib || isPriceLine) &&
+                !isSimpleTag && (
                 <label className={CHECK_ROW}>
                   <input
                     type="checkbox"
@@ -526,6 +540,8 @@ export default function OverlaySettingsDialog({
                     背景填色（0–100% 區間）
                   </label>
                 </div>
+              )}
+                </>
               )}
             </>
           )}
@@ -683,6 +699,12 @@ export default function OverlaySettingsDialog({
 
           {tab === 'coords' && (
             <>
+              {isBrush ? (
+                <p className="text-xs leading-relaxed text-[#787b86]">
+                  徒手畫線由多個點組成，不支援逐點編輯；拖曳整條線可移動它。
+                </p>
+              ) : (
+                <>
               <p className="text-xs leading-relaxed text-[#787b86]">
                 K 棒編號為已載入 K 線的順序（0＝最舊一根）；修改後端點會
                 移到該 K 棒的開盤時間與輸入的價格。
@@ -707,6 +729,8 @@ export default function OverlaySettingsDialog({
                   }}
                 />
               ))}
+                </>
+              )}
             </>
           )}
 

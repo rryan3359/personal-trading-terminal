@@ -4,14 +4,14 @@
  * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
  *
  * Top: cursor/select tool (active when no drawing tool is armed;
- * clicking it exits drawing mode). Then the 10 DRAWING_TOOLS grouped
- * by logic — trend lines, horizontal/vertical lines, shapes,
- * Fibonacci/measure — with a divider between groups. Bottom: magnet
- * (click cycles off -> weak -> strong, current strength shown under
- * the icon) and clear. Single click arms a tool (click again to
- * disarm); double-click or Shift+click keeps it armed for continuous
- * drawing. Active tool: bg #2a2e39, text #2962ff, plus a left accent
- * bar.
+ * clicking it exits drawing mode). Then the 18 DRAWING_TOOLS grouped
+ * by logic — trend lines, horizontal lines, vertical lines, shapes,
+ * freehand/annotation, Fibonacci/measure — with a divider between
+ * groups. Bottom: magnet (click cycles off -> weak -> strong, current
+ * strength shown under the icon) and clear. Single click arms a tool
+ * (click again to disarm); double-click or Shift+click keeps it armed
+ * for continuous drawing. Active tool: bg #2a2e39, text #2962ff, plus
+ * a left accent bar.
  *
  * Undo / redo live in the top Toolbar now (TradingView puts them there).
  */
@@ -22,9 +22,11 @@ import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
 
 /** Logical groups for the toolbar, in display order. */
 const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
-  { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine', 'parallelStraightLine'] },
-  { title: '水平／垂直線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'verticalStraightLine'] },
+  { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine', 'parallelStraightLine', 'priceChannelLine'] },
+  { title: '水平線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'simpleTag'] },
+  { title: '垂直線', ids: ['verticalStraightLine', 'verticalSegment', 'verticalRayLine'] },
   { title: '圖形', ids: ['rectangle'] },
+  { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
   { title: '斐波那契／測量', ids: ['fibonacciRetracement', 'measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
@@ -101,6 +103,80 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
         <svg {...ICON_PROPS}>
           <line x1="10" y1="3" x2="10" y2="17" />
           <path d="M10 3l-.9 3.2M10 3l.9 3.2M10 17l-.9-3.2M10 17l.9-3.2" />
+        </svg>
+      );
+    case 'horizontalSegment':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="4" y1="10" x2="16" y2="10" />
+          <circle cx="4" cy="10" r="1.6" fill="currentColor" stroke="none" />
+          <circle cx="16" cy="10" r="1.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'verticalSegment':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="10" y1="4" x2="10" y2="16" />
+          <circle cx="10" cy="4" r="1.6" fill="currentColor" stroke="none" />
+          <circle cx="10" cy="16" r="1.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'verticalRayLine':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="10" y1="4" x2="10" y2="17" />
+          <path d="M10 17l-.9-3.2M10 17l.9-3.2" />
+          <circle cx="10" cy="4" r="1.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'priceLine':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="2" y1="10" x2="13" y2="10" />
+          <rect x="13" y="6.5" width="5" height="7" rx="1" />
+        </svg>
+      );
+    case 'priceChannelLine':
+      return (
+        <svg {...ICON_PROPS}>
+          <line x1="3" y1="15" x2="11" y2="7" />
+          <line x1="9" y1="13" x2="17" y2="5" />
+          <circle cx="11" cy="7" r="1.4" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'brush':
+      return (
+        <svg {...ICON_PROPS}>
+          <path d="M3.5 15.5c2.5-6 4 2.5 6.5-3.5s3.5-4 6.5-1.5" />
+        </svg>
+      );
+    case 'simpleTag':
+      return (
+        <svg {...ICON_PROPS}>
+          <line
+            x1="2"
+            y1="10"
+            x2="12"
+            y2="10"
+            strokeDasharray="2.5 2.5"
+          />
+          <path d="M12 6.5h5.5v7H12l-2.5-3.5 2.5-3.5z" />
+        </svg>
+      );
+    case 'textAnnotation':
+      return (
+        <svg {...ICON_PROPS}>
+          <text
+            x="10"
+            y="14.5"
+            textAnchor="middle"
+            fontSize="13"
+            fontWeight="600"
+            fill="currentColor"
+            stroke="none"
+          >
+            T
+          </text>
         </svg>
       );
     case 'parallelStraightLine':
