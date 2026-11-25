@@ -29,6 +29,9 @@
  * once it loads: symbols that are not on Binance (e.g. NVDA, added
  * before validation existed) are dropped, so a stale chart can never
  * show another symbol's prices under the wrong ticker.
+ * The stock watchlist is a separate local-only list of TW/US tickers
+ * with no quotes yet (no Yahoo source — Phase 2 is halted); it never
+ * touches the chart.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -65,6 +68,8 @@ export default function Home() {
   const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   const [interval, setInterval] = useState<Interval>(DEFAULT_INTERVAL);
   const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
+  /** TW/US tickers on the stock watchlist (local-only, no quotes yet). */
+  const [stockWatchlist, setStockWatchlist] = useState<string[]>([]);
   const [activeTool, setActiveTool] = useState<DrawingTool | null>(null);
   const [drawContinuous, setDrawContinuous] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
@@ -94,6 +99,9 @@ export default function Home() {
     const savedWatchlist = loadJSON<string[]>(STORAGE_KEYS.watchlist, []);
     setWatchlist(
       savedWatchlist.length > 0 ? savedWatchlist : DEFAULT_WATCHLIST,
+    );
+    setStockWatchlist(
+      loadJSON<string[]>(STORAGE_KEYS.stockWatchlist, []),
     );
     const savedIndicators = loadJSON<string[]>(STORAGE_KEYS.indicators, []);
     setIndicators(
@@ -145,6 +153,10 @@ export default function Home() {
   }, [watchlist, hydrated]);
   useEffect(() => {
     if (!hydrated) return;
+    saveJSON(STORAGE_KEYS.stockWatchlist, stockWatchlist);
+  }, [stockWatchlist, hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
     saveJSON(STORAGE_KEYS.indicators, indicators);
   }, [indicators, hydrated]);
   useEffect(() => {
@@ -194,6 +206,17 @@ export default function Home() {
     },
     [symbol, watchlist],
   );
+
+  // Stock watchlist: local-only list, no quotes, never touches the chart.
+  const addStock = useCallback((ticker: string) => {
+    setStockWatchlist((prev) =>
+      prev.includes(ticker) ? prev : [...prev, ticker],
+    );
+  }, []);
+
+  const removeStock = useCallback((ticker: string) => {
+    setStockWatchlist((prev) => prev.filter((t) => t !== ticker));
+  }, []);
 
   const toggleIndicator = useCallback((name: string) => {
     setIndicators((prev) =>
@@ -277,6 +300,9 @@ export default function Home() {
           symbols={watchlist}
           activeSymbol={symbol}
           symbolList={symbolList}
+          stockSymbols={stockWatchlist}
+          onAddStock={addStock}
+          onRemoveStock={removeStock}
           onSelect={(next) => {
             selectSymbol(next);
             setMobileWatchlistOpen(false);

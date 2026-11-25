@@ -3,17 +3,21 @@
 /**
  * Watchlist.tsx — right watchlist panel.
  *
- * Presentational: the page owns the list (persisted in localStorage).
- * The search box searches the Binance spot symbol list (GET /api/symbols,
- * passed in as `symbolList`): typing filters matches into a dropdown
- * (keyboard: ↑/↓ + Enter, Esc closes), and "找不到相關標的" is shown
- * explicitly when nothing matches. A symbol that is not on Binance
- * (e.g. NVDA) can never be added, so the chart can never show another
- * symbol's prices under its ticker. When the symbol list failed to load
- * (`symbolList` is []), the box falls back to the old behaviour:
- * format check only.
+ * Two tabs: 加密貨幣 (Binance spot, live prices) and 股票 (a local-only
+ * list of TW/US tickers — no quotes yet, no data source, so rows are not
+ * clickable and show「尚未支援報價」; adding a stock ticker only stores
+ * it in localStorage).
  *
- * Click a row to switch symbol; × removes it.
+ * Crypto tab: the search box searches the Binance spot symbol list
+ * (GET /api/symbols, passed in as `symbolList`): typing filters matches
+ * into a dropdown (keyboard: ↑/↓ + Enter, Esc closes), and
+ * "找不到相關標的" is shown explicitly when nothing matches. A symbol
+ * that is not on Binance (e.g. NVDA) can never be added, so the chart
+ * can never show another symbol's prices under its ticker. When the
+ * symbol list failed to load (`symbolList` is []), the box falls back
+ * to the old behaviour: format check only.
+ *
+ * Click a crypto row to switch symbol; × removes it.
  *
  * Mobile (<md): a slide-over drawer from the right, opened from the
  * toolbar (☰ 自選).
@@ -33,6 +37,10 @@ export interface WatchlistProps {
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => void;
   onRemove: (symbol: string) => void;
+  /** TW/US tickers on the stock watchlist (local-only, no quotes yet). */
+  stockSymbols: string[];
+  onAddStock: (ticker: string) => void;
+  onRemoveStock: (ticker: string) => void;
   /** Binance spot symbols, or null while still loading. */
   symbolList?: SymbolInfo[] | null;
   /** Mobile only: whether the slide-over drawer is open. */
@@ -57,14 +65,20 @@ export default function Watchlist({
   onSelect,
   onAdd,
   onRemove,
+  stockSymbols,
+  onAddStock,
+  onRemoveStock,
   symbolList = null,
   mobileOpen = false,
   onCloseMobile,
 }: WatchlistProps) {
+  const [tab, setTab] = useState<'crypto' | 'stock'>('crypto');
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
+  const [stockInput, setStockInput] = useState('');
+  const [stockError, setStockError] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
   /** Last-known 24h ticker per symbol (kept on fetch failure). */
   const [prices, setPrices] = useState<Record<string, TickerPrice>>({});
@@ -148,6 +162,23 @@ export default function Watchlist({
     pick(symbol);
   };
 
+  /** Stock tab: format check only — no data source to validate against. */
+  const submitStock = () => {
+    const ticker = stockInput.trim().toUpperCase().replace(/\s+/g, '');
+    if (!ticker) return;
+    if (!/^[A-Z0-9]+(\.[A-Z]+)?$/.test(ticker) || ticker.length > 12) {
+      setStockError('代號格式不正確（例：NVDA、2330、2330.TW）');
+      return;
+    }
+    if (stockSymbols.includes(ticker)) {
+      setStockError(`${ticker} 已經在清單裡`);
+      return;
+    }
+    setStockError('');
+    setStockInput('');
+    onAddStock(ticker);
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown' && open && results.length > 0) {
       e.preventDefault();
@@ -182,6 +213,30 @@ export default function Watchlist({
             : 'max-md:translate-x-full'
         } max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-50 max-md:w-72 max-md:shadow-2xl`}
       >
+      <div className="flex shrink-0 border-b border-[#2a2e39]">
+        <button
+          onClick={() => setTab('crypto')}
+          className={`flex-1 px-3 py-2 text-xs font-medium ${
+            tab === 'crypto'
+              ? 'border-b-2 border-[#2962ff] text-white'
+              : 'text-[#787b86] hover:text-[#b2b5be]'
+          }`}
+        >
+          加密貨幣
+        </button>
+        <button
+          onClick={() => setTab('stock')}
+          className={`flex-1 px-3 py-2 text-xs font-medium ${
+            tab === 'stock'
+              ? 'border-b-2 border-[#2962ff] text-white'
+              : 'text-[#787b86] hover:text-[#b2b5be]'
+          }`}
+        >
+          股票
+        </button>
+      </div>
+      {tab === 'crypto' && (
+      <>
       <div className="relative border-b border-[#2a2e39] p-2">
         <div className="flex gap-1.5">
           <input
@@ -335,6 +390,68 @@ export default function Watchlist({
         <br />
         加密貨幣即時行情
       </p>
+      </>
+      )}
+      {tab === 'stock' && (
+      <>
+      <div className="border-b border-[#2a2e39] p-2">
+        <div className="flex gap-1.5">
+          <input
+            value={stockInput}
+            onChange={(e) => {
+              setStockInput(e.target.value);
+              setStockError('');
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submitStock();
+            }}
+            placeholder="輸入股票代號，如 NVDA 或 2330"
+            autoComplete="off"
+            className="min-w-0 flex-1 rounded bg-[#1e222d] px-2 py-1.5 text-xs text-[#d1d4dc] outline-none placeholder:text-[#5d606b] focus:ring-1 focus:ring-[#2962ff]"
+          />
+          <button
+            onClick={submitStock}
+            className="shrink-0 rounded bg-[#2962ff] px-2.5 text-xs font-medium text-white hover:bg-[#1e53e5]"
+          >
+            新增
+          </button>
+        </div>
+        {stockError && (
+          <p className="mt-1 text-[11px] text-[#ef5350]">{stockError}</p>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {stockSymbols.length === 0 && (
+          <p className="p-3 text-xs leading-relaxed text-[#787b86]">
+            股票觀察清單是空的。輸入代號加入，例如 NVDA、AAPL、2330。
+          </p>
+        )}
+        {stockSymbols.map((ticker) => (
+          <div
+            key={ticker}
+            className="group flex items-center px-3 py-2 text-sm text-[#b2b5be] hover:bg-[#1a1e29]"
+          >
+            <span className="min-w-0 flex-1 truncate">{ticker}</span>
+            <span className="shrink-0 text-[11px] text-[#5d606b]">
+              尚未支援報價
+            </span>
+            <button
+              aria-label={`移除 ${ticker}`}
+              onClick={() => onRemoveStock(ticker)}
+              className="ml-2 w-4 shrink-0 rounded px-1 text-[#5d606b] opacity-0 hover:bg-[#2a2e39] hover:text-white group-hover:opacity-100"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+      <p className="border-t border-[#2a2e39] px-3 py-2 text-[11px] leading-relaxed text-[#5d606b]">
+        台股美股報價尚未接入
+        <br />
+        點選不會切換圖表
+      </p>
+      </>
+      )}
       </aside>
     </>
   );

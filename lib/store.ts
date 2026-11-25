@@ -9,6 +9,8 @@
 
 export const STORAGE_KEYS = {
   watchlist: 'ptt:watchlist',
+  /** TW/US tickers on the stock watchlist (local-only list, no quotes). */
+  stockWatchlist: 'ptt:stock-watchlist',
   drawings: 'ptt:drawings',
   drawingsVersion: 'ptt:drawings-version',
   indicators: 'ptt:indicators',
