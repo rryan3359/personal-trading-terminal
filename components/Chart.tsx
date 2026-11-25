@@ -242,7 +242,6 @@ const TOUCH_FALLBACK_WAIT_MS = 150;
  * set only there, cleared when mode leaves Selected.
  */
 const BAR_COMPAT_CLICK_SUPPRESS_MS = 300;
-const LINE_WIDTHS = [1, 2, 3, 4];
 /** Custom overlay name for a drawing's attached text label. */
 const TEXT_ANNOTATION_NAME = 'textAnnotation';
 
@@ -255,7 +254,7 @@ const CHECKER_BG = {
   backgroundColor: '#f5f5f5',
 };
 
-/** Small 20px stroke icons for the mobile floating bar (icon-only). */
+/** Small 20px stroke icons for the floating bar (icon-only). */
 const BAR_ICON_PROPS = {
   width: 20,
   height: 20,
@@ -1165,12 +1164,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   const [selected, setSelected] = useState<SelectedOverlayState | null>(null);
   const selectedRef = useRef<SelectedOverlayState | null>(null);
-  /** Floating edit bar position (px, relative to the chart wrapper).
-   *  null = default centered at the top. */
-  const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(null);
   /** Which floating-bar popover is open, if any. */
   const [openPanel, setOpenPanel] = useState<
-    'color' | 'lineStyle' | 'more' | 'template' | null
+    'color' | 'lineStyle' | 'template' | null
   >(null);
   /** Overlay style templates, grouped by overlay name (tool type). */
   const [templates, setTemplates] =
@@ -1179,16 +1175,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const [templateName, setTemplateName] = useState('');
   /** Outer chart wrapper (the floating bar's offset parent). */
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  /** Floating bar element (measured while dragging). */
+  /** Floating bar element (used for click-outside popover detection). */
   const barRef = useRef<HTMLDivElement | null>(null);
-  /** Active drag state for the floating bar grip. */
-  const barDragRef = useRef<{
-    pointerId: number;
-    offsetX: number;
-    offsetY: number;
-    barWidth: number;
-    barHeight: number;
-  } | null>(null);
   /** Shown when the current symbol's init load delivered no bars. */
   const [loadError, setLoadError] = useState<string | null>(null);
   /** Last loaded / live candle, shown in the top-left legend overlay. */
@@ -1293,8 +1281,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     selectedRef.current = s;
     setSelected(s);
     if (s === null) {
-      // Deselected: the bar goes away, so its dragged position resets.
-      setBarPos(null);
+      // Deselected: the bar goes away.
       setOpenPanel(null);
       // Mode follows the selection, but only out of Selected: a drag
       // or an overlay state owns the mode until it exits (their exit
@@ -3627,7 +3614,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }, TOUCH_FALLBACK_WAIT_MS);
   };
 
-  // ---- floating edit bar: drag + popovers -------------------------------
+  // ---- floating edit bar: popovers --------------------------------
 
   /** Close any open floating-bar popover when clicking outside the bar. */
   useEffect(() => {
@@ -3640,7 +3627,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   }, [openPanel]);
 
   const togglePanel = (
-    panel: 'color' | 'lineStyle' | 'more' | 'template',
+    panel: 'color' | 'lineStyle' | 'template',
   ) => {
     setOpenPanel((cur) => (cur === panel ? null : panel));
   };
@@ -3699,62 +3686,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     });
   };
 
-  /** Start dragging the floating bar from its grip. */
-  const onBarGripPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    const bar = barRef.current;
-    const wrap = wrapperRef.current;
-    if (!bar || !wrap) return;
-    const barRect = bar.getBoundingClientRect();
-    const wrapRect = wrap.getBoundingClientRect();
-    barDragRef.current = {
-      pointerId: e.pointerId,
-      offsetX: e.clientX - barRect.left,
-      offsetY: e.clientY - barRect.top,
-      barWidth: barRect.width,
-      barHeight: barRect.height,
-    };
-    if (!barPos) {
-      setBarPos({
-        x: barRect.left - wrapRect.left,
-        y: barRect.top - wrapRect.top,
-      });
-    }
-    const onMove = (ev: PointerEvent) => {
-      const d = barDragRef.current;
-      const w = wrapperRef.current;
-      if (!d || !w || ev.pointerId !== d.pointerId) return;
-      const r = w.getBoundingClientRect();
-      const x = Math.max(
-        0,
-        Math.min(ev.clientX - r.left - d.offsetX, r.width - d.barWidth),
-      );
-      const y = Math.max(
-        0,
-        Math.min(ev.clientY - r.top - d.offsetY, r.height - d.barHeight),
-      );
-      setBarPos({ x, y });
-    };
-    const onUp = (ev: PointerEvent) => {
-      if (ev.pointerId !== barDragRef.current?.pointerId) return;
-      barDragRef.current = null;
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
-  };
-
   // Legend (OHLC + indicators + countdown) lives in the memoized
   // ChartLegend component above: hover updates re-render only that
   // subtree, never this whole component (Phase 1 step 2b).
 
-  // Floating-bar default position: desktop top-centre (top: 8, see the
-  // bar's style below); narrow screens dock the compact icon bar at
-  // the bottom of the chart instead, so it never covers the legend
-  // or the candle countdown and needs no horizontal scrolling.
+  // Floating-bar position: one compact icon bar, docked at the
+  // bottom centre of the chart on every screen width (desktop now
+  // matches mobile). It covers the bottom ~50px of the chart while
+  // open; popovers open upward from it.
 
   return (
     <div ref={wrapperRef} className="relative h-full w-full">
@@ -3799,49 +3738,22 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               e.preventDefault();
             }
           }}
-          className="absolute z-20 flex max-w-full flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg max-md:flex-nowrap max-md:gap-1 max-md:px-2"
-          style={
-            barPos
-              ? { left: barPos.x, top: barPos.y }
-              : typeof window !== 'undefined' && window.innerWidth < 768
-                ? { left: '50%', bottom: 8, transform: 'translateX(-50%)' }
-                : { left: '50%', top: 8, transform: 'translateX(-50%)' }
-          }
+          className="absolute z-20 flex max-w-full flex-nowrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg"
+          style={{ left: '50%', bottom: 8, transform: 'translateX(-50%)' }}
         >
-          <button
-            title="拖曳移動"
-            aria-label="拖曳移動浮動列"
-            onPointerDown={onBarGripPointerDown}
-            className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center rounded-sm text-[#80858f] hover:bg-white/10 hover:text-white active:cursor-grabbing max-md:hidden"
-          >
-            <svg
-              width="10"
-              height="16"
-              viewBox="0 0 10 16"
-              fill="currentColor"
-              aria-hidden="true"
-            >
-              <circle cx="2.5" cy="3" r="1.3" />
-              <circle cx="7.5" cy="3" r="1.3" />
-              <circle cx="2.5" cy="8" r="1.3" />
-              <circle cx="7.5" cy="8" r="1.3" />
-              <circle cx="2.5" cy="13" r="1.3" />
-              <circle cx="7.5" cy="13" r="1.3" />
-            </svg>
-          </button>
           {/* A standalone text annotation has no line to style: hide
-              the colour / width / line-style controls for it. */}
+              the colour / line-style controls for it. */}
           {selected.name !== TEXT_ANNOTATION_NAME && (
             <>
-              {/* Mobile: template button (first, icon-only). A text
+              {/* Template button (first, icon-only). A text
                   annotation has no line to style, so it gets no
                   template button either (same as the colour /
-                  width / line-style controls). */}
+                  line-style controls). */}
               <button
                 title="範本"
                 aria-label="範本"
                 onClick={() => togglePanel('template')}
-                className={`hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex ${
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 ${
                   openPanel === 'template' ? 'bg-white/10' : ''
                 }`}
               >
@@ -3851,7 +3763,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                 title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
                 aria-label="顏色"
                 onClick={() => togglePanel('color')}
-                className={`flex h-6 w-8 shrink-0 items-center justify-center rounded-sm border px-1 hover:border-white/50 max-md:h-9 max-md:w-9 ${
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border hover:border-white/50 ${
                   openPanel === 'color'
                     ? 'border-white ring-1 ring-white'
                     : 'border-white/20'
@@ -3872,12 +3784,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   />
                 </span>
               </button>
-              {/* Mobile: icon-only line style (no label, no widths). */}
+              {/* Icon-only line style (no label, no widths). */}
               <button
                 title="線形"
                 aria-label="線形"
                 onClick={() => togglePanel('lineStyle')}
-                className={`hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex ${
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 ${
                   openPanel === 'lineStyle' ? 'bg-white/10' : ''
                 }`}
               >
@@ -3897,83 +3809,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   }}
                 />
               </button>
-              {/* Desktop-only: widths, labelled line style. */}
-              <span className="flex items-center gap-1 max-md:hidden">
-                <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
-                {LINE_WIDTHS.map((w) => (
-                  <button
-                    key={w}
-                    title={`線寬 ${w}`}
-                    onClick={() => applyEdit({ size: w })}
-                    className={`flex h-5 w-6 items-center justify-center rounded-sm ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
-                  >
-                    <span
-                      className="block rounded-full bg-current"
-                      style={{ height: Math.min(w, 3), width: 14 }}
-                    />
-                  </button>
-                ))}
-                <button
-                  title="線形"
-                  aria-label="線形"
-                  onClick={() => togglePanel('lineStyle')}
-                  className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 ${
-                    openPanel === 'lineStyle' ? 'bg-white/10' : ''
-                  }`}
-                >
-                  <span
-                    className="block w-6 border-t-2"
-                    style={{
-                      borderTopColor: hexToRgba(
-                        selected.color,
-                        selected.opacity,
-                      ),
-                      borderTopStyle:
-                        selected.style === 'solid'
-                          ? 'solid'
-                          : selected.style === 'dashed'
-                            ? 'dashed'
-                            : 'dotted',
-                    }}
-                  />
-                  <span>
-                    {LINE_STYLE_OPTIONS.find((o) => o.id === selected.style)?.label}
-                  </span>
-                </button>
-                <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
-              </span>
             </>
           )}
-          <label className="flex items-center gap-1 whitespace-nowrap max-md:hidden">
-            <input
-              type="checkbox"
-              checked={
-                selected.visibleIntervals !== undefined &&
-                selected.visibleIntervals.length === 1 &&
-                selected.visibleIntervals[0] === interval
-              }
-              onChange={(e) =>
-                applyEdit({
-                  visibleIntervals: e.target.checked ? [interval] : undefined,
-                })
-              }
-              className="accent-[#2962ff]"
-            />
-            僅此週期
-          </label>
-          <span className="mx-1 h-4 w-px bg-[#2a2e39] max-md:hidden" />
-          <button
-            onClick={() => applyEdit({ lock: !selected.lock })}
-            className="whitespace-nowrap rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:hidden"
-          >
-            {selected.lock ? '🔒 已鎖定' : '🔓 鎖定'}
-          </button>
-          {/* Mobile: icon-only lock / hide / settings / delete. */}
+          {/* Icon-only lock / hide / settings / delete. */}
           <button
             title={selected.lock ? '已鎖定（點按解鎖）' : '鎖定（點按鎖定）'}
             aria-label={selected.lock ? '已鎖定' : '鎖定'}
             onClick={() => applyEdit({ lock: !selected.lock })}
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
           >
             <BarLockIcon locked={selected.lock} />
           </button>
@@ -3981,27 +3824,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             title={selected.visible ? '隱藏' : '顯示'}
             aria-label={selected.visible ? '隱藏' : '顯示'}
             onClick={() => applyEdit({ visible: !selected.visible })}
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
           >
             <BarEyeIcon hidden={!selected.visible} />
-          </button>
-          <button
-            title="更多"
-            aria-label="更多"
-            onClick={() => togglePanel('more')}
-            className={`rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:hidden ${
-              openPanel === 'more' ? 'bg-white/10' : ''
-            }`}
-          >
-            •••
-          </button>
-          <button
-            title="設定"
-            aria-label="設定"
-            onClick={() => openDialogFor(selected.id, 'style')}
-            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:hidden"
-          >
-            ✏️
           </button>
           <button
             title="設定"
@@ -4012,40 +3837,27 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                 selected.name === TEXT_ANNOTATION_NAME ? 'text' : 'style',
               )
             }
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
           >
             <BarGearIcon />
-          </button>
-          <button
-            title="文字"
-            aria-label="文字"
-            onClick={() => openDialogFor(selected.id, 'text')}
-            className="rounded-sm px-1.5 py-0.5 font-semibold hover:bg-white/10 max-md:hidden"
-          >
-            T
-          </button>
-          <button
-            onClick={deleteSelected}
-            className="rounded-sm px-1.5 py-0.5 text-[#ef5350] hover:bg-white/10 max-md:hidden"
-          >
-            刪除
           </button>
           <button
             title="刪除"
             aria-label="刪除"
             onClick={deleteSelected}
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm text-[#ef5350] hover:bg-white/10 max-md:flex"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm text-[#ef5350] hover:bg-white/10"
           >
             <BarTrashIcon />
           </button>
           <button
             onClick={deselect}
-            className="rounded-sm px-1 hover:bg-white/10 max-md:min-h-9 max-md:min-w-9"
+            aria-label="取消選取"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
           >
             ✕
           </button>
           {openPanel === 'color' && (
-            <div className="absolute left-0 top-full z-40 mt-1 max-md:bottom-full max-md:top-auto max-md:mb-1 max-md:mt-0">
+            <div className="absolute bottom-full left-0 z-40 mb-1">
               <ColorPicker
                 color={selected.color}
                 opacity={selected.opacity}
@@ -4070,7 +3882,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             </div>
           )}
           {openPanel === 'lineStyle' && (
-            <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl max-md:bottom-full max-md:top-auto max-md:mb-1 max-md:mt-0">
+            <div className="absolute bottom-full left-0 z-40 mb-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
               {LINE_STYLE_OPTIONS.map((opt) => (
                 <button
                   key={opt.id}
@@ -4101,7 +3913,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             </div>
           )}
           {openPanel === 'template' && (
-            <div className="absolute left-0 top-full z-40 mt-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-2 shadow-xl max-md:bottom-full max-md:top-auto max-md:mb-1 max-md:mt-0">
+            <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-2 shadow-xl">
               <div className="mb-1 px-1 text-xs font-semibold text-[#d1d4dc]">
                 範本
               </div>
@@ -4163,46 +3975,6 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   儲存
                 </button>
               </div>
-            </div>
-          )}
-          {openPanel === 'more' && (
-            <div className="absolute right-0 top-full z-40 mt-1 w-36 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
-              <button
-                onClick={() => {
-                  copySelected();
-                  setOpenPanel(null);
-                }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
-              >
-                複製
-              </button>
-              <button
-                onClick={() => {
-                  bringToFront();
-                  setOpenPanel(null);
-                }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
-              >
-                移到前面
-              </button>
-              <button
-                onClick={() => {
-                  sendToBack();
-                  setOpenPanel(null);
-                }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
-              >
-                移到後面
-              </button>
-              <button
-                onClick={() => {
-                  applyEdit({ visible: !selected.visible });
-                  setOpenPanel(null);
-                }}
-                className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
-              >
-                {selected.visible ? '隱藏' : '顯示'}
-              </button>
             </div>
           )}
         </div>
