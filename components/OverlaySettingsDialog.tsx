@@ -95,6 +95,11 @@ export interface OverlaySettingsDialogProps {
   initialTab?: DialogTab;
   onConfirm: (draft: OverlayDialogDraft) => void;
   onClose: () => void;
+  /** One-shot actions (shown in a 更多操作 section on the 樣式 tab).
+   *  Each runs then closes the dialog. */
+  onCopy?: () => void;
+  onBringToFront?: () => void;
+  onSendToBack?: () => void;
 }
 
 const TABS: Array<{ id: DialogTab; label: string }> = [
@@ -246,6 +251,9 @@ export default function OverlaySettingsDialog({
   initialTab = 'style',
   onConfirm,
   onClose,
+  onCopy,
+  onBringToFront,
+  onSendToBack,
 }: OverlaySettingsDialogProps) {
   const [tab, setTab] = useState<DialogTab>(initialTab);
   const [draft, setDraft] = useState<OverlayDialogDraft>(initial);
@@ -388,7 +396,7 @@ export default function OverlaySettingsDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 max-md:items-end max-md:p-0"
       onClick={onClose}
     >
       <div
@@ -396,8 +404,13 @@ export default function OverlaySettingsDialog({
         aria-label={`${title}設定`}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={onKeyDown}
-        className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-lg border border-[#2a2e39] bg-[#131722] text-sm text-[#d1d4dc] shadow-2xl"
+        className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-lg border border-[#2a2e39] bg-[#131722] text-sm text-[#d1d4dc] shadow-2xl max-md:max-w-none max-md:rounded-b-none max-md:rounded-t-2xl"
       >
+        {/* Bottom-sheet drag handle (mobile only). */}
+        <div
+          aria-hidden="true"
+          className="sticky top-2 z-10 mx-auto mt-2 hidden h-1 w-10 shrink-0 rounded-full bg-white/25 max-md:block"
+        />
         <div className="flex items-center justify-between border-b border-[#2a2e39] px-4 py-3">
           <div className="flex items-center gap-2 text-base font-semibold text-white">
             {title}
@@ -997,6 +1010,42 @@ export default function OverlaySettingsDialog({
               )}
                 </>
               )}
+              {(onCopy !== undefined ||
+                onBringToFront !== undefined ||
+                onSendToBack !== undefined) && (
+                <div>
+                  <span className={FIELD_LABEL}>更多操作</span>
+                  <div className="flex gap-2">
+                    {onCopy !== undefined && (
+                      <button
+                        type="button"
+                        onClick={onCopy}
+                        className="flex-1 rounded border border-[#2a2e39] px-2 py-2 text-sm hover:bg-white/5"
+                      >
+                        複製
+                      </button>
+                    )}
+                    {onBringToFront !== undefined && (
+                      <button
+                        type="button"
+                        onClick={onBringToFront}
+                        className="flex-1 rounded border border-[#2a2e39] px-2 py-2 text-sm hover:bg-white/5"
+                      >
+                        移到前面
+                      </button>
+                    )}
+                    {onSendToBack !== undefined && (
+                      <button
+                        type="button"
+                        onClick={onSendToBack}
+                        className="flex-1 rounded border border-[#2a2e39] px-2 py-2 text-sm hover:bg-white/5"
+                      >
+                        移到後面
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -1235,13 +1284,13 @@ export default function OverlaySettingsDialog({
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="rounded-md border border-[#2a2e39] px-4 py-1.5 text-sm hover:bg-white/5"
+              className="rounded-md border border-[#2a2e39] px-4 py-1.5 text-sm hover:bg-white/5 max-md:py-2.5"
             >
               取消
             </button>
             <button
               onClick={() => onConfirm(draft)}
-              className="rounded-md bg-[#2962ff] px-4 py-1.5 text-sm font-semibold text-white hover:bg-[#1e5bf0]"
+              className="rounded-md bg-[#2962ff] px-4 py-1.5 text-sm font-semibold text-white hover:bg-[#1e5bf0] max-md:py-2.5"
             >
               確認
             </button>

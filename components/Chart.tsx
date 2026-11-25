@@ -205,6 +205,58 @@ const CHECKER_BG = {
   backgroundColor: '#f5f5f5',
 };
 
+/** Small 20px stroke icons for the mobile floating bar (icon-only). */
+const BAR_ICON_PROPS = {
+  width: 20,
+  height: 20,
+  viewBox: '0 0 20 20',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.6,
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+};
+
+function BarLockIcon({ locked }: { locked: boolean }) {
+  return (
+    <svg {...BAR_ICON_PROPS} aria-hidden="true">
+      <rect x="4.5" y="9" width="11" height="8" rx="1.5" />
+      {locked ? (
+        <path d="M6.5 9V7a3.5 3.5 0 0 1 7 0v2" />
+      ) : (
+        <path d="M6.5 9V7a3.5 3.5 0 0 1 6.9-.8" />
+      )}
+    </svg>
+  );
+}
+
+function BarEyeIcon({ hidden }: { hidden: boolean }) {
+  return (
+    <svg {...BAR_ICON_PROPS} aria-hidden="true">
+      <path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z" />
+      <circle cx="10" cy="10" r="2.5" />
+      {hidden && <line x1="3.5" y1="3.5" x2="16.5" y2="16.5" />}
+    </svg>
+  );
+}
+
+function BarGearIcon() {
+  return (
+    <svg {...BAR_ICON_PROPS} aria-hidden="true">
+      <circle cx="10" cy="10" r="3" />
+      <path d="M10 2.5v2.4M10 15.1v2.4M2.5 10h2.4M15.1 10h2.4M4.7 4.7l1.7 1.7M13.6 13.6l1.7 1.7M15.3 4.7l-1.7 1.7M6.4 13.6l-1.7 1.7" />
+    </svg>
+  );
+}
+
+function BarTrashIcon() {
+  return (
+    <svg {...BAR_ICON_PROPS} aria-hidden="true">
+      <path d="M4 5.5h12M8 5.5V4h4v1.5M6.5 5.5l.8 10.5h5.4l.8-10.5M10 8.5v5" />
+    </svg>
+  );
+}
+
 /** Snapshot of one selected overlay for the floating edit bar and the
  *  settings dialog. Points/text/visibility/extend are read from the
  *  live overlay (extend is derived from the overlay name + point order). */
@@ -566,8 +618,6 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   >(null);
   /** Outer chart wrapper (the floating bar's offset parent). */
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  /** Top-left legend (measured for the narrow-screen bar default). */
-  const legendRef = useRef<HTMLDivElement | null>(null);
   /** Floating bar element (measured while dragging). */
   const barRef = useRef<HTMLDivElement | null>(null);
   /** Active drag state for the floating bar grip. */
@@ -2640,25 +2690,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     return rows;
   })();
 
-  /**
-   * Narrow-screen default for the floating edit bar: below the
-   * top-left legend (title + OHLC + indicator rows), so the bar
-   * never covers the candle countdown. Measured from the live legend
-   * element, so it adapts to how many indicator rows are shown
-   * (default MA + VOL ≈ 88px tall -> top ≈ 108). Desktop keeps the
-   * old top-centre default. The bar only renders after a selection,
-   * i.e. client-side, so reading window here cannot mismatch SSR.
-   * Narrow screens also span the full width in one scrollable row
-   * (see the bar's style below): left:50% + translateX(-50%) caps
-   * shrink-to-fit width at 50% of the container, which wrapped the
-   * bar into a ~274px tall column that covered the drawn line and
-   * made it untappable.
-   */
-  const defaultBarTop = () => {
-    if (typeof window === 'undefined' || window.innerWidth >= 768) return 8;
-    const h = legendRef.current?.offsetHeight ?? 88;
-    return Math.ceil(h) + 20;
-  };
+  // Floating-bar default position: desktop top-centre (top: 8, see the
+  // bar's style below); narrow screens dock the compact icon bar at
+  // the bottom of the chart instead, so it never covers the legend
+  // or the candle countdown and needs no horizontal scrolling.
 
   return (
     <div ref={wrapperRef} className="relative h-full w-full">
@@ -2676,7 +2711,6 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       />
       {legendKline !== null && loadError === null && (
         <div
-          ref={legendRef}
           className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed"
         >
           <div className="text-xs font-semibold text-white">
@@ -2740,24 +2774,20 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               e.preventDefault();
             }
           }}
-          className="absolute z-20 flex max-w-full flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs max-md:flex-nowrap max-md:gap-2 max-md:overflow-x-auto max-md:px-3 max-md:py-2 text-[#d1d4dc] shadow-lg"
+          className="absolute z-20 flex max-w-full flex-wrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg max-md:flex-nowrap max-md:gap-1 max-md:px-2"
           style={
             barPos
               ? { left: barPos.x, top: barPos.y }
               : typeof window !== 'undefined' && window.innerWidth < 768
-                ? { left: 8, right: 8, top: defaultBarTop() }
-                : {
-                    left: '50%',
-                    top: defaultBarTop(),
-                    transform: 'translateX(-50%)',
-                  }
+                ? { left: '50%', bottom: 8, transform: 'translateX(-50%)' }
+                : { left: '50%', top: 8, transform: 'translateX(-50%)' }
           }
         >
           <button
             title="拖曳移動"
             aria-label="拖曳移動浮動列"
             onPointerDown={onBarGripPointerDown}
-            className="flex h-6 w-4 shrink-0 cursor-grab touch-none max-md:h-9 max-md:w-6 items-center justify-center rounded-sm text-[#80858f] hover:bg-white/10 hover:text-white active:cursor-grabbing"
+            className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center rounded-sm text-[#80858f] hover:bg-white/10 hover:text-white active:cursor-grabbing max-md:hidden"
           >
             <svg
               width="10"
@@ -2803,25 +2833,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   />
                 </span>
               </button>
-              <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
-              {LINE_WIDTHS.map((w) => (
-                <button
-                  key={w}
-                  title={`線寬 ${w}`}
-                  onClick={() => applyEdit({ size: w })}
-                  className={`flex h-5 w-6 items-center justify-center rounded-sm max-md:h-9 max-md:w-9 ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
-                >
-                  <span
-                    className="block rounded-full bg-current"
-                    style={{ height: Math.min(w, 3), width: 14 }}
-                  />
-                </button>
-              ))}
+              {/* Mobile: icon-only line style (no label, no widths). */}
               <button
                 title="線形"
                 aria-label="線形"
                 onClick={() => togglePanel('lineStyle')}
-                className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 max-md:h-9 max-md:px-2 ${
+                className={`hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex ${
                   openPanel === 'lineStyle' ? 'bg-white/10' : ''
                 }`}
               >
@@ -2840,14 +2857,55 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                           : 'dotted',
                   }}
                 />
-                <span>
-                  {LINE_STYLE_OPTIONS.find((o) => o.id === selected.style)?.label}
-                </span>
               </button>
-              <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+              {/* Desktop-only: widths, labelled line style. */}
+              <span className="flex items-center gap-1 max-md:hidden">
+                <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+                {LINE_WIDTHS.map((w) => (
+                  <button
+                    key={w}
+                    title={`線寬 ${w}`}
+                    onClick={() => applyEdit({ size: w })}
+                    className={`flex h-5 w-6 items-center justify-center rounded-sm ${selected.size === w ? 'bg-[#2962ff] text-white' : 'hover:bg-white/10'}`}
+                  >
+                    <span
+                      className="block rounded-full bg-current"
+                      style={{ height: Math.min(w, 3), width: 14 }}
+                    />
+                  </button>
+                ))}
+                <button
+                  title="線形"
+                  aria-label="線形"
+                  onClick={() => togglePanel('lineStyle')}
+                  className={`flex h-6 shrink-0 items-center gap-1.5 rounded-sm px-1.5 hover:bg-white/10 ${
+                    openPanel === 'lineStyle' ? 'bg-white/10' : ''
+                  }`}
+                >
+                  <span
+                    className="block w-6 border-t-2"
+                    style={{
+                      borderTopColor: hexToRgba(
+                        selected.color,
+                        selected.opacity,
+                      ),
+                      borderTopStyle:
+                        selected.style === 'solid'
+                          ? 'solid'
+                          : selected.style === 'dashed'
+                            ? 'dashed'
+                            : 'dotted',
+                    }}
+                  />
+                  <span>
+                    {LINE_STYLE_OPTIONS.find((o) => o.id === selected.style)?.label}
+                  </span>
+                </button>
+                <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+              </span>
             </>
           )}
-          <label className="flex items-center gap-1 whitespace-nowrap max-md:min-h-9">
+          <label className="flex items-center gap-1 whitespace-nowrap max-md:hidden">
             <input
               type="checkbox"
               checked={
@@ -2864,18 +2922,35 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             />
             僅此週期
           </label>
-          <span className="mx-1 h-4 w-px bg-[#2a2e39]" />
+          <span className="mx-1 h-4 w-px bg-[#2a2e39] max-md:hidden" />
           <button
             onClick={() => applyEdit({ lock: !selected.lock })}
-            className="whitespace-nowrap rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
+            className="whitespace-nowrap rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:hidden"
           >
             {selected.lock ? '🔒 已鎖定' : '🔓 鎖定'}
+          </button>
+          {/* Mobile: icon-only lock / hide / settings / delete. */}
+          <button
+            title={selected.lock ? '已鎖定（點按解鎖）' : '鎖定（點按鎖定）'}
+            aria-label={selected.lock ? '已鎖定' : '鎖定'}
+            onClick={() => applyEdit({ lock: !selected.lock })}
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex"
+          >
+            <BarLockIcon locked={selected.lock} />
+          </button>
+          <button
+            title={selected.visible ? '隱藏' : '顯示'}
+            aria-label={selected.visible ? '隱藏' : '顯示'}
+            onClick={() => applyEdit({ visible: !selected.visible })}
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex"
+          >
+            <BarEyeIcon hidden={!selected.visible} />
           </button>
           <button
             title="更多"
             aria-label="更多"
             onClick={() => togglePanel('more')}
-            className={`rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:min-h-9 max-md:px-2.5 ${
+            className={`rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:hidden ${
               openPanel === 'more' ? 'bg-white/10' : ''
             }`}
           >
@@ -2885,23 +2960,44 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             title="設定"
             aria-label="設定"
             onClick={() => openDialogFor(selected.id, 'style')}
-            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
+            className="rounded-sm px-1.5 py-0.5 hover:bg-white/10 max-md:hidden"
           >
             ✏️
+          </button>
+          <button
+            title="設定"
+            aria-label="設定"
+            onClick={() =>
+              openDialogFor(
+                selected.id,
+                selected.name === TEXT_ANNOTATION_NAME ? 'text' : 'style',
+              )
+            }
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex"
+          >
+            <BarGearIcon />
           </button>
           <button
             title="文字"
             aria-label="文字"
             onClick={() => openDialogFor(selected.id, 'text')}
-            className="rounded-sm px-1.5 py-0.5 font-semibold hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
+            className="rounded-sm px-1.5 py-0.5 font-semibold hover:bg-white/10 max-md:hidden"
           >
             T
           </button>
           <button
             onClick={deleteSelected}
-            className="rounded-sm px-1.5 py-0.5 text-[#ef5350] hover:bg-white/10 max-md:min-h-9 max-md:px-2.5"
+            className="rounded-sm px-1.5 py-0.5 text-[#ef5350] hover:bg-white/10 max-md:hidden"
           >
             刪除
+          </button>
+          <button
+            title="刪除"
+            aria-label="刪除"
+            onClick={deleteSelected}
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm text-[#ef5350] hover:bg-white/10 max-md:flex"
+          >
+            <BarTrashIcon />
           </button>
           <button
             onClick={deselect}
@@ -2910,7 +3006,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             ✕
           </button>
           {openPanel === 'color' && (
-            <div className="absolute left-0 top-full z-40 mt-1">
+            <div className="absolute left-0 top-full z-40 mt-1 max-md:bottom-full max-md:top-auto max-md:mb-1 max-md:mt-0">
               <ColorPicker
                 color={selected.color}
                 opacity={selected.opacity}
@@ -2935,7 +3031,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             </div>
           )}
           {openPanel === 'lineStyle' && (
-            <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
+            <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl max-md:bottom-full max-md:top-auto max-md:mb-1 max-md:mt-0">
               {LINE_STYLE_OPTIONS.map((opt) => (
                 <button
                   key={opt.id}
@@ -3015,6 +3111,18 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           initialTab={dialogTab}
           onConfirm={applyDialog}
           onClose={closeDialog}
+          onCopy={() => {
+            copySelected();
+            closeDialog();
+          }}
+          onBringToFront={() => {
+            bringToFront();
+            closeDialog();
+          }}
+          onSendToBack={() => {
+            sendToBack();
+            closeDialog();
+          }}
         />
       )}
     </div>
