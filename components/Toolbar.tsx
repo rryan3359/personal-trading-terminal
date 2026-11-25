@@ -46,7 +46,8 @@ export interface ToolbarProps {
   canRedo: boolean;
 }
 
-const STATUS_META: Record<BinanceSocketStatus, { dot: string; text: string }> = {
+/** Shared with the StatusBar so both show the same dot + label. */
+export const STATUS_META: Record<BinanceSocketStatus, { dot: string; text: string }> = {
   connecting: { dot: 'bg-yellow-400', text: '連線中' },
   live: { dot: 'bg-[#26a69a]', text: '即時' },
   reconnecting: { dot: 'bg-yellow-400', text: '重連中' },

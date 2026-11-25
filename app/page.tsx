@@ -11,7 +11,9 @@
  *   │ ing  │                              │ (right)     │
  *   │ Bar  │                              │             │
  *   ├──────┴──────────────────────────────┴─────────────┤
- *   │ RangeBar (1天 5天 1月 3月 6月 YTD 1年 全部 + 時鐘) │
+ *   │ RangeBar (1天 5天 1月 3月 6月 YTD 1年 全部)       │
+ *   │ StatusBar (商品 · 交易所 · 週期 | 時區 + 時鐘 |   │
+ *   │   Binance WS 連線狀態 + 最後 tick)                │
  *   └───────────────────────────────────────────────────┘
  *
  * Mobile (<md): the drawing bar stays on the left, the watchlist
@@ -35,6 +37,7 @@ import Toolbar from '@/components/Toolbar';
 import DrawingBar from '@/components/DrawingBar';
 import Watchlist from '@/components/Watchlist';
 import RangeBar from '@/components/RangeBar';
+import StatusBar from '@/components/StatusBar';
 import type { ChartHandle } from '@/components/Chart';
 import {
   DEFAULT_CHART_TYPE,
@@ -71,6 +74,8 @@ export default function Home() {
   const [activeRange, setActiveRange] = useState<RangeId | null>(null);
   const [connectionStatus, setConnectionStatus] =
     useState<BinanceSocketStatus>('closed');
+  /** Wall-clock ms of the last live tick (status bar), or null yet. */
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [mobileWatchlistOpen, setMobileWatchlistOpen] = useState(false);
   /** Binance spot symbols, or null while still loading. */
@@ -249,6 +254,7 @@ export default function Home() {
               indicators={indicators}
               chartType={chartType}
               onConnectionStatus={setConnectionStatus}
+              onLastTick={setLastTickAt}
               continuousDraw={drawContinuous}
               onHistoryChange={handleHistoryChange}
             />
@@ -259,6 +265,12 @@ export default function Home() {
               chartRef.current?.setRange(range);
               setActiveRange(range);
             }}
+          />
+          <StatusBar
+            symbol={symbol}
+            interval={interval}
+            connectionStatus={connectionStatus}
+            lastTickAt={lastTickAt}
           />
         </main>
         <Watchlist
