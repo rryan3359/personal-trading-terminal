@@ -5,8 +5,9 @@
  * drawing (Phase 2). Four tabs (樣式 / 文字 / 座標 / 可見性); the
  * fields switch by tool type. The dialog edits a draft and only writes
  * back on 確認 (Chart.tsx applies it with one overrideOverlay / one
- * history step). The bottom 範本 dropdown is UI-only for now —
- * template save/load lands in Phase 3.
+ * history step). The bottom 範本 dropdown applies a saved template
+ * (same list as the floating bar's template popover, Chart.tsx
+ * loadTemplates); saving a template stays on the floating bar only.
  */
 
 import { useEffect, useState } from 'react';
@@ -81,6 +82,10 @@ export interface OverlayDialogDraft {
   patternShowRatios: boolean;
   /** Attached text. null = no text. */
   text: OverlayText | null;
+  /** simpleTag only: Y-axis tag text ('' = show the price). Written to
+   *  extendData.tagText; the 文字 tab's attached text (ext.text) is a
+   *  separate companion annotation — do not confuse the two. */
+  tagText: string;
   points: Array<{ timestamp: number; value: number }>;
   /** undefined = shown on every interval. */
   visibleIntervals: string[] | undefined;
@@ -100,6 +105,12 @@ export interface OverlaySettingsDialogProps {
   onCopy?: () => void;
   onBringToFront?: () => void;
   onSendToBack?: () => void;
+  /** Saved templates for this tool type (same list as the floating
+   *  bar's template popover). The dialog only APPLIES them; saving a
+   *  template stays on the floating bar. */
+  templates?: Array<{ name: string }>;
+  /** Apply a template by name, then close the dialog. */
+  onApplyTemplate?: (name: string) => void;
 }
 
 const TABS: Array<{ id: DialogTab; label: string }> = [
@@ -241,6 +252,8 @@ function coordLabel(toolName: string, i: number): string {
     return `#${i + 1}（${['X', 'A', 'B', 'C', 'D'][i] ?? '點'}）`;
   if (toolName === 'threeDrives')
     return `#${i + 1}（${['驅動 1', '回調', '驅動 2', '回調', '驅動 3', '終點'][i] ?? '點'}）`;
+  if (toolName === 'path' || toolName === 'pen')
+    return `#${i + 1}（點 ${i + 1}）`;
   return `#${i + 1}（價格，K棒）`;
 }
 
@@ -254,6 +267,8 @@ export default function OverlaySettingsDialog({
   onCopy,
   onBringToFront,
   onSendToBack,
+  templates,
+  onApplyTemplate,
 }: OverlaySettingsDialogProps) {
   const [tab, setTab] = useState<DialogTab>(initialTab);
   const [draft, setDraft] = useState<OverlayDialogDraft>(initial);
@@ -310,10 +325,10 @@ export default function OverlaySettingsDialog({
   const isRect = toolName === 'rectangle';
   /** Closed geometry shapes with a fill switch (ellipse, triangle). */
   const isShape = toolName === 'ellipse' || toolName === 'triangle';
-  /** Freehand / multi-point strokes have too many points for
-   *  per-point editing. */
-  const isMultiPoint =
-    toolName === 'brush' || toolName === 'path' || toolName === 'pen';
+  /** Freehand strokes have too many points for per-point editing.
+   *  path / pen are multi-point too, but with at most 50 click-placed
+   *  control points they do get a CoordRow each (G-10). */
+  const isMultiPoint = toolName === 'brush';
   /** A standalone text annotation has no line to style. */
   const isTextTool = toolName === 'textAnnotation';
   /** Its own Y-axis tag already shows the price. */
@@ -1051,6 +1066,24 @@ export default function OverlaySettingsDialog({
 
           {tab === 'text' && (!isFib || toolName === 'fibSpiral') && (
             <>
+              {isSimpleTag && (
+                <div>
+                  <label className={FIELD_LABEL}>
+                    Y 軸標籤文字（留空顯示價格）
+                  </label>
+                  <input
+                    type="text"
+                    value={draft.tagText}
+                    onChange={(e) => patch({ tagText: e.target.value })}
+                    placeholder="例如：支撐"
+                    aria-label="Y 軸標籤文字"
+                    className={INPUT}
+                  />
+                  <p className="mt-1 text-xs leading-relaxed text-[#787b86]">
+                    顯示在右側價格軸的標籤上；留空時顯示該價位。下方「顯示文字」是伴隨標註（畫在圖上的文字），與此標籤不同。
+                  </p>
+                </div>
+              )}
               <label className={CHECK_ROW}>
                 <input
                   type="checkbox"
@@ -1204,9 +1237,7 @@ export default function OverlaySettingsDialog({
             <>
               {isMultiPoint ? (
                 <p className="text-xs leading-relaxed text-[#787b86]">
-                  {toolName === 'brush'
-                    ? '徒手畫線由多個點組成，不支援逐點編輯；拖曳整條線可移動它。'
-                    : '路徑／鋼筆由多個點組成，不支援逐點編輯；拖曳個別控制點可調整形狀，拖曳整條線可移動它。'}
+                  徒手畫線由多個點組成，不支援逐點編輯；拖曳整條線可移動它。
                 </p>
               ) : (
                 <>
@@ -1271,15 +1302,33 @@ export default function OverlaySettingsDialog({
 
         <div className="flex items-center justify-between border-t border-[#2a2e39] px-4 py-3">
           <select
-            title="範本（Phase 3 提供存取）"
+            title={
+              onApplyTemplate === undefined ||
+              (templates ?? []).length === 0
+                ? '尚無已儲存範本（由浮動列的範本按鈕儲存）'
+                : '套用範本'
+            }
             aria-label="範本"
-            value="default"
-            onChange={() => {
-              /* UI-only for now; template save/load lands in Phase 3. */
+            value=""
+            disabled={
+              onApplyTemplate === undefined ||
+              (templates ?? []).length === 0
+            }
+            onChange={(e) => {
+              if (e.target.value !== '') onApplyTemplate?.(e.target.value);
             }}
-            className="w-32 cursor-pointer rounded border border-[#2a2e39] bg-[#131722] px-2 py-1.5 text-sm text-[#d1d4dc] outline-none"
+            className="w-32 cursor-pointer rounded border border-[#2a2e39] bg-[#131722] px-2 py-1.5 text-sm text-[#d1d4dc] outline-none disabled:cursor-default disabled:opacity-40"
           >
-            <option value="default">範本</option>
+            <option value="" disabled>
+              {(templates ?? []).length === 0
+                ? '範本（尚無儲存）'
+                : '套用範本…'}
+            </option>
+            {(templates ?? []).map((t) => (
+              <option key={t.name} value={t.name}>
+                {t.name}
+              </option>
+            ))}
           </select>
           <div className="flex gap-2">
             <button

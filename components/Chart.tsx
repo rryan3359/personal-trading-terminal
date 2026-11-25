@@ -94,6 +94,10 @@ import ColorPicker from '@/components/ColorPicker';
 import ChartContextMenu, {
   type ContextMenuItem,
 } from '@/components/ChartContextMenu';
+import ObjectList, {
+  type ObjectListBatchAction,
+  type ObjectListItem,
+} from '@/components/ObjectList';
 import OverlaySettingsDialog, {
   type DialogTab,
   type OverlayDialogDraft,
@@ -124,6 +128,7 @@ import {
   newOverlayId,
   saveDrawingsStore,
   saveLastOverlayStyle,
+  STORAGE_KEYS,
   type LastOverlayStyle,
   type OverlayStylePatch,
   type OverlayText,
@@ -435,6 +440,8 @@ interface SelectedOverlayState {
   points: Array<{ timestamp: number; value: number }>;
   /** Attached text. null = none. */
   text: OverlayText | null;
+  /** simpleTag only: Y-axis tag text ('' = show the price). */
+  tagText: string;
   extend: ExtendId;
   /** Show the price on the right Y axis (needDefaultYAxisFigure). */
   priceLabel: boolean;
@@ -684,6 +691,94 @@ function toSavedOverlay(o: Overlay): SavedOverlay | null {
     text: text ?? undefined,
     ...(o.zLevel !== 0 ? { zLevel: o.zLevel } : {}),
   };
+}
+
+/** Names a restored overlay may carry (G-05 validation). */
+const DRAWING_TOOL_NAMES: ReadonlySet<string> = new Set(
+  DRAWING_TOOLS.map((t) => t.id),
+);
+
+/**
+ * Validate one stored overlay before restore (G-05). Returns a
+ * sanitised copy, or null when the entry is unusable and must be
+ * skipped: unregistered name, non-finite point, duplicate id,
+ * companion ':text' id (companions are never persisted), or no
+ * points. Bad scalar fields (lock / visible / zLevel / styles /
+ * extendData / visibleIntervals / text) are repaired to defaults
+ * instead of dropping the drawing. Invalid entries are skipped at
+ * restore and, like deleted overlays, are not re-written by the next
+ * persist (readMergedList only keeps stored out-of-view entries plus
+ * live ones) — the skip counts are console.warned and recorded in
+ * the step report.
+ */
+function validateSavedOverlay(
+  raw: unknown,
+  seenIds: Set<string>,
+): SavedOverlay | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const o = raw as Partial<SavedOverlay> & Record<string, unknown>;
+  const name =
+    o.name === 'fibonacciLine' ? 'fibonacciRetracement' : o.name;
+  if (typeof name !== 'string' || !DRAWING_TOOL_NAMES.has(name)) return null;
+  const id =
+    typeof o.id === 'string' && o.id.length > 0 ? o.id : newOverlayId();
+  if (id.endsWith(':text')) return null;
+  if (seenIds.has(id)) return null;
+  seenIds.add(id);
+  if (!Array.isArray(o.points) || o.points.length === 0) return null;
+  const points: Array<{ timestamp: number; value: number }> = [];
+  for (const p of o.points as Array<unknown>) {
+    if (typeof p !== 'object' || p === null) return null;
+    const pt = p as { timestamp?: unknown; value?: unknown };
+    if (
+      typeof pt.timestamp !== 'number' ||
+      !Number.isFinite(pt.timestamp) ||
+      typeof pt.value !== 'number' ||
+      !Number.isFinite(pt.value)
+    ) {
+      return null;
+    }
+    points.push({ timestamp: pt.timestamp, value: pt.value });
+  }
+  const styles =
+    typeof o.styles === 'object' && o.styles !== null
+      ? (o.styles as OverlayStylePatch)
+      : undefined;
+  const extendData =
+    typeof o.extendData === 'object' && o.extendData !== null
+      ? (o.extendData as Record<string, unknown>)
+      : undefined;
+  return {
+    id,
+    name,
+    points,
+    styles,
+    lock: o.lock === true,
+    visible: o.visible !== false,
+    extendData,
+    visibleIntervals: parseVisibleIntervals(o.visibleIntervals),
+    text: parseOverlayText(o.text) ?? undefined,
+    zLevel:
+      typeof o.zLevel === 'number' && Number.isFinite(o.zLevel)
+        ? o.zLevel
+        : 0,
+  };
+}
+
+/**
+ * Renumber zLevels to consecutive integers 0..n-1, preserving the
+ * current order (stable for ties) — G-16. Applied on restore and on
+ * undo/redo snapshots; copy / bring-to-front / send-to-back keep
+ * their max+1 / min-1 behaviour and are normalised on the next
+ * restore / undo instead.
+ */
+function normalizeZLevels(list: SavedOverlay[]): SavedOverlay[] {
+  const ranked = list
+    .map((o, i) => ({ o, i }))
+    .sort((a, b) => (a.o.zLevel ?? 0) - (b.o.zLevel ?? 0) || a.i - b.i);
+  const rank = new Map<string, number>();
+  ranked.forEach(({ o }, r) => rank.set(o.id, r));
+  return list.map((o) => ({ ...o, zLevel: rank.get(o.id) ?? 0 }));
 }
 
 /**
@@ -964,6 +1059,25 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const suppressSaveRef = useRef(false);
   /** True while restoreDrawings / applySnapshot rebuilds overlays. */
   const restoringRef = useRef(false);
+  /**
+   * G-19: "symbol:interval" of the last view whose restoreDrawings
+   * completed. persistDrawings refuses to write for any other view,
+   * so a persist racing the first restore can never overwrite the
+   * stored drawings with an empty live list.
+   */
+  const lastRestoredKeyRef = useRef<string | null>(null);
+  /**
+   * G-11: true while an interactive arm's pre-draw history push is
+   * still pending. Set when armOverlay pushes, cleared on draw end;
+   * discarding the unfinished draw pops that push back.
+   */
+  const pendingArmPushRef = useRef(false);
+  /**
+   * G-05: true once the stored drawings JSON was found corrupt, so
+   * the console warning is logged once per session (the write itself
+   * stays suppressed until the raw value parses again).
+   */
+  const drawingsStoreCorruptRef = useRef(false);
   /** Id of the overlay currently being drawn, if any. */
   const drawingIdRef = useRef<string | null>(null);
   /** Whether Ctrl/Cmd is currently held (temporarily inverts magnet). */
@@ -1173,12 +1287,33 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     useState<OverlayTemplates>(loadTemplates);
   /** Name typed for "save current style as template". */
   const [templateName, setTemplateName] = useState('');
+  /**
+   * Object list (Phase 2 Step 5, G-07/G-08): panel open state, the
+   * current projection (refreshed from readMergedList after every
+   * mutation — never a second source of truth), and the ids checked
+   * for batch actions. The panel itself is ObjectList.tsx.
+   */
+  const [objectListOpen, setObjectListOpen] = useState(false);
+  const [objectListItems, setObjectListItems] = useState<ObjectListItem[]>(
+    [],
+  );
+  const [objectListChecked, setObjectListChecked] = useState<string[]>([]);
   /** Outer chart wrapper (the floating bar's offset parent). */
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   /** Floating bar element (used for click-outside popover detection). */
   const barRef = useRef<HTMLDivElement | null>(null);
+  /** Object-list panel element (outside-click close). */
+  const objectListPanelRef = useRef<HTMLDivElement | null>(null);
+  /** Object-list toggle button (outside-click close excludes it). */
+  const objectListToggleRef = useRef<HTMLButtonElement | null>(null);
   /** Shown when the current symbol's init load delivered no bars. */
   const [loadError, setLoadError] = useState<string | null>(null);
+  /**
+   * G-12: user-visible save failure (corrupt store / failed write).
+   * Shown once per failure in the same banner style as loadError,
+   * cleared by the next verified successful persist.
+   */
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
   /** Last loaded / live candle, shown in the top-left legend overlay. */
   const [lastKline, setLastKline] = useState<KLineData | null>(null);
   /**
@@ -1329,9 +1464,58 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   const persistDrawings = (symbol: string, interval: string) => {
     if (suppressSaveRef.current) return;
+    // G-19: never persist for a view whose first restore has not
+    // completed — the live list is still empty then, and writing it
+    // would wipe the stored drawings for the symbol.
+    if (lastRestoredKeyRef.current !== `${symbol}:${interval}`) return;
+    // G-05: a corrupt stored JSON must never be overwritten with the
+    // (fallback-empty) store. Suppress the write and warn once.
+    let raw: string | null = null;
+    try {
+      raw = window.localStorage.getItem(STORAGE_KEYS.drawings);
+      if (raw !== null) {
+        const parsed: unknown = JSON.parse(raw);
+        if (typeof parsed !== 'object' || parsed === null) {
+          throw new Error('drawings store is not an object');
+        }
+      }
+    } catch {
+      if (raw !== null) {
+        if (!drawingsStoreCorruptRef.current) {
+          drawingsStoreCorruptRef.current = true;
+          console.warn(
+            '[ptt] drawings store corrupt, persist suppressed to avoid overwriting it',
+          );
+        }
+        setSaveWarning(
+          '畫線存檔損毀，已暫停自動儲存以免覆蓋舊資料。',
+        );
+        return;
+      }
+      // getItem itself threw (storage unavailable): fall through to
+      // the write attempt; the read-back check below reports it.
+    }
     const store = loadDrawingsStore();
     store[symbol] = readMergedList(symbol, interval);
+    const intended = JSON.stringify(store);
     saveDrawingsStore(store);
+    // G-12: verify the write landed — a silent quota / private-mode
+    // failure used to look like a successful save.
+    let written: string | null = null;
+    try {
+      written = window.localStorage.getItem(STORAGE_KEYS.drawings);
+    } catch {
+      written = null;
+    }
+    if (written !== intended) {
+      setSaveWarning(
+        '畫線儲存失敗（瀏覽器儲存空間已滿或處於私密模式），重整後畫線可能消失。',
+      );
+    } else {
+      // Same-value setState bails out, so this is a no-op when no
+      // warning is showing.
+      setSaveWarning(null);
+    }
   };
 
   // ---- text annotation (Phase 2) ---------------------------------------
@@ -1477,6 +1661,18 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   };
 
   /**
+   * G-11: pop back the pre-draw history push for the arm in progress.
+   * Called wherever an unfinished draw is discarded (Esc, disarm,
+   * tool switch, clear-all); a no-op once the draw has ended.
+   */
+  const cancelPendingArmPush = () => {
+    if (!pendingArmPushRef.current) return;
+    pendingArmPushRef.current = false;
+    undoStackRef.current.pop();
+    emitHistoryChange();
+  };
+
+  /**
    * Reset klinecharts' internal "clicked overlay" record after overlays
    * are removed and recreated with the same ids (undo/redo, restore).
    * Without this, the chart still believes the (removed) overlay is
@@ -1590,9 +1786,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     resetChartClickOverlay();
   };
 
-  const applySnapshot = (snapshot: SavedOverlay[]) => {
+  const applySnapshot = (snapshotIn: SavedOverlay[]) => {
     const chart = chartRef.current;
     if (!chart) return;
+    // G-16: renumber zLevels on undo/redo, order-preserving.
+    const snapshot = normalizeZLevels(snapshotIn);
     const symbol = symbolRef.current;
     const interval = intervalRef.current;
     const store = loadDrawingsStore();
@@ -1614,12 +1812,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     setSelectedState(null);
     // The rebuild wiped every overlay including an in-progress one
     // (undo/redo mid-draw), so no draw is in progress any more.
+    refreshObjectList();
     if (modeRef.current === 'Drawing') {
       transitionMode('Idle', 'snapshot-rebuild');
     }
   };
 
   const undo = () => {
+    pendingArmPushRef.current = false;
     const prev = undoStackRef.current.pop();
     if (!prev) return;
     redoStackRef.current.push(
@@ -1630,6 +1830,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   };
 
   const redo = () => {
+    pendingArmPushRef.current = false;
     const next = redoStackRef.current.pop();
     if (!next) return;
     undoStackRef.current.push(
@@ -1784,7 +1985,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       },
       onDrawEnd: (e) => {
         if (restoringRef.current) return;
+        // G-11: the draw succeeded, so the arm's pre-draw history
+        // push stays (a later cancel must not pop it back).
+        pendingArmPushRef.current = false;
         persistDrawings(symbolRef.current, intervalRef.current);
+        refreshObjectList();
         drawingIdRef.current = null;
         // A freshly placed standalone text annotation has no text yet:
         // open the dialog on the 文字 tab so the user can type it.
@@ -1903,12 +2108,32 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         }
         syncTextAnnotation(e.overlay.id);
         persistDrawings(symbolRef.current, intervalRef.current);
+        refreshObjectList();
         // Mode: a drag always returns to Selected (its entry required
         // it). The measure overlay never enters Moving/Resizing (see
         // onPressedMoveStart), so it never returns from one either.
         if (saved.name !== MEASURE_NAME) {
           transitionMode('Selected', 'press:move-end');
         }
+        // G-09: the React selection still holds the pre-drag points —
+        // refresh it so the dialog's coordinates tab shows the dragged
+        // position instead of writing the old one back on confirm.
+        // Control-point drags (resize) end here too, so they are
+        // covered by the same refresh.
+        if (
+          saved.name !== MEASURE_NAME &&
+          selectedRef.current?.id === e.overlay.id
+        ) {
+          refreshSelected(e.overlay.id);
+        }
+      },
+      onRightClick: (e) => {
+        // G-18: without this the library deletes the overlay on
+        // right-click (store removeOverlay, no undo). Custom overlays
+        // also carry this handler in their chart-theme template;
+        // built-in overlays have no template, so this instance
+        // handler is what protects them.
+        e.preventDefault?.();
       },
       onDoubleClick: (e) => {
         if (restoringRef.current) return;
@@ -1967,11 +2192,20 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       // mode would leave the machine inconsistent.
       if (!transitionMode('Drawing', `arm:${tool}`, { viaArm: true })) return;
       if (drawingIdRef.current) {
+        // Tool switch mid-draw: discard the unfinished line AND the
+        // history push its arm made (G-11).
         chart.removeOverlay({ id: drawingIdRef.current });
         drawingIdRef.current = null;
+        cancelPendingArmPush();
       }
     }
     pushHistory();
+    if (!presetPoints) {
+      // G-11: this push belongs to the draw in progress; a cancel
+      // pops it back. The preset path is a completed programmatic
+      // create, so its push is never pending.
+      pendingArmPushRef.current = true;
+    }
     const style = getLastOverlayStyle();
     const draft: SavedOverlay = {
       id: '',
@@ -1987,12 +2221,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         tool === 'rectangle' ? { fillOpacity: style.fillOpacity } : undefined,
     };
     const id = chart.createOverlay(overlayCreate(draft));
-    if (typeof id !== 'string') return;
+    if (typeof id !== 'string') {
+      cancelPendingArmPush();
+      return;
+    }
     if (presetPoints) {
       // Complete on creation: select it (like draw-end auto-select)
       // and persist — copySelected's pattern, not the draw flow.
       refreshSelected(id);
       persistDrawings(symbolRef.current, intervalRef.current);
+      refreshObjectList();
     } else {
       drawingIdRef.current = id;
     }
@@ -2003,9 +2241,38 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     const symbol = symbolRef.current;
     const interval = intervalRef.current;
-    const list = (loadDrawingsStore()[symbol] ?? []).filter((o) =>
-      isInView(o, interval),
-    );
+    // G-05: validate every stored entry (bad ones are skipped and
+    // counted, never allowed to break the restore or the K-line
+    // load). This function never throws: it is called from getBars'
+    // try, and a restore failure must never trigger that catch's
+    // callback([], ...) which clears the candles.
+    let list: SavedOverlay[] = [];
+    let skipped = 0;
+    try {
+      const stored = loadDrawingsStore()[symbol] ?? [];
+      const seenIds = new Set<string>();
+      for (const o of stored) {
+        const valid = validateSavedOverlay(o, seenIds);
+        if (valid === null) {
+          skipped += 1;
+          continue;
+        }
+        if (isInView(valid, interval)) list.push(valid);
+      }
+      // G-16: renumber zLevels to consecutive integers, order-preserving.
+      list = normalizeZLevels(list);
+    } catch (err) {
+      console.warn(
+        '[ptt] restoreDrawings: stored drawings unreadable, showing none',
+        err,
+      );
+      list = [];
+    }
+    if (skipped > 0) {
+      console.warn(
+        `[ptt] restoreDrawings: skipped ${skipped} invalid stored overlay(s) for ${symbol}`,
+      );
+    }
     // Idempotent: getBars("init") can fire more than once per symbol/
     // timeframe change (setSymbol + setPeriod each trigger a load), so
     // always wipe first — otherwise every load duplicates the drawings.
@@ -2014,20 +2281,29 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     try {
       chart.removeOverlay();
       for (const o of list) {
-        const saved: SavedOverlay = {
-          ...o,
-          id: o.id || newOverlayId(),
-          name:
-            o.name === 'fibonacciLine' ? 'fibonacciRetracement' : o.name,
-        };
-        chart.createOverlay(overlayCreate(saved));
+        try {
+          chart.createOverlay(overlayCreate(o));
+        } catch (err) {
+          // One bad entry must not abort the rest of the restore.
+          console.warn(
+            '[ptt] restoreDrawings: createOverlay failed, skipped',
+            o.id,
+            o.name,
+            err,
+          );
+        }
       }
       syncAllTextAnnotations();
       resetChartClickOverlay();
+    } catch (err) {
+      console.warn('[ptt] restoreDrawings: rebuild failed', err);
     } finally {
       suppressSaveRef.current = false;
       restoringRef.current = false;
     }
+    // G-19: this view has restored; persists for it are allowed now.
+    lastRestoredKeyRef.current = `${symbol}:${interval}`;
+    refreshObjectList();
   };
 
   // ---- selection + edit bar --------------------------------------------
@@ -2116,6 +2392,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       zLevel: o.zLevel ?? 0,
       points,
       text: parseOverlayText(ext.text),
+      tagText: typeof ext.tagText === 'string' ? ext.tagText : '',
       extend: extendForOverlay(o.name, points),
       priceLabel:
         ext.priceLabel === false
@@ -2306,9 +2583,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     ) {
       chart.removeOverlay({ groupId: cur.id });
       deselect();
+      refreshObjectList();
       return;
     }
     refreshSelected(cur.id);
+    refreshObjectList();
   };
 
   const deleteSelected = () => {
@@ -2321,6 +2600,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     chart.removeOverlay({ groupId: cur.id });
     deselect();
     persistDrawings(symbolRef.current, intervalRef.current);
+    refreshObjectList();
   };
 
   const copySelected = () => {
@@ -2350,6 +2630,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       refreshSelected(id);
     }
     persistDrawings(symbolRef.current, intervalRef.current);
+    refreshObjectList();
   };
 
   /** Move the selected overlay above every other overlay. */
@@ -2370,6 +2651,241 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       .getOverlays()
       .reduce((m, o) => Math.min(m, o.zLevel ?? 0), 0);
     applyEdit({ zLevel: min - 1 });
+  };
+
+  // ---- object list (Phase 2 Step 5, G-07/G-08) ------------------------
+  //
+  // The list is a projection of readMergedList (stored out-of-view
+  // overlays + live in-view overlays), sorted topmost-first; it holds
+  // no data of its own. refreshObjectList re-reads it after every
+  // mutation (call sites: onDrawEnd, applyEdit, applyDialog,
+  // deleteSelected, copySelected, applySnapshot, restoreDrawings,
+  // clearDrawings, onPressedMoveEnd, preset-point arm, closeDialog's
+  // empty-text removal, batch/per-id list actions, panel open).
+  // Per-row visible/lock/delete and batch actions reuse the existing
+  // paths for live overlays (overrideOverlay / removeOverlay +
+  // pushHistory + persistDrawings); overlays not on the current
+  // interval are not in the chart, so those actions patch the stored
+  // copy directly (same loadDrawingsStore/saveDrawingsStore pattern
+  // applySnapshot and clearDrawings already use) and persistDrawings
+  // keeps the patched copy on the next write (readMergedList retains
+  // stored out-of-view entries).
+
+  /** Re-read the list projection. Prunes checked ids that no longer exist. */
+  const refreshObjectList = () => {
+    const list = readMergedList(symbolRef.current, intervalRef.current);
+    const sorted = [...list].sort(
+      (a, b) => (b.zLevel ?? 0) - (a.zLevel ?? 0),
+    );
+    const items: ObjectListItem[] = sorted.map((o, i) => ({
+      id: o.id,
+      name: o.name,
+      label:
+        DRAWING_TOOLS.find((t) => t.id === o.name)?.label ?? o.name,
+      visible: o.visible !== false,
+      lock: o.lock === true,
+      order: i + 1,
+      total: sorted.length,
+      inView: isInView(o, intervalRef.current),
+      intervalsLabel:
+        o.visibleIntervals === undefined
+          ? undefined
+          : o.visibleIntervals
+              .map(
+                (iv) =>
+                  INTERVAL_LABELS[iv as Interval] ?? iv,
+              )
+              .join('、'),
+    }));
+    setObjectListItems(items);
+    const ids = new Set(items.map((it) => it.id));
+    setObjectListChecked((prev) => prev.filter((id) => ids.has(id)));
+  };
+
+  /** Toggle one id in the multi-select set. */
+  const toggleListCheck = (id: string) => {
+    setObjectListChecked((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  /** Row click: in-view rows canvas-select (floating bar appears);
+   *  out-of-view rows cannot be selected — their overlay is not in
+   *  the chart — so the click toggles their multi-select checkbox. */
+  const handleListRowClick = (id: string) => {
+    const item = objectListItems.find((it) => it.id === id);
+    if (!item) return;
+    if (item.inView) {
+      // Same programmatic path as copy/preset-point selection (no
+      // _clickOverlayInfo sync — V-04, deliberately not fixed here).
+      refreshSelected(id);
+    } else {
+      toggleListCheck(id);
+    }
+  };
+
+  /**
+   * Patch one stored (out-of-view) overlay in place. patch returns
+   * the replacement, or null to remove the entry. Returns false when
+   * the id is not in the stored list for this symbol.
+   */
+  const patchStoredOverlay = (
+    id: string,
+    patch: (o: SavedOverlay) => SavedOverlay | null,
+  ): boolean => {
+    const store = loadDrawingsStore();
+    const list = store[symbolRef.current] ?? [];
+    const idx = list.findIndex((o) => o.id === id);
+    if (idx < 0) return false;
+    const next = patch(list[idx]);
+    const out = [...list];
+    if (next === null) out.splice(idx, 1);
+    else out[idx] = next;
+    store[symbolRef.current] = out;
+    saveDrawingsStore(store);
+    return true;
+  };
+
+  /** List row: toggle visible. Selected overlays go through
+   *  applyEdit so the floating bar stays in sync; other live
+   *  overlays are overridden directly; out-of-view overlays are
+   *  patched in the store. */
+  const toggleListVisible = (id: string) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const live = chart.getOverlays({ id })[0];
+    if (live) {
+      if (selectedRef.current?.id === id) {
+        applyEdit({ visible: !selectedRef.current.visible });
+      } else {
+        pushHistory();
+        chart.overrideOverlay({ id, visible: !live.visible });
+        syncTextAnnotation(id);
+        persistDrawings(symbolRef.current, intervalRef.current);
+      }
+    } else {
+      pushHistory();
+      patchStoredOverlay(id, (o) => ({
+        ...o,
+        visible: o.visible === false ? undefined : false,
+      }));
+    }
+    refreshObjectList();
+  };
+
+  /** List row: toggle lock (same live/stored split as visible). */
+  const toggleListLock = (id: string) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const live = chart.getOverlays({ id })[0];
+    if (live) {
+      if (selectedRef.current?.id === id) {
+        applyEdit({ lock: !selectedRef.current.lock });
+      } else {
+        pushHistory();
+        chart.overrideOverlay({ id, lock: !live.lock });
+        persistDrawings(symbolRef.current, intervalRef.current);
+      }
+    } else {
+      pushHistory();
+      patchStoredOverlay(id, (o) => ({
+        ...o,
+        lock: o.lock === true ? undefined : true,
+      }));
+    }
+    refreshObjectList();
+  };
+
+  /** List row: delete one overlay (live or stored). One history step. */
+  const deleteListOverlay = (id: string) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const live = chart.getOverlays({ id })[0];
+    pushHistory();
+    if (live) {
+      // groupId removes the main line and its text annotation together.
+      chart.removeOverlay({ groupId: id });
+      if (selectedRef.current?.id === id) deselect();
+    } else {
+      patchStoredOverlay(id, () => null);
+      if (selectedRef.current?.id === id) deselect();
+    }
+    persistDrawings(symbolRef.current, intervalRef.current);
+    refreshObjectList();
+  };
+
+  /** Batch hide/show/lock/unlock/delete over the checked ids (G-08).
+   *  One history step for the whole batch. Live overlays are
+   *  overridden/removed directly; stored-only overlays are patched
+   *  in a single store write. */
+  const batchListAction = (action: ObjectListBatchAction) => {
+    const chart = chartRef.current;
+    if (!chart || objectListChecked.length === 0) return;
+    const ids = [...objectListChecked];
+    pushHistory();
+    const storedIds = ids.filter(
+      (id) => chart.getOverlays({ id })[0] === undefined,
+    );
+    for (const id of ids) {
+      const live = chart.getOverlays({ id })[0];
+      if (!live) continue;
+      if (action === 'delete') {
+        chart.removeOverlay({ groupId: id });
+      } else if (action === 'hide') {
+        chart.overrideOverlay({ id, visible: false });
+        syncTextAnnotation(id);
+      } else if (action === 'show') {
+        chart.overrideOverlay({ id, visible: true });
+        syncTextAnnotation(id);
+      } else if (action === 'lock') {
+        chart.overrideOverlay({ id, lock: true });
+      } else if (action === 'unlock') {
+        chart.overrideOverlay({ id, lock: false });
+      }
+    }
+    if (storedIds.length > 0) {
+      const store = loadDrawingsStore();
+      const cur = store[symbolRef.current] ?? [];
+      if (action === 'delete') {
+        store[symbolRef.current] = cur.filter(
+          (o) => !storedIds.includes(o.id),
+        );
+      } else {
+        store[symbolRef.current] = cur.map((o) =>
+          storedIds.includes(o.id)
+            ? {
+                ...o,
+                ...(action === 'hide'
+                  ? { visible: false }
+                  : action === 'show'
+                    ? { visible: undefined }
+                    : action === 'lock'
+                      ? { lock: true }
+                      : { lock: undefined }),
+              }
+            : o,
+        );
+      }
+      saveDrawingsStore(store);
+    }
+    const selectedDeleted =
+      action === 'delete' &&
+      selectedRef.current !== null &&
+      ids.includes(selectedRef.current.id);
+    if (selectedDeleted) {
+      deselect();
+    } else if (selectedRef.current !== null) {
+      // Keep the floating bar in sync (e.g. lock icon after batch lock).
+      refreshSelected(selectedRef.current.id);
+    }
+    persistDrawings(symbolRef.current, intervalRef.current);
+    refreshObjectList();
+  };
+
+  /** Open/close the list panel; opening always re-reads the list. */
+  const toggleObjectList = () => {
+    if (!objectListOpen) refreshObjectList();
+    setObjectListOpen(!objectListOpen);
   };
 
   // ---- settings dialog (Phase 2) --------------------------------------
@@ -2431,6 +2947,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     patternShowDashed: cur.patternShowDashed,
     patternShowRatios: cur.patternShowRatios,
     text: cur.text ? { ...cur.text } : null,
+    tagText: cur.tagText,
     points: cur.points.map((p) => ({ ...p })),
     visibleIntervals: cur.visibleIntervals
       ? [...cur.visibleIntervals]
@@ -2471,6 +2988,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         chart?.removeOverlay({ id: pendingId });
         if (selectedRef.current?.id === pendingId) deselect();
         persistDrawings(symbolRef.current, intervalRef.current);
+        refreshObjectList();
       }
     }
     setDialogDraft(null);
@@ -2513,6 +3031,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       chart.removeOverlay({ id: cur.id });
       deselect();
       persistDrawings(symbolRef.current, intervalRef.current);
+      refreshObjectList();
       closeDialog();
       return;
     }
@@ -2536,6 +3055,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (draft.text) ext.text = draft.text;
     else ext.text = undefined;
     ext.priceLabel = draft.priceLabel;
+    if (o.name === 'simpleTag') {
+      // The Y-axis tag reads extendData.tagText (chart-theme) and
+      // falls back to the price when it is empty. Blank clears the
+      // custom tag: assign undefined rather than deleting the key —
+      // overrideOverlay deep-merges extendData, so a deleted key
+      // would survive on the live overlay (see applyEdit).
+      ext.tagText =
+        draft.tagText.trim() === '' ? undefined : draft.tagText;
+    }
     if (o.name === 'rectangle') {
       ext.rectBorder = draft.rectBorder;
       ext.rectMiddleLine = draft.rectMiddleLine;
@@ -2680,10 +3208,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     ) {
       chart.removeOverlay({ groupId: cur.id });
       deselect();
+      refreshObjectList();
       closeDialog();
       return;
     }
     refreshSelected(cur.id);
+    refreshObjectList();
     closeDialog();
   };
 
@@ -2998,14 +3528,24 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     clearDrawings() {
       const chart = chartRef.current;
       if (!chart) return;
+      // G-11: an in-progress draw is wiped too; its pending push goes back.
+      cancelPendingArmPush();
       pushHistory();
       suppressSaveRef.current = true;
       chart.removeOverlay();
       suppressSaveRef.current = false;
-      const store = loadDrawingsStore();
-      store[symbolRef.current] = [];
-      saveDrawingsStore(store);
+      // G-19: same guard as persistDrawings — clearing before the
+      // first restore completed would write [] over stored drawings.
+      if (
+        lastRestoredKeyRef.current ===
+        `${symbolRef.current}:${intervalRef.current}`
+      ) {
+        const store = loadDrawingsStore();
+        store[symbolRef.current] = [];
+        saveDrawingsStore(store);
+      }
       deselect();
+      refreshObjectList();
       // removeOverlay() above wiped an in-progress draw too, if any.
       if (modeRef.current === 'Drawing') {
         transitionMode('Idle', 'clear-drawings');
@@ -3239,6 +3779,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       // must not be applied here.
       undoStackRef.current = [];
       redoStackRef.current = [];
+      pendingArmPushRef.current = false;
       emitHistoryChange();
       deselect();
       // An unfinished drawing cannot survive the switch: cancel it.
@@ -3278,6 +3819,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       if (drawingIdRef.current) {
         chart.removeOverlay({ id: drawingIdRef.current });
         drawingIdRef.current = null;
+        // G-11: the cancelled draw's pre-draw history push goes back.
+        cancelPendingArmPush();
       }
       // A draw that ends by disarming (Esc cancel, tool switch)
       // returns to whatever the selection says.
@@ -3338,6 +3881,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           if (finishDrawing(drawingIdRef.current)) return;
           chartRef.current?.removeOverlay({ id: drawingIdRef.current });
           drawingIdRef.current = null;
+          // G-11: the cancelled draw's pre-draw history push goes back.
+          cancelPendingArmPush();
           onToolDoneRef.current();
           return;
         }
@@ -3626,6 +4171,23 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [openPanel]);
 
+  /** Close the object-list panel on a pointer press outside it
+   *  (the toggle button itself is excluded: its click toggles).
+   *  The floating bar is excluded too: it edits the selection the
+   *  list shows, so closing the list on every bar click would force
+   *  a reopen after each edit. Canvas / toolbar presses still close. */
+  useEffect(() => {
+    if (!objectListOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (objectListPanelRef.current?.contains(e.target as Node)) return;
+      if (objectListToggleRef.current?.contains(e.target as Node)) return;
+      if (barRef.current?.contains(e.target as Node)) return;
+      setObjectListOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [objectListOpen]);
+
   const togglePanel = (
     panel: 'color' | 'lineStyle' | 'template',
   ) => {
@@ -3718,16 +4280,85 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         getChart={getChart}
         subscribeHover={subscribeHover}
       />
-      {loadError !== null && (
-        <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-2">
-          <div className="rounded-md border border-[#ef5350]/50 bg-[#1e222d]/95 px-3 py-2 text-xs leading-relaxed text-[#f5c6c6] shadow-lg">
-            {loadError}
-          </div>
+      {/* Object list toggle (Phase 2 Step 5, G-07/G-08). Top-right:
+          the legend owns the top-left and the floating bar the bottom
+          centre, so this corner is free on desktop and mobile. */}
+      <button
+        ref={objectListToggleRef}
+        data-testid="object-list-toggle"
+        title="物件清單"
+        aria-label="物件清單"
+        aria-expanded={objectListOpen}
+        onClick={toggleObjectList}
+        className="absolute right-2 top-2 z-20 flex h-8 items-center gap-1.5 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2.5 text-xs text-[#d1d4dc] shadow-lg hover:bg-[#262b38]"
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <line x1="2" y1="3.5" x2="12" y2="3.5" />
+          <line x1="2" y1="7" x2="12" y2="7" />
+          <line x1="2" y1="10.5" x2="12" y2="10.5" />
+        </svg>
+        物件清單
+        {objectListItems.length > 0 && (
+          <span className="rounded-full bg-[#2962ff] px-1.5 py-px text-[10px] font-semibold text-white">
+            {objectListItems.length}
+          </span>
+        )}
+      </button>
+      {objectListOpen && (
+        <div ref={objectListPanelRef}>
+          <ObjectList
+            items={objectListItems}
+            currentIntervalLabel={INTERVAL_LABELS[interval]}
+            selectedId={selected?.id ?? null}
+            checkedIds={objectListChecked}
+            onRowClick={handleListRowClick}
+            onToggleCheck={toggleListCheck}
+            onToggleAll={() =>
+              setObjectListChecked(
+                objectListChecked.length === objectListItems.length &&
+                  objectListItems.length > 0
+                  ? []
+                  : objectListItems.map((it) => it.id),
+              )
+            }
+            onToggleVisible={toggleListVisible}
+            onToggleLock={toggleListLock}
+            onDelete={deleteListOverlay}
+            onBatch={batchListAction}
+            onClose={() => setObjectListOpen(false)}
+          />
+        </div>
+      )}
+      {(loadError !== null || saveWarning !== null) && (
+        <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex flex-col items-center gap-1 px-2">
+          {loadError !== null && (
+            <div className="rounded-md border border-[#ef5350]/50 bg-[#1e222d]/95 px-3 py-2 text-xs leading-relaxed text-[#f5c6c6] shadow-lg">
+              {loadError}
+            </div>
+          )}
+          {saveWarning !== null && (
+            <div
+              data-testid="save-warning"
+              className="rounded-md border border-[#ffb300]/50 bg-[#1e222d]/95 px-3 py-2 text-xs leading-relaxed text-[#ffe082] shadow-lg"
+            >
+              {saveWarning}
+            </div>
+          )}
         </div>
       )}
       {selected !== null && (
         <div
           ref={barRef}
+          data-testid="floating-bar"
           onClickCapture={(e) => {
             // Swallow the compatibility click from the tap that ended
             // the draw (see barIgnoreClicksUntilRef, owned by the
@@ -4069,6 +4700,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           }}
           onSendToBack={() => {
             sendToBack();
+            closeDialog();
+          }}
+          templates={templates[selected.name] ?? []}
+          onApplyTemplate={(name) => {
+            const tpl = (templates[selected.name] ?? []).find(
+              (t) => t.name === name,
+            );
+            if (!tpl) return;
+            applyTemplate(tpl);
             closeDialog();
           }}
         />

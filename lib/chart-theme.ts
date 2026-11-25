@@ -112,11 +112,26 @@ import {
   type Chart,
   type DeepPartial,
   type Overlay,
+  type OverlayEvent,
   type Styles,
   type TextAttrs,
   type TextStyle,
 } from 'klinecharts';
 import { MULTI_POINT_MAX_POINTS } from '@/lib/chart-config';
+
+/**
+ * G-18 (Phase 2 Step 4): klinecharts 10.1.1 deletes an overlay on
+ * right-click unless the overlay's onRightClick calls preventDefault()
+ * (OverlayView._figureMouseRightClickEvent -> store removeOverlay, no
+ * undo, no immediate persist). Every custom overlay template below
+ * carries this handler so a right-click opens the app's context menu
+ * instead of silently deleting the drawing. Built-in overlays have no
+ * template here; Chart.tsx's overlayCreate carries the same handler
+ * for them.
+ */
+const preventOverlayRightClickDelete = (e: OverlayEvent<unknown>): void => {
+  e.preventDefault?.();
+};
 
 export const DARK_STYLES: DeepPartial<Styles> = {
   grid: {
@@ -214,6 +229,7 @@ export function registerRectangleOverlay(): void {
 
   registerOverlay({
     name: 'rectangle',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -503,6 +519,7 @@ export function registerTextAnnotationOverlay(): void {
 
   registerOverlay({
     name: 'textAnnotation',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 2,
     needDefaultPointFigure: false,
     needDefaultXAxisFigure: false,
@@ -554,6 +571,7 @@ export function registerSimpleTagOverlay(): void {
 
   registerOverlay({
     name: 'simpleTag',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 2,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -626,6 +644,7 @@ export function registerFibonacciRetracementOverlay(): void {
 
   registerOverlay({
     name: 'fibonacciRetracement',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -741,6 +760,7 @@ export function registerMeasureOverlay(): void {
 
   registerOverlay({
     name: 'measure',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1005,6 +1025,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'ellipse',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1024,6 +1045,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'triangle',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 4,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1036,6 +1058,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'arc',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 4,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1070,6 +1093,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'curve',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 4,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1090,6 +1114,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'path',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: MULTI_POINT_MAX_POINTS + 1,
     needDefaultPointFigure: true,
     // A 50-point path would put a marker per point on both axes.
@@ -1113,6 +1138,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'pen',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: MULTI_POINT_MAX_POINTS + 1,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: false,
@@ -1136,6 +1162,7 @@ export function registerGeometryOverlays(): void {
 
   registerOverlay({
     name: 'arrow',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1420,6 +1447,7 @@ export function registerFibonacciToolsOverlays(): void {
 
   registerOverlay({
     name: 'fibChannel',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1496,6 +1524,7 @@ export function registerFibonacciToolsOverlays(): void {
 
   registerOverlay({
     name: 'fibTimeZones',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1539,6 +1568,7 @@ export function registerFibonacciToolsOverlays(): void {
 
   registerOverlay({
     name: 'fibFan',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1590,6 +1620,7 @@ export function registerFibonacciToolsOverlays(): void {
 
   registerOverlay({
     name: 'fibArc',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1640,6 +1671,7 @@ export function registerFibonacciToolsOverlays(): void {
 
   registerOverlay({
     name: 'fibSpiral',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1683,6 +1715,7 @@ export function registerFibonacciToolsOverlays(): void {
 
   registerOverlay({
     name: 'fibWedge',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 4,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -1877,6 +1910,7 @@ export function registerPitchforkOverlays(): void {
   names.forEach((name) => {
     registerOverlay({
       name,
+      onRightClick: preventOverlayRightClickDelete,
       totalStep: 4,
       needDefaultPointFigure: true,
       needDefaultXAxisFigure: true,
@@ -2243,6 +2277,7 @@ export function registerGannOverlays(): void {
 
   registerOverlay({
     name: 'gannFan',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -2308,6 +2343,7 @@ export function registerGannOverlays(): void {
 
   registerOverlay({
     name: 'gannSquare',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -2318,6 +2354,7 @@ export function registerGannOverlays(): void {
 
   registerOverlay({
     name: 'gannBox',
+    onRightClick: preventOverlayRightClickDelete,
     totalStep: 3,
     needDefaultPointFigure: true,
     needDefaultXAxisFigure: true,
@@ -2580,6 +2617,7 @@ export function registerPatternOverlays(): void {
   defs.forEach(({ name, totalStep }) => {
     registerOverlay({
       name,
+      onRightClick: preventOverlayRightClickDelete,
       totalStep,
       needDefaultPointFigure: true,
       needDefaultXAxisFigure: true,

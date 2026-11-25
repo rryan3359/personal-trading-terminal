@@ -4,25 +4,66 @@
  * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
  *
  * Top: cursor/select tool (active when no drawing tool is armed;
- * clicking it exits drawing mode). Then one icon per tool GROUP
- * (trend lines, horizontal lines / channels, shapes, geometry,
- * freehand/annotation, Fibonacci, Pitchfork, Gann, patterns,
- * measure — 10 groups, 44 tools): each group shows its last-used
- * first tool if none used yet), with a small chevron. Clicking a
- * group opens a flyout panel to the right of the bar listing that
- * group's tools (icon + Chinese label); picking one arms it, closes
- * the panel and updates the group icon. Clicking the armed tool in
- * the panel disarms it. Double-click (or Shift+click) arms in
- * continuous mode. Clicking outside the panel or pressing Esc closes
- * it. Single-tool groups (rectangle, measure) render as a plain
- * button with no flyout. Bottom: magnet (click cycles off -> weak ->
- * strong, current strength shown under the icon) and clear.
+ * clicking it exits drawing mode). Then a favorites button (star;
+ * opens a flyout of starred tools, empty until something is
+ * starred), then one icon per tool GROUP — 10 groups, 44 tools,
+ * per MASTER TASK §4.2 (trend lines, horizontal / vertical lines,
+ * channels, Fibonacci, Gann, Pitchfork, geometric shapes, patterns,
+ * text & annotations, measurement): each group shows its last-used
+ * tool (armed > last-used > first), with a small chevron. Clicking
+ * a group opens a flyout panel to the right of the bar listing that
+ * group's tools (icon + Chinese label + star to toggle favorite);
+ * picking one arms it, closes the panel and updates the group icon.
+ * Clicking the armed tool in the panel disarms it. Double-click
+ * (or Shift+click) arms in continuous mode. Clicking outside the
+ * panel or pressing Esc closes it — the panel has no backdrop div
+ * (a full-screen backdrop would swallow the second click of a
+ * double-click on the group button, so closing is done by a
+ * document-level pointerdown listener in capture phase instead:
+ * a press whose target is outside both the panel
+ * [data-flyout-panel] and the sidebar [data-drawing-bar] closes
+ * the flyout). Single-tool groups (measure) render as a plain
+ * button with no flyout, plus a small star button underneath to
+ * toggle its favorite (same star style as the flyout items).
+ * An outside press that closes the flyout is swallowed: it only
+ * closes the flyout, exactly like the old backdrop did — nothing
+ * underneath runs (no drawing point on the chart, no toolbar /
+ * watchlist action). Two halves, both in the pointerdown branch:
+ * stopPropagation + preventDefault on the capture-phase pointerdown
+ * keeps the press from the canvas (and suppresses the
+ * compatibility mousedown/mouseup), plus a one-shot capture
+ * `click` listener, because Chrome still fires the click for the
+ * same press even when pointerdown is canceled (verified with a
+ * minimal CDP probe, verify/probe-pointer-swallow.mjs: all four
+ * variants — pointerdown stop+prevent, prevent-only, mousedown
+ * stop+prevent, stop-only — still delivered the click). Only the
+ * primary button produces a click, so only it arms the
+ * click-swallow; a right/middle press just closes. Presses on the
+ * sidebar itself are NOT swallowed: the second press of a real
+ * double-click on a group button must still reach that button,
+ * or the click-toggle would break (React flushes the pointerdown
+ * state update before the click handler reads isOpen).
+ * Bottom: magnet (click cycles off -> weak -> strong, current
+ * strength shown under the icon) and clear.
  *
- * The vertical-line tools (verticalStraightLine, verticalSegment,
- * verticalRayLine) are deliberately NOT in any group: the group was
- * removed 2026-11-25, but the tools stay registered in
- * lib/chart-config.ts / lib/chart-theme.ts / Chart.tsx so drawings
- * saved earlier still render and stay editable.
+ * Vertical lines (verticalStraightLine, verticalSegment,
+ * verticalRayLine) are back in the Horizontal / Vertical group:
+ * they were removed from the toolbar 2026-11-25 by Ryan's decision,
+ * but MASTER TASK §4.2 (submitted by Ryan 2026-11-25 12:57)
+ * explicitly lists them in group 3, so Phase 2 restores them per
+ * the task book. TENSION — if Ryan still wants them hidden, say so
+ * and they come back out; do not treat this restore as a new
+ * decision. The tools stay registered in lib/chart-config.ts /
+ * lib/chart-theme.ts / Chart.tsx either way, so drawings saved
+ * earlier still render and stay editable.
+ *
+ * Favorites (`ptt:favorite-tools`) and per-group last-used tools
+ * (`ptt:last-used-tools`) persist in localStorage; both keys are
+ * defined here in DrawingBar.tsx only, never in lib/store.ts.
+ * Group tooltips show "Group — 最近使用：X" when a last-used tool
+ * is recorded, otherwise just the group name. Single-clicking a
+ * group still only opens its flyout (it does NOT arm the last-used
+ * tool — that is the TradingView behaviour, pending Ryan's ruling).
  *
  * The flyout is rendered through a portal to document.body with
  * fixed positioning, so it is not clipped by the aside's vertical
@@ -35,20 +76,84 @@ import { createPortal } from 'react-dom';
 import { DRAWING_TOOLS, type DrawingTool } from '@/lib/chart-config';
 import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
 
-/** Logical groups for the toolbar, in display order. */
+/** Logical groups for the toolbar, in display order (MASTER TASK §4.2).
+ *  Cursor & selection is the separate cursor button above, not a
+ *  TOOL_GROUPS entry — so cursor + these 10 groups = 11 groups.
+ *  All 44 tools are in exactly one group; tool ids and registration
+ *  are untouched. */
 const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine'] },
-  { title: '水平線／通道', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'simpleTag', 'parallelStraightLine', 'priceChannelLine'] },
-  { title: '圖形', ids: ['rectangle'] },
-  { title: '幾何', ids: ['ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
-  { title: '徒手畫／標註', ids: ['brush', 'textAnnotation'] },
-  { title: '斐波那契', ids: ['fibonacciRetracement', 'fibChannel', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
-  { title: 'Pitchfork', ids: ['pitchfork', 'schiffPitchfork', 'modifiedSchiffPitchfork', 'insidePitchfork'] },
+  { title: '水平／垂直線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'verticalStraightLine', 'verticalSegment', 'verticalRayLine'] },
+  { title: '通道', ids: ['parallelStraightLine', 'priceChannelLine', 'fibChannel'] },
+  { title: '斐波那契', ids: ['fibonacciRetracement', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
   { title: 'Gann', ids: ['gannFan', 'gannSquare', 'gannBox'] },
+  { title: 'Pitchfork', ids: ['pitchfork', 'schiffPitchfork', 'modifiedSchiffPitchfork', 'insidePitchfork'] },
+  { title: '幾何圖形', ids: ['rectangle', 'ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
   { title: '形態', ids: ['headShoulders', 'elliottImpulse', 'elliottCorrection', 'abcdPattern', 'xabcdPattern', 'threeDrives'] },
-  { title: '測量', ids: ['measure'] },
+  { title: '文字與註解', ids: ['brush', 'textAnnotation', 'simpleTag'] },
+  { title: '量測', ids: ['measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
+
+/** Phase 2 Step 2 localStorage keys — defined here only, never in
+ *  lib/store.ts. Favorites: array of tool ids, in starred order.
+ *  Last-used: group title -> last-picked tool id in that group. */
+const FAVORITE_TOOLS_KEY = 'ptt:favorite-tools';
+const LAST_USED_TOOLS_KEY = 'ptt:last-used-tools';
+
+function loadFavoriteTools(): DrawingTool[] {
+  try {
+    const raw = window.localStorage.getItem(FAVORITE_TOOLS_KEY);
+    if (raw === null) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const known = new Set(DRAWING_TOOLS.map((t) => t.id));
+    const out: DrawingTool[] = [];
+    for (const v of parsed) {
+      if (typeof v === 'string' && known.has(v as DrawingTool) && !out.includes(v as DrawingTool)) {
+        out.push(v as DrawingTool);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function saveFavoriteTools(ids: DrawingTool[]): void {
+  try {
+    window.localStorage.setItem(FAVORITE_TOOLS_KEY, JSON.stringify(ids));
+  } catch {
+    // Storage full / unavailable (private mode) — non-fatal.
+  }
+}
+
+function loadLastUsedTools(): Record<string, DrawingTool> {
+  try {
+    const raw = window.localStorage.getItem(LAST_USED_TOOLS_KEY);
+    if (raw === null) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+    const known = new Set(DRAWING_TOOLS.map((t) => t.id));
+    const out: Record<string, DrawingTool> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'string' && known.has(v as DrawingTool)) {
+        out[k] = v as DrawingTool;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveLastUsedTools(map: Record<string, DrawingTool>): void {
+  try {
+    window.localStorage.setItem(LAST_USED_TOOLS_KEY, JSON.stringify(map));
+  } catch {
+    // Storage full / unavailable (private mode) — non-fatal.
+  }
+}
 
 export interface DrawingBarProps {
   activeTool: DrawingTool | null;
@@ -471,6 +576,24 @@ function ClearIcon() {
   );
 }
 
+/** Star for the favorites button / flyout favorite toggles. */
+function StarIcon({ filled, size = 14 }: { filled: boolean; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M10 2.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L10 15.9l-5.2 2.7 1-5.8L1.5 8.7l5.9-.9z" />
+    </svg>
+  );
+}
+
 /** Small chevron marking a group button that opens a flyout. */
 function FlyoutChevron() {
   return (
@@ -516,14 +639,16 @@ function GroupFlyout({
   group,
   anchor,
   activeTool,
+  favorites,
   onSelect,
-  onClose,
+  onToggleFavorite,
 }: {
   group: { title: string; ids: DrawingTool[] };
   anchor: FlyoutAnchor;
   activeTool: DrawingTool | null;
+  favorites: DrawingTool[];
   onSelect: (tool: DrawingTool, continuous: boolean) => void;
-  onClose: () => void;
+  onToggleFavorite: (tool: DrawingTool) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(anchor.top);
@@ -537,36 +662,39 @@ function GroupFlyout({
     setTop(Math.max(8, Math.min(anchor.top, maxTop)));
   }, [anchor.top]);
 
+  // No backdrop div here on purpose: a full-screen backdrop sits
+  // above the sidebar button, so the second press of a real
+  // double-click on a group button would land on the backdrop and
+  // close the flyout instead of reaching the button (no dblclick
+  // ever fires). Outside-press closing lives in DrawingBar's
+  // document-level pointerdown listener; the panel is marked with
+  // data-flyout-panel so that listener can tell it apart.
   return (
-    <>
-      {/* Transparent backdrop: any click outside the panel closes it. */}
-      <div
-        className="fixed inset-0 z-40"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={panelRef}
-        role="menu"
-        aria-label={group.title}
-        className="fixed z-50 w-44 overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d] py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
-        style={{ left: anchor.right + 6, top }}
-      >
+    <div
+      ref={panelRef}
+      data-flyout-panel
+      role="menu"
+      aria-label={group.title}
+      className="fixed z-50 w-44 overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d] py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
+      style={{ left: anchor.right + 6, top }}
+    >
         <div className="px-3 pb-1 pt-1.5 text-[11px] font-medium text-[#787b86]">
           {group.title}
         </div>
+        {group.ids.length === 0 && (
+          <div className="px-3 py-2 text-[13px] text-[#787b86]">
+            尚未收藏工具
+          </div>
+        )}
         {group.ids.map((id) => {
           const tool = TOOL_BY_ID.get(id);
           if (!tool) return null;
           const active = activeTool === id;
+          const isFavorite = favorites.includes(id);
           return (
-            <button
+            <div
               key={id}
-              role="menuitem"
-              title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
-              onClick={(e) => onSelect(id, e.shiftKey)}
-              onDoubleClick={() => onSelect(id, true)}
-              className={`relative flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] hover:bg-[#2a2e39] hover:text-white max-md:py-3 ${
+              className={`relative flex w-full items-center hover:bg-[#2a2e39] hover:text-white ${
                 active ? 'bg-[#2a2e39] text-[#2962ff]' : 'text-[#d1d4dc]'
               }`}
             >
@@ -576,15 +704,37 @@ function GroupFlyout({
                   aria-hidden="true"
                 />
               )}
-              <span className="flex h-5 w-5 shrink-0 items-center justify-center">
-                <ToolIcon tool={id} />
-              </span>
-              {tool.label}
-            </button>
+              <button
+                role="menuitem"
+                title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
+                onClick={(e) => onSelect(id, e.shiftKey)}
+                onDoubleClick={() => onSelect(id, true)}
+                className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left text-[13px] max-md:py-3"
+              >
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+                  <ToolIcon tool={id} />
+                </span>
+                {tool.label}
+              </button>
+              <button
+                type="button"
+                aria-label={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
+                aria-pressed={isFavorite}
+                title={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleFavorite(id);
+                }}
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-[#2a2e39] ${
+                  isFavorite ? 'text-[#ff9800]' : 'text-[#787b86] hover:text-white'
+                }`}
+              >
+                <StarIcon filled={isFavorite} />
+              </button>
+            </div>
           );
         })}
-      </div>
-    </>
+    </div>
   );
 }
 
@@ -594,10 +744,14 @@ export default function DrawingBar({
   onClear,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
-  /** Title of the group whose flyout is open, or null. */
+  /** Title of the group whose flyout is open, or null. '收藏' is the
+   *  favorites flyout (not a TOOL_GROUPS entry). */
   const [openGroup, setOpenGroup] = useState<string | null>(null);
-  /** Last tool picked per group (drives the group icon). */
-  const [lastUsed, setLastUsed] = useState<Record<string, DrawingTool>>({});
+  /** Starred tool ids, in starred order (persisted, ptt:favorite-tools). */
+  const [favorites, setFavorites] = useState<DrawingTool[]>(() => loadFavoriteTools());
+  /** Last tool picked per group (drives the group icon + tooltip).
+   *  Persisted (ptt:last-used-tools); was session-only useState. */
+  const [lastUsed, setLastUsed] = useState<Record<string, DrawingTool>>(() => loadLastUsedTools());
   const [anchor, setAnchor] = useState<FlyoutAnchor | null>(null);
   const groupBtnRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -609,19 +763,68 @@ export default function DrawingBar({
   };
 
   // Esc / resize / any scroll closes the open flyout (its anchor moves).
+  // A press outside the panel AND outside the sidebar also closes it:
+  // document-level pointerdown in capture phase (no backdrop div —
+  // see GroupFlyout). That press is swallowed (see the handler: the
+  // pointerdown half keeps it from the canvas, and a one-shot
+  // capture click listener eats the click Chrome still fires for
+  // the same press) — so it only closes the flyout, like the old
+  // backdrop. Presses on the sidebar itself are left to the
+  // sidebar buttons (toggle / switch flyout, arm a tool), so the
+  // second press of a real double-click on a group button still
+  // reaches that button.
   useEffect(() => {
     if (!openGroup) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpenGroup(null);
     };
     const onMove = () => setOpenGroup(null);
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      if (target?.closest('[data-flyout-panel]')) return;
+      if (target?.closest('[data-drawing-bar]')) return;
+      // Swallow the press: it only closes the flyout (old backdrop
+      // semantics). stopPropagation in capture keeps it from the
+      // canvas (no drawing point / selection change / pan) and
+      // preventDefault suppresses the compatibility mousedown /
+      // mouseup — but Chrome still fires the click for the same
+      // press, so the click is swallowed separately by a one-shot
+      // capture listener added here (probe-verified: pointerdown
+      // preventDefault alone does NOT stop the click).
+      e.stopPropagation();
+      e.preventDefault();
+      setOpenGroup(null);
+      // Only the primary button produces a click event; a right /
+      // middle press just closes the flyout and arms nothing.
+      if (e.button !== 0) return;
+      const swallowClick = (ce: MouseEvent) => {
+        ce.stopPropagation();
+        ce.preventDefault();
+      };
+      const dropSwallow = () => {
+        document.removeEventListener('click', swallowClick, true);
+      };
+      document.addEventListener('click', swallowClick, { capture: true, once: true });
+      // The click for this press is dispatched in a LATER task than
+      // pointerup (probe-verified: a microtask queued from pointerup
+      // runs before the click and would drop the listener too early),
+      // so the drop is a short timeout measured from pointerup;
+      // pointercancel / window blur mean no click is coming, so the
+      // one-shot listener is dropped there instead of lingering to
+      // eat a later, unrelated click.
+      document.addEventListener('pointerup', () => { window.setTimeout(dropSwallow, 100); }, { capture: true, once: true });
+      document.addEventListener('pointercancel', dropSwallow, { capture: true, once: true });
+      window.addEventListener('blur', dropSwallow, { once: true });
+    };
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', onMove);
     window.addEventListener('scroll', onMove, true);
+    document.addEventListener('pointerdown', onPointerDown, true);
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', onMove);
       window.removeEventListener('scroll', onMove, true);
+      document.removeEventListener('pointerdown', onPointerDown, true);
     };
   }, [openGroup]);
 
@@ -640,12 +843,40 @@ export default function DrawingBar({
     return lastUsed[group.title] ?? group.ids[0];
   };
 
-  const handleSelect = (
-    groupTitle: string,
-    id: DrawingTool,
-    continuous: boolean,
-  ) => {
-    setLastUsed((prev) => ({ ...prev, [groupTitle]: id }));
+  /** Record a pick as the owning group's last-used tool (persisted).
+   *  The owning group is derived from the tool id, so picks made from
+   *  the favorites flyout still update the right group's icon. */
+  const recordLastUsed = (id: DrawingTool) => {
+    const owner = TOOL_GROUPS.find((g) => g.ids.includes(id));
+    if (!owner) return;
+    setLastUsed((prev) => {
+      const next = { ...prev, [owner.title]: id };
+      saveLastUsedTools(next);
+      return next;
+    });
+  };
+
+  const toggleFavorite = (id: DrawingTool) => {
+    setFavorites((prev) => {
+      const next = prev.includes(id)
+        ? prev.filter((f) => f !== id)
+        : [...prev, id];
+      saveFavoriteTools(next);
+      return next;
+    });
+  };
+
+  /** Group-button tooltip: "Group — 最近使用：X", or just the group
+   *  name when nothing has been picked from it yet. */
+  const groupTitle = (group: (typeof TOOL_GROUPS)[number]) => {
+    const last = lastUsed[group.title];
+    if (!last) return group.title;
+    const label = TOOL_BY_ID.get(last)?.label ?? last;
+    return `${group.title} — 最近使用：${label}`;
+  };
+
+  const handleSelect = (id: DrawingTool, continuous: boolean) => {
+    recordLastUsed(id);
     setOpenGroup(null);
     if (!continuous && activeTool === id) {
       onToolChange(null, false);
@@ -654,12 +885,20 @@ export default function DrawingBar({
     }
   };
 
-  const openGroupDef = openGroup
-    ? TOOL_GROUPS.find((g) => g.title === openGroup) ?? null
-    : null;
+  const openGroupDef =
+    openGroup === '收藏'
+      ? { title: '收藏', ids: favorites }
+      : openGroup
+        ? TOOL_GROUPS.find((g) => g.title === openGroup) ?? null
+        : null;
+  const favoritesActive =
+    activeTool !== null && favorites.includes(activeTool);
 
   return (
-    <aside className="flex w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1">
+    <aside
+      data-drawing-bar
+      className="flex w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1"
+    >
       <button
         title="游標／選取（退出繪製模式）"
         onClick={() => onToolChange(null, false)}
@@ -673,16 +912,55 @@ export default function DrawingBar({
 
       <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
 
+      {/* Favorites: star button opening a flyout of starred tools. */}
+      <div
+        className="flex flex-col items-center gap-0.5"
+        role="group"
+        aria-label="收藏"
+      >
+        <button
+          ref={(el) => {
+            if (el) groupBtnRefs.current.set('收藏', el);
+            else groupBtnRefs.current.delete('收藏');
+          }}
+          title={
+            favorites.length > 0
+              ? `收藏 — ${favorites.length} 個工具（點擊展開）`
+              : '收藏（點擊展開已收藏工具）'
+          }
+          aria-haspopup="menu"
+          aria-expanded={openGroup === '收藏'}
+          onClick={() => {
+            if (openGroup === '收藏') setOpenGroup(null);
+            else openFlyout('收藏');
+          }}
+          className={`${BUTTON_BASE} ${
+            favoritesActive || openGroup === '收藏'
+              ? 'bg-[#2a2e39] text-[#ff9800]'
+              : ''
+          }`}
+        >
+          {favoritesActive && <ActiveBar />}
+          <StarIcon filled={favorites.length > 0} size={20} />
+          <FlyoutChevron />
+        </button>
+        <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+      </div>
+
       {TOOL_GROUPS.map((group, gi) => {
         const displayed = displayedToolFor(group);
         const groupActive =
           activeTool !== null && group.ids.includes(activeTool);
         const isOpen = openGroup === group.title;
-        // Single-tool groups need no flyout: plain button, old behaviour.
+        // Single-tool groups need no flyout: plain button, old behaviour,
+        // plus a small star underneath to toggle its favorite (the
+        // flyout-item star has no home here — this is the only group
+        // without a flyout).
         if (group.ids.length === 1) {
           const id = group.ids[0];
           const tool = TOOL_BY_ID.get(id);
           if (!tool) return null;
+          const isFavorite = favorites.includes(id);
           return (
             <div
               key={group.title}
@@ -692,16 +970,32 @@ export default function DrawingBar({
             >
               <button
                 title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
-                onClick={(e) =>
-                  onToolChange(groupActive ? null : id, e.shiftKey)
-                }
-                onDoubleClick={() => onToolChange(id, true)}
+                onClick={(e) => {
+                  recordLastUsed(id);
+                  onToolChange(groupActive ? null : id, e.shiftKey);
+                }}
+                onDoubleClick={() => {
+                  recordLastUsed(id);
+                  onToolChange(id, true);
+                }}
                 className={`${BUTTON_BASE} ${
                   groupActive ? 'bg-[#2a2e39] text-[#2962ff]' : ''
                 }`}
               >
                 {groupActive && <ActiveBar />}
                 <ToolIcon tool={id} />
+              </button>
+              <button
+                type="button"
+                aria-label={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
+                aria-pressed={isFavorite}
+                title={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
+                onClick={() => toggleFavorite(id)}
+                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-[#2a2e39] ${
+                  isFavorite ? 'text-[#ff9800]' : 'text-[#787b86] hover:text-white'
+                }`}
+              >
+                <StarIcon filled={isFavorite} size={12} />
               </button>
               {gi < TOOL_GROUPS.length - 1 && (
                 <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
@@ -721,7 +1015,7 @@ export default function DrawingBar({
                 if (el) groupBtnRefs.current.set(group.title, el);
                 else groupBtnRefs.current.delete(group.title);
               }}
-              title={`${group.title}（點擊展開工具選單）`}
+              title={groupTitle(group)}
               aria-haspopup="menu"
               aria-expanded={isOpen}
               onClick={() => {
@@ -730,7 +1024,7 @@ export default function DrawingBar({
               }}
               onDoubleClick={() => {
                 setOpenGroup(null);
-                handleSelect(group.title, displayed, true);
+                handleSelect(displayed, true);
               }}
               className={`${BUTTON_BASE} ${
                 groupActive || isOpen ? 'bg-[#2a2e39] text-[#2962ff]' : ''
@@ -775,10 +1069,9 @@ export default function DrawingBar({
             group={openGroupDef}
             anchor={anchor}
             activeTool={activeTool}
-            onSelect={(id, continuous) =>
-              handleSelect(openGroupDef.title, id, continuous)
-            }
-            onClose={() => setOpenGroup(null)}
+            favorites={favorites}
+            onSelect={(id, continuous) => handleSelect(id, continuous)}
+            onToggleFavorite={toggleFavorite}
           />,
           document.body,
         )}
