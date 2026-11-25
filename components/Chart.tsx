@@ -36,10 +36,13 @@
 
 import {
   forwardRef,
+  memo,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import {
@@ -88,6 +91,9 @@ import {
   registerTextAnnotationOverlay,
 } from '@/lib/chart-theme';
 import ColorPicker from '@/components/ColorPicker';
+import ChartContextMenu, {
+  type ContextMenuItem,
+} from '@/components/ChartContextMenu';
 import OverlaySettingsDialog, {
   type DialogTab,
   type OverlayDialogDraft,
@@ -193,6 +199,49 @@ function isMainPaneIndicator(name: string): boolean {
 
 const MAX_HISTORY = 50;
 const MEASURE_NAME = 'measure';
+/**
+ * Range the context menu's 重設圖表檢視 restores. No default-range
+ * constant exists in the codebase (page starts with activeRange null
+ * and never calls setRange on mount); 1M is the middle preset —
+ * change this one line to retarget the reset.
+ */
+const DEFAULT_RESET_RANGE: RangeId = '1M';
+/**
+ * Phase 1 step 3 — explicit interaction mode (Phase 0 §7.1). Only the
+ * seven states that actually exist are listed. Crosshair is NOT a mode:
+ * it is always-on display behaviour (legend follows the crosshair) and
+ * never enters the state machine. Selecting (marquee / multi-select)
+ * is not listed either: selection is a single `selected`, with no
+ * marquee or Shift-add (Phase 0 §3.4).
+ */
+export type InteractionMode =
+  | 'Idle'
+  | 'Drawing'
+  | 'Selected'
+  | 'Moving'
+  | 'Resizing'
+  | 'ContextMenu'
+  | 'Editing';
+/**
+ * Wait for the library's own touch->click synthesis to select first
+ * (B10, second timer). The library synthesises its tap handling after
+ * touchend — no compatibility click reaches the container (measured:
+ * probe-event-order.mjs, clicksDelta 0; the library's own synthesis
+ * selects at ~40ms) — so the fallback cannot decide synchronously in
+ * onPointerUp; it waits this long and then lets the mode decide.
+ * Named constant owned by the state machine (see onContainerPointerUp).
+ */
+const TOUCH_FALLBACK_WAIT_MS = 150;
+/**
+ * Compat-click suppression window after a draw ends and auto-selects
+ * (B10, third timer). The tap that ends a draw produces a browser
+ * compatibility click which lands on the freshly rendered floating
+ * bar; time is the only discriminator (a compat click also produces
+ * a pointerdown, so a one-shot flag cannot tell it from a deliberate
+ * tap). Named constant owned by the Drawing -> Selected transition:
+ * set only there, cleared when mode leaves Selected.
+ */
+const BAR_COMPAT_CLICK_SUPPRESS_MS = 300;
 const LINE_WIDTHS = [1, 2, 3, 4];
 /** Custom overlay name for a drawing's attached text label. */
 const TEXT_ANNOTATION_NAME = 'textAnnotation';
@@ -638,6 +687,240 @@ function toSavedOverlay(o: Overlay): SavedOverlay | null {
   };
 }
 
+/**
+ * Hover target published by the crosshair throttle (Phase 1 step 2a):
+ * the candle under the crosshair, or null when the mouse is off the
+ * chart. The index is into the chart's current data list.
+ */
+interface HoverTarget {
+  kline: KLineData | null;
+  index: number | null;
+}
+
+interface CandleCountdownProps {
+  /** Close time of the last candle (ms), or null when no data. */
+  lastCloseMs: number | null;
+  /** Open time of the last candle (ms), or null when no data. */
+  candleOpenMs: number | null;
+}
+
+/**
+ * Candle-close countdown (Phase 1 step 2c). Owns its own 1-second
+ * tick in local state: the tick re-renders only this tiny span, never
+ * Chart or the legend. The countdown is always about the LAST candle
+ * closing, never the hovered one.
+ */
+const CandleCountdown = memo(function CandleCountdown({
+  lastCloseMs,
+  candleOpenMs,
+}: CandleCountdownProps) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const countdownRemainingMs =
+    lastCloseMs !== null ? lastCloseMs - nowMs : null;
+  // Stale when the close already passed (socket down, no live tick) or
+  // the clock sits before the candle opened: show '—', never a bogus time.
+  const countdownText =
+    countdownRemainingMs !== null &&
+    lastCloseMs !== null &&
+    candleOpenMs !== null &&
+    countdownRemainingMs > 0 &&
+    countdownRemainingMs <= lastCloseMs - candleOpenMs
+      ? formatCountdown(countdownRemainingMs)
+      : '—';
+  return (
+    <span
+      className="ml-2 font-normal tabular-nums text-[#ffa726]"
+      data-testid="candle-countdown"
+    >
+      收線 {countdownText}
+    </span>
+  );
+});
+
+interface ChartLegendProps {
+  symbol: string;
+  interval: Interval;
+  /** Indicator names currently enabled, e.g. ["MA", "VOL"]. */
+  indicators: string[];
+  /** Last loaded / live candle (legend fallback when not hovering). */
+  lastKline: KLineData | null;
+  loadError: string | null;
+  /** Stable accessor for the chart instance (reads Chart's own ref
+   * inside the callback, never a ref read during Legend's render). */
+  getChart: () => Chart | null;
+  subscribeHover: (fn: (t: HoverTarget) => void) => () => void;
+}
+
+/**
+ * Top-left legend (OHLC + indicator values + candle countdown),
+ * extracted from Chart in Phase 1 step 2b as an independent memoized
+ * component. It owns the hover state: the crosshair throttle publishes
+ * to it through `subscribeHover`, so a hover update re-renders only
+ * this small subtree — never the whole Chart. It re-renders only when
+ * its props change (symbol / interval / indicators / lastKline /
+ * loadError) or the hover target changes.
+ */
+const ChartLegend = memo(function ChartLegend({
+  symbol,
+  interval,
+  indicators,
+  lastKline,
+  loadError,
+  getChart,
+  subscribeHover,
+}: ChartLegendProps) {
+  // Hover starts empty: no crosshair event can precede this mount,
+  // and symbol switches clear it through the subscription below.
+  const [hover, setHover] = useState<HoverTarget>({
+    kline: null,
+    index: null,
+  });
+  useEffect(() => subscribeHover(setHover), [subscribeHover]);
+
+  // Legend candle: the hovered candle while the crosshair is on the
+  // chart, otherwise the last candle. Its change is vs its own open.
+  const legendKline = hover.kline ?? lastKline;
+  const legendChangePct =
+    legendKline !== null && legendKline.open !== 0
+      ? ((legendKline.close - legendKline.open) / legendKline.open) * 100
+      : 0;
+
+  // ---- candle countdown (TradingView-style) -------------------------
+  // Always for the LAST candle, not the hovered one: the countdown is
+  // about the live bar closing. Close of the candle's interval: 1M is
+  // the 1st of next month UTC (INTERVAL_MS['1M'] is only a 30-day
+  // approximation); every other interval is open + its fixed span.
+  // The ticking text itself lives in CandleCountdown (step 2c), so the
+  // 1-second tick never re-renders this legend or Chart.
+  const lastCloseMs =
+    lastKline !== null
+      ? interval === '1M'
+        ? Date.UTC(
+            new Date(lastKline.timestamp).getUTCFullYear(),
+            new Date(lastKline.timestamp).getUTCMonth() + 1,
+            1,
+          )
+        : lastKline.timestamp + (INTERVAL_MS[interval] ?? 0)
+      : null;
+
+  // ---- legend indicator values ---------------------------------------
+  // Read straight from klinecharts' own computed results (never
+  // re-computed here, so the numbers always match the drawn lines).
+  // result[i] holds the indicator's values for dataList[i]; each
+  // figure is one line keyed into that row. Line colours come from
+  // the theme (styles.indicator.lines[i], verified at runtime); the
+  // volume bar takes the candle's up/down colour, like the drawn bar.
+  const legendChart = getChart();
+  const legendIndex =
+    hover.index ??
+    (legendChart ? legendChart.getDataList().length - 1 : -1);
+  const legendIndicators: Array<{
+    name: string;
+    values: Array<{ label: string; text: string; color: string }>;
+  }> = (() => {
+    const chart = legendChart;
+    if (!chart || legendIndex < 0) return [];
+    const list = chart.getDataList();
+    if (legendIndex >= list.length) return [];
+    const lineColors = chart.getStyles().indicator?.lines ?? [];
+    const rows: Array<{
+      name: string;
+      values: Array<{ label: string; text: string; color: string }>;
+    }> = [];
+    for (const ind of chart.getIndicators()) {
+      if (!indicators.includes(ind.name)) continue;
+      const row = ind.result?.[legendIndex] as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) continue;
+      const values: Array<{ label: string; text: string; color: string }> =
+        [];
+      for (let fi = 0; fi < ind.figures.length; fi += 1) {
+        const fig = ind.figures[fi];
+        const v = row[fig.key];
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        let text: string;
+        if (ind.shouldFormatBigNumber) {
+          // klinecharts' formatBigNumber only compacts >= 1000 (1.23K);
+          // below that it returns the raw float, so format small
+          // volumes to 2 decimals ourselves.
+          text =
+            Math.abs(v) >= 1000
+              ? chart.getFormatter().formatBigNumber(v)
+              : v.toFixed(2);
+        } else if (ind.series === 'price') {
+          text = formatPrice(v);
+        } else {
+          text = v.toFixed(2);
+        }
+        const color =
+          fig.type === 'bar'
+            ? legendChangePct >= 0
+              ? '#26a69a'
+              : '#ef5350'
+            : (lineColors[fi]?.color ?? '#b2b5be');
+        values.push({
+          label: (fig.title ?? fig.key).replace(/:\s*$/, ''),
+          text,
+          color,
+        });
+      }
+      if (values.length > 0) {
+        rows.push({ name: ind.shortName || ind.name, values });
+      }
+    }
+    return rows;
+  })();
+
+  if (legendKline === null || loadError !== null) return null;
+  return (
+    <div className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed">
+      <div className="text-xs font-semibold text-white">
+        {symbol} · {INTERVAL_LABELS[interval]} · Binance
+        <CandleCountdown
+          lastCloseMs={lastCloseMs}
+          candleOpenMs={lastKline?.timestamp ?? null}
+        />
+      </div>
+      <div className="text-[11px] text-[#b2b5be]">
+        開 {formatPrice(legendKline.open)} 高 {formatPrice(legendKline.high)}{' '}
+        低 {formatPrice(legendKline.low)} 收{' '}
+        <span
+          className={
+            legendChangePct >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
+          }
+        >
+          {formatPrice(legendKline.close)}{' '}
+          {legendChangePct >= 0 ? '+' : ''}
+          {legendChangePct.toFixed(2)}%
+        </span>
+      </div>
+      {legendIndicators.map((row) => (
+        <div
+          key={row.name}
+          className="text-[11px]"
+          data-testid={`legend-indicator-${row.name}`}
+        >
+          <span className="text-[#787b86]">{row.name} </span>
+          {row.values.map((v) => (
+            <span
+              key={v.label}
+              className="tabular-nums"
+              style={{ color: v.color }}
+            >
+              {v.label} {v.text}{' '}
+            </span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+});
+
 const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   {
     symbol,
@@ -686,18 +969,17 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const drawingIdRef = useRef<string | null>(null);
   /** Whether Ctrl/Cmd is currently held (temporarily inverts magnet). */
   const modifierRef = useRef(false);
-  /** Timestamp of the last click that hit an overlay (measure dismiss). */
-  const lastOverlayClickRef = useRef(0);
   /** Guards the fill-opacity slider against one history push per drag. */
   const sliderHistoryPushedRef = useRef(false);
   /** Touch tap-to-select fallback (mobile): the tap that started the
-   *  current touch, with the selection that was active before it. */
+   *  current touch. The selection it started from is no longer stored
+   *  here: the fallback decision is mode-based now (see
+   *  onContainerPointerUp), not an id comparison. */
   const touchTapStartRef = useRef<{
     pointerId: number;
     x: number;
     y: number;
     time: number;
-    selectedId: string | null;
   } | null>(null);
   /** Pending fallback timer (one at most); cleared on unmount. */
   const touchFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -708,14 +990,178 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     null,
   );
   // Timestamp until which clicks on the floating bar are ignored.
-  // Set when a draw ends and the bar auto-appears: the tap that ended
-  // the draw also produces a browser compatibility click, which lands
-  // on the freshly rendered bar (right under the finger) and would
-  // otherwise trigger whichever button happens to be there (e.g. the
-  // line-style panel popping open, or 刪除 deleting the just-drawn
-  // line). A deliberate tap on a bar button always comes later — the
-  // user has to see the bar first — so a 300ms window is safe.
+  // Set only by the Drawing -> Selected transition (draw end with
+  // auto-select): the tap that ended the draw also produces a browser
+  // compatibility click, which lands on the freshly rendered bar
+  // (right under the finger) and would otherwise trigger whichever
+  // button happens to be there (e.g. the line-style panel popping
+  // open, or 刪除 deleting the just-drawn line). A deliberate tap on
+  // a bar button always comes later — the user has to see the bar
+  // first — so a 300ms window is safe. Cleared when mode leaves
+  // Selected (see transitionMode), so a stale window can never
+  // swallow a later selection's first bar click.
   const barIgnoreClicksUntilRef = useRef(0);
+
+  // ---- interaction mode state machine (Phase 1 step 3) ---------------
+  // Single source of truth for the chart interaction mode (Phase 0
+  // §7.1). Refs only: a mode change must never re-render Chart
+  // (step 2 moved high-frequency updates out of React state; this
+  // must not move back). Every mode change goes through
+  // transitionMode / enterOverlayMode / exitOverlayMode below.
+  const modeRef = useRef<InteractionMode>('Idle');
+  /** True only between a measure draw ending and the click event that
+   *  follows it (set in onDrawEnd, consumed by handleContainerClick).
+   *  The library completes a draw on pointerup — the click event
+   *  arrives ~16ms later as a separate task — so the flag must survive
+   *  across tasks until that click; a microtask clear would erase it
+   *  too early (measured: probe-measure2.mjs, onDrawEnd ~1ms after
+   *  pointerup, click ~16ms after). It is cleared instead by the next
+   *  pointerdown on the container (see onContainerPointerDown): the
+   *  completing click's own pointerdown predates the draw end, so it
+   *  can never clear the flag early. A touch tap completes the draw
+   *  with no container click at all, so the flag simply waits for the
+   *  next real click — same as the old timestamp behaviour. */
+  const measureJustDrawnRef = useRef(false);
+  /** Mode before entering an overlay state (ContextMenu/Editing); the
+   *  overlay state restores it on close instead of assuming Idle. */
+  const previousModeRef = useRef<InteractionMode>('Idle');
+  /**
+   * Dev-only mode mirror for CDP verification (window.__pttMode /
+   * window.__pttModeLog, same pattern as __pttChartRenders in step 2).
+   * Production builds skip the window writes; the mode ref itself is
+   * real logic and always runs. Rejected transitions are logged too
+   * (ok: false) so a test run can assert the machine never refused a
+   * transition on the happy path.
+   */
+  const recordModeTransition = (
+    prev: InteractionMode,
+    next: InteractionMode,
+    reason: string,
+    ok: boolean,
+  ) => {
+    if (process.env.NODE_ENV === 'production') return;
+    const w = window as unknown as {
+      __pttMode?: InteractionMode;
+      __pttModeLog?: Array<{
+        from: InteractionMode;
+        to: InteractionMode;
+        reason: string;
+        t: number;
+        ok: boolean;
+      }>;
+    };
+    if (ok) w.__pttMode = next;
+    const log = w.__pttModeLog ?? [];
+    w.__pttModeLog = log;
+    log.push({ from: prev, to: next, reason, t: performance.now(), ok });
+    if (log.length > 200) log.splice(0, log.length - 200);
+  };
+  /**
+   * The single way the interaction mode changes (except overlay-state
+   * enter/exit, which have their own helpers for previousMode
+   * bookkeeping). Guards (Phase 0 §7.1):
+   * - Moving/Resizing only from Selected — or from Idle via the
+   *   implicit select at press-start: the library fires onSelected on
+   *   the click AFTER a drag, so a press that starts a drag is the
+   *   mode-level select — and only back to Selected.
+   * - Drawing <-> Selected never interconvert directly: the only
+   *   bridge is a draw end (Drawing -> Selected, via onDrawEnd ->
+   *   refreshSelected, fromDrawEnd) and an explicit tool arm
+   *   (Selected -> Drawing, via armOverlay, viaArm). fromDrawEnd
+   *   covers both draw completion and draw cancellation (Esc / disarm
+   *   returning to a selection that predates the draw).
+   * - Overlay states (ContextMenu/Editing) are entered/exited only
+   *   through enterOverlayMode/exitOverlayMode.
+   * A transition into Selected cancels a pending touch fallback timer:
+   * the chart's own synthesis selected something, so the fallback is
+   * moot. Leaving Selected clears the bar compat-click suppression.
+   * Returns false when the transition is rejected (caller keeps the
+   * old mode and must not proceed as if it had changed).
+   */
+  const transitionMode = (
+    next: InteractionMode,
+    reason: string,
+    opts?: { fromDrawEnd?: boolean; viaArm?: boolean },
+  ): boolean => {
+    const prev = modeRef.current;
+    if (prev === next) return true;
+    let ok = true;
+    if (next === 'ContextMenu' || next === 'Editing') ok = false;
+    else if (prev === 'ContextMenu' || prev === 'Editing') ok = false;
+    else if (
+      (next === 'Moving' || next === 'Resizing') &&
+      prev !== 'Selected' &&
+      prev !== 'Idle'
+    ) {
+      ok = false;
+    } else if (
+      (prev === 'Moving' || prev === 'Resizing') &&
+      next !== 'Selected'
+    ) {
+      ok = false;
+    } else if (
+      prev === 'Drawing' &&
+      next === 'Selected' &&
+      !opts?.fromDrawEnd
+    ) {
+      ok = false;
+    } else if (
+      prev === 'Selected' &&
+      next === 'Drawing' &&
+      !opts?.viaArm
+    ) {
+      ok = false;
+    }
+    recordModeTransition(prev, next, reason, ok);
+    if (!ok) return false;
+    if (next === 'Selected' && touchFallbackTimerRef.current) {
+      clearTimeout(touchFallbackTimerRef.current);
+      touchFallbackTimerRef.current = null;
+    }
+    if (prev === 'Selected' && next !== 'Selected') {
+      barIgnoreClicksUntilRef.current = 0;
+    }
+    modeRef.current = next;
+    return true;
+  };
+  /**
+   * Enter an overlay state (ContextMenu in step 4, Editing for the
+   * settings dialog). Records the mode we came from; exitOverlayMode
+   * restores it instead of assuming Idle. No nesting: entering an
+   * overlay state while already in one is rejected.
+   */
+  const enterOverlayMode = (
+    next: 'ContextMenu' | 'Editing',
+    reason: string,
+  ): boolean => {
+    const prev = modeRef.current;
+    if (prev === 'ContextMenu' || prev === 'Editing') {
+      recordModeTransition(prev, next, reason, false);
+      return false;
+    }
+    previousModeRef.current = prev;
+    modeRef.current = next;
+    recordModeTransition(prev, next, reason, true);
+    return true;
+  };
+  /**
+   * Exit an overlay state, restoring the mode from before it opened.
+   * The caller reconciles afterwards if the selection that mode
+   * assumed is gone (see closeDialog: a dialog can delete or hide
+   * its own selection).
+   */
+  const exitOverlayMode = (reason: string): boolean => {
+    const prev = modeRef.current;
+    if (prev !== 'ContextMenu' && prev !== 'Editing') {
+      recordModeTransition(prev, prev, reason, false);
+      return false;
+    }
+    const next = previousModeRef.current;
+    previousModeRef.current = 'Idle';
+    modeRef.current = next;
+    recordModeTransition(prev, next, reason, true);
+    return true;
+  };
 
   const [selected, setSelected] = useState<SelectedOverlayState | null>(null);
   const selectedRef = useRef<SelectedOverlayState | null>(null);
@@ -750,17 +1196,88 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   /**
    * Candle under the crosshair, or null when the mouse is off the
    * chart. The legend shows this while hovering (TradingView-style)
-   * and falls back to the last candle otherwise.
+   * and falls back to the last candle otherwise. Step 2b: the hover
+   * target lives in `hoverRef` + ChartLegend's own state, not in
+   * Chart state — a hover update must not re-render Chart.
    */
-  const [hoverKline, setHoverKline] = useState<KLineData | null>(null);
-  /** Data-list index of the hovered candle (null when not hovering). */
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  /** Wall clock, ticking once a second: drives the candle countdown. */
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
+  /**
+   * Phase 1 step 2a — crosshair throttling. The hover target lives in
+   * `hoverRef` (source of truth); `publishHover` pushes it to the
+   * legend listeners only when the target actually changed (same
+   * candle + same OHLCV values = no-op), and `scheduleHover`
+   * coalesces bursts to at most one publish per animation frame.
+   * The init effect's onCrosshairChange and the container's
+   * onMouseLeave are the only callers. Refs-only, so the callbacks
+   * are stable for the once-only init effect.
+   */
+  const hoverRef = useRef<HoverTarget>({ kline: null, index: null });
+  /** Pending hover target awaiting the next rAF publish. */
+  const pendingHoverRef = useRef<HoverTarget | null>(null);
+  /** In-flight rAF id for hover publishing (0 = none scheduled). */
+  const hoverRafRef = useRef(0);
+  /** Legend hover listeners (ChartLegend subscribes; step 2b). */
+  const hoverListenersRef = useRef(new Set<(t: HoverTarget) => void>());
+  const subscribeHover = useCallback((fn: (t: HoverTarget) => void) => {
+    hoverListenersRef.current.add(fn);
+    return () => {
+      hoverListenersRef.current.delete(fn);
+    };
   }, []);
+  /** Stable chart accessor for the legend (step 2b). */
+  const getChart = useCallback(() => chartRef.current, []);
+  const publishHover = useCallback((target: HoverTarget) => {
+    const prev = hoverRef.current;
+    if (
+      target.index === prev.index &&
+      target.kline?.timestamp === prev.kline?.timestamp &&
+      target.kline?.open === prev.kline?.open &&
+      target.kline?.high === prev.kline?.high &&
+      target.kline?.low === prev.kline?.low &&
+      target.kline?.close === prev.kline?.close &&
+      target.kline?.volume === prev.kline?.volume
+    ) {
+      return;
+    }
+    hoverRef.current = target;
+    hoverListenersRef.current.forEach((fn) => fn(target));
+  }, []);
+  const scheduleHover = useCallback(
+    (target: HoverTarget) => {
+      pendingHoverRef.current = target;
+      if (hoverRafRef.current !== 0) return;
+      hoverRafRef.current = requestAnimationFrame(() => {
+        hoverRafRef.current = 0;
+        const pending = pendingHoverRef.current;
+        pendingHoverRef.current = null;
+        if (pending) publishHover(pending);
+      });
+    },
+    [publishHover],
+  );
+  /** Mouse left the chart: drop any pending publish and clear hover. */
+  const clearHover = useCallback(() => {
+    if (hoverRafRef.current !== 0) {
+      cancelAnimationFrame(hoverRafRef.current);
+      hoverRafRef.current = 0;
+    }
+    pendingHoverRef.current = null;
+    publishHover({ kline: null, index: null });
+  }, [publishHover]);
+  /**
+   * Dev-only render counter for Phase 1 perf verification (CDP reads
+   * window.__pttChartRenders). It runs after every commit of this
+   * component, so its delta over a window is the whole-Chart render
+   * rate. Production builds strip it entirely (NODE_ENV is replaced
+   * statically at build time), so it costs nothing in the deployed
+   * bundle and cannot affect behaviour.
+   */
+  const renderCountRef = useRef(0);
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
+    renderCountRef.current += 1;
+    (window as unknown as { __pttChartRenders?: number }).__pttChartRenders =
+      renderCountRef.current;
+  });
   // Clear any pending touch tap-fallback timer on unmount.
   useEffect(
     () => () => {
@@ -779,6 +1296,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       // Deselected: the bar goes away, so its dragged position resets.
       setBarPos(null);
       setOpenPanel(null);
+      // Mode follows the selection, but only out of Selected: a drag
+      // or an overlay state owns the mode until it exits (their exit
+      // restores it themselves), and a draw in progress is unaffected
+      // by a selection change behind it.
+      if (modeRef.current === 'Selected') {
+        transitionMode('Idle', 'deselect');
+      }
     }
   };
 
@@ -1101,6 +1625,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       restoringRef.current = false;
     }
     setSelectedState(null);
+    // The rebuild wiped every overlay including an in-progress one
+    // (undo/redo mid-draw), so no draw is in progress any more.
+    if (modeRef.current === 'Drawing') {
+      transitionMode('Idle', 'snapshot-rebuild');
+    }
   };
 
   const undo = () => {
@@ -1278,7 +1807,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           !e.overlay.id.endsWith(':text')
         ) {
           pendingTextIdRef.current = e.overlay.id;
-          openDialogFor(e.overlay.id, 'text');
+          openDialogFor(e.overlay.id, 'text', { fromDrawEnd: true });
           onToolDoneRef.current();
           return;
         }
@@ -1298,11 +1827,33 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               (p) => p.timestamp !== undefined && p.value !== undefined,
             )
           ) {
-            refreshSelected(e.overlay.id);
+            // The only sanctioned Drawing -> Selected transition
+            // (Phase 0 §7.1): draw end -> refreshSelected.
+            refreshSelected(e.overlay.id, { fromDrawEnd: true });
             // The tap that ended this draw also fires a compatibility
             // click; the bar renders under the finger before it lands,
-            // so swallow bar clicks briefly (see barIgnoreClicksUntilRef).
-            barIgnoreClicksUntilRef.current = Date.now() + 300;
+            // so swallow bar clicks briefly (see
+            // barIgnoreClicksUntilRef / BAR_COMPAT_CLICK_SUPPRESS_MS).
+            barIgnoreClicksUntilRef.current =
+              Date.now() + BAR_COMPAT_CLICK_SUPPRESS_MS;
+          } else {
+            // Transient measure (or a draw with no usable points): no
+            // new selection; mode returns to whatever the selection
+            // says — a selection predating the draw survives it.
+            if (e.overlay.name === MEASURE_NAME) {
+              // The click completing this draw is also a container
+              // click: mark it so handleContainerClick (which runs
+              // when that click event arrives, after pointerup)
+              // does not dismiss the measure it just created. The
+              // next pointerdown on the container clears the mark
+              // (see onContainerPointerDown).
+              measureJustDrawnRef.current = true;
+            }
+            transitionMode(
+              selectedRef.current ? 'Selected' : 'Idle',
+              'draw-end:transient',
+              { fromDrawEnd: true },
+            );
           }
           onToolDoneRef.current();
         }
@@ -1311,7 +1862,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         if (restoringRef.current || suppressSaveRef.current) return;
         persistDrawings(symbolRef.current, intervalRef.current);
       },
-      onPressedMoveStart: () => {
+      onPressedMoveStart: (e) => {
         if (restoringRef.current) return;
         if (saved.name === MEASURE_NAME) return;
         // Record the pre-move snapshot; history is pushed at move end
@@ -1321,6 +1872,26 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         moveStartSnapshotRef.current = readMergedList(
           symbolRef.current,
           intervalRef.current,
+        );
+        // Mode: a press on an overlay starts a drag. The library
+        // fires onSelected only on the click AFTER the drag (its
+        // setClickOverlayInfo runs in the click handler), so
+        // press-start is the mode-level select (Idle -> Selected via
+        // transitionMode's implicit-select allowance), then Selected
+        // -> Moving, or Resizing when the press grabbed a control
+        // point: default point figures carry key
+        // 'overlay_figure_point_*' (klinecharts 10.1.1 bundle,
+        // OverlayView point-figure creation; custom overlays never
+        // emit 'circle' figures of their own).
+        const isControlPoint =
+          typeof e.figure?.key === 'string' &&
+          e.figure.key.startsWith('overlay_figure_point_');
+        if (modeRef.current === 'Idle') {
+          transitionMode('Selected', 'press:implicit-select');
+        }
+        transitionMode(
+          isControlPoint ? 'Resizing' : 'Moving',
+          isControlPoint ? 'press:resize-start' : 'press:move-start',
         );
       },
       onPressedMoveEnd: (e) => {
@@ -1345,6 +1916,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         }
         syncTextAnnotation(e.overlay.id);
         persistDrawings(symbolRef.current, intervalRef.current);
+        // Mode: a drag always returns to Selected (its entry required
+        // it). The measure overlay never enters Moving/Resizing (see
+        // onPressedMoveStart), so it never returns from one either.
+        if (saved.name !== MEASURE_NAME) {
+          transitionMode('Selected', 'press:move-end');
+        }
       },
       onDoubleClick: (e) => {
         if (restoringRef.current) return;
@@ -1362,32 +1939,57 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       onSelected: (e) => {
         if (restoringRef.current) return;
         if (e.overlay.name === MEASURE_NAME) return;
+        // The library creates no figure events while a draw is in
+        // progress (isDrawing), so this cannot fire with mode Drawing;
+        // guard anyway so a stray select never yanks the mode out of
+        // a draw (Drawing -> Selected is only legal via draw end).
+        if (modeRef.current === 'Drawing') return;
         refreshSelected(e.overlay.id);
       },
       onDeselected: (e) => {
         if (restoringRef.current) return;
         if (selectedRef.current?.id === e.overlay.id) setSelectedState(null);
       },
-      onClick: () => {
-        lastOverlayClickRef.current = Date.now();
-      },
     };
   };
 
-  /** Arm one drawing: remove any unfinished overlay, then create a new one. */
-  const armOverlay = (tool: DrawingTool) => {
+  /**
+   * Arm one drawing: remove any unfinished overlay, then create a new one.
+   * With `presetPoints` the creation is programmatic instead (context
+   * menu "add line at this price"): it never enters the Drawing mode,
+   * never touches an in-progress draw, and the library never fires
+   * onDrawStart/onDrawEnd for it — a programmatic createOverlay with
+   * complete points sets currentStep FINISHED (verified against the
+   * klinecharts 10.1.1 bundle: addOverlays -> override sets
+   * currentStep FINISHED when points are present, and onDrawEnd is
+   * only invoked from the draw-flow mouse handlers). So the preset
+   * path selects + persists explicitly, following copySelected, and
+   * an Esc afterwards must not delete the line as "unfinished".
+   */
+  const armOverlay = (
+    tool: DrawingTool,
+    presetPoints?: Array<{ timestamp: number; value: number }>,
+  ) => {
     const chart = chartRef.current;
     if (!chart) return;
-    if (drawingIdRef.current) {
-      chart.removeOverlay({ id: drawingIdRef.current });
-      drawingIdRef.current = null;
+    if (!presetPoints) {
+      // Mode first: arming starts a draw (Idle or Selected — a selection
+      // predating the draw is preserved and the draw-end path returns to
+      // it via selectedRef). If the transition is refused (a drag or an
+      // overlay state owns the mode), do not arm: a draw with the wrong
+      // mode would leave the machine inconsistent.
+      if (!transitionMode('Drawing', `arm:${tool}`, { viaArm: true })) return;
+      if (drawingIdRef.current) {
+        chart.removeOverlay({ id: drawingIdRef.current });
+        drawingIdRef.current = null;
+      }
     }
     pushHistory();
     const style = getLastOverlayStyle();
     const draft: SavedOverlay = {
       id: '',
       name: tool,
-      points: [],
+      points: presetPoints ?? [],
       styles: {
         color: style.color,
         size: style.size,
@@ -1398,7 +2000,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         tool === 'rectangle' ? { fillOpacity: style.fillOpacity } : undefined,
     };
     const id = chart.createOverlay(overlayCreate(draft));
-    if (typeof id === 'string') drawingIdRef.current = id;
+    if (typeof id !== 'string') return;
+    if (presetPoints) {
+      // Complete on creation: select it (like draw-end auto-select)
+      // and persist — copySelected's pattern, not the draw flow.
+      refreshSelected(id);
+      persistDrawings(symbolRef.current, intervalRef.current);
+    } else {
+      drawingIdRef.current = id;
+    }
   };
 
   const restoreDrawings = () => {
@@ -1435,7 +2045,17 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   // ---- selection + edit bar --------------------------------------------
 
-  const refreshSelected = (id: string | null) => {
+  /**
+   * Re-read the live overlay into the React selection state, and move
+   * the mode to Selected — except while a drag or an overlay state
+   * owns the mode (their exit restores it themselves), and except
+   * while a draw is in progress: Drawing -> Selected is only legal as
+   * part of a draw end, so callers in that path pass fromDrawEnd.
+   */
+  const refreshSelected = (
+    id: string | null,
+    opts?: { fromDrawEnd?: boolean },
+  ) => {
     if (!id) {
       setSelectedState(null);
       return;
@@ -1544,6 +2164,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       patternShowDashed: patternOpts.showDashed,
       patternShowRatios: patternOpts.showRatios,
     });
+    const m = modeRef.current;
+    if (m === 'Idle' || m === 'Selected') {
+      transitionMode('Selected', 'select:refresh');
+    } else if (m === 'Drawing' && opts?.fromDrawEnd) {
+      transitionMode('Selected', 'draw-end:auto-select', {
+        fromDrawEnd: true,
+      });
+    }
+    // Moving / Resizing / Editing / ContextMenu: the mode stays with
+    // whoever owns it; the selection state above is still refreshed.
   };
 
   const applyEdit = (
@@ -1820,8 +2450,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       : undefined,
   });
 
-  const openDialogFor = (id: string, tab: DialogTab) => {
-    refreshSelected(id);
+  const openDialogFor = (
+    id: string,
+    tab: DialogTab,
+    opts?: { fromDrawEnd?: boolean },
+  ) => {
+    refreshSelected(id, opts);
     const cur = selectedRef.current;
     if (!cur || cur.id !== id) return;
     setDialogBars(chartRef.current?.getDataList() ?? []);
@@ -1834,6 +2468,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }
     setDialogDraft(draft);
     dialogOpenRef.current = true;
+    // Overlay state: closeDialog restores the mode from before the
+    // dialog opened (Selected in the normal path — never assume Idle).
+    enterOverlayMode('Editing', 'dialog:open');
   };
 
   const closeDialog = () => {
@@ -1851,6 +2488,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }
     setDialogDraft(null);
     dialogOpenRef.current = false;
+    exitOverlayMode('dialog:close');
+    // The dialog can delete or hide its own selection (empty text
+    // annotation removed above; applyDialog's hidden-interval path):
+    // a restored Selected with nothing selected is inconsistent, so
+    // fall back to Idle.
+    if (modeRef.current === 'Selected' && selectedRef.current === null) {
+      transitionMode('Idle', 'dialog:close:no-selection');
+    }
   };
 
   /**
@@ -2055,6 +2700,313 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     closeDialog();
   };
 
+  // ---- range fit (shared by the ChartHandle and the menu reset) ----
+
+  /**
+   * Fit a calendar range into the chart width, pinned to the latest
+   * candle. The span is capped by the candles actually loaded (500 per
+   * init load, more on scroll), so wide ranges on short intervals show
+   * the widest available window.
+   */
+  const applyRange = (range: RangeId) => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return;
+    const data = chart.getDataList();
+    if (data.length === 0) return;
+    const intervalMs = INTERVAL_MS[intervalRef.current] ?? 0;
+    if (intervalMs <= 0) return;
+    const def = RANGES.find((r) => r.id === range);
+    let count: number;
+    if (range === 'all') {
+      count = data.length;
+    } else if (range === 'ytd') {
+      const yearStart = new Date(new Date().getFullYear(), 0, 1).getTime();
+      const inYear = data.filter((d) => d.timestamp >= yearStart).length;
+      count = inYear > 0 ? inYear : data.length;
+    } else if (def?.ms) {
+      count = Math.min(
+        data.length,
+        Math.max(1, Math.ceil(def.ms / intervalMs)),
+      );
+    } else {
+      count = data.length;
+    }
+    const width = container.clientWidth;
+    if (width <= 0) return;
+    const space = Math.min(50, Math.max(2, width / count));
+    chart.setBarSpace(space);
+    chart.scrollToRealTime();
+  };
+
+  // ---- context menu (Phase 1 step 4, Phase 0 §6.2 / §7.1) ------------
+  //
+  // Opening / closing goes through the step-3 ContextMenu overlay
+  // state (enterOverlayMode records previousMode; close restores it,
+  // never assuming Idle). While the menu is open every chart
+  // interaction pauses: the backdrop swallows pointer/wheel events
+  // before they reach the canvas, scroll + zoom are disabled at the
+  // chart, arming is refused by transitionMode, and the keyboard
+  // effect only answers Escape. All actions reuse existing
+  // functions — nothing here invents a second implementation.
+
+  /** Snapshot taken when the menu opens (anchor + price/time + selection). */
+  interface ContextMenuState {
+    /** Anchor in wrapper-relative px (the menu flips inside the wrapper). */
+    x: number;
+    y: number;
+    /** Wrapper client size at open time, for the menu's edge flip. */
+    bounds: { width: number; height: number };
+    /** Price-axis value at the click; null when no data is loaded. */
+    price: number | null;
+    /** Candle timestamp at the click; null when no data is loaded. */
+    timestamp: number | null;
+    /** Selected overlay id at open time; null = chart-only menu. */
+    selectedId: string | null;
+    locked: boolean;
+    visible: boolean;
+  }
+
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(
+    null,
+  );
+  const contextMenuRef = useRef<ContextMenuState | null>(null);
+  /** Menu root element (outside-pointerdown close check). */
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  /** Single funnel for closing the menu: restore pan/zoom, exit the
+   *  overlay state back to previousMode. No-op when no menu is open,
+   *  so the backdrop and the document listener can both call it for
+   *  the same press without logging a rejected transition. */
+  const closeContextMenu = () => {
+    if (modeRef.current !== 'ContextMenu') return;
+    contextMenuRef.current = null;
+    setContextMenu(null);
+    const chart = chartRef.current;
+    if (chart) {
+      chart.setScrollEnabled(true);
+      chart.setZoomEnabled(true);
+    }
+    exitOverlayMode('contextmenu:close');
+  };
+
+  /** Open the menu at a viewport point. Returns early (no menu, no
+   *  mode change) while the settings dialog is open — the dialog owns
+   *  focus, same rule as the chart keyboard shortcuts — and mid-drag,
+   *  where the drag owns the pointer. Right-clicking while the menu
+   *  is already open repositions it instead of nesting states. */
+  const openContextMenu = (clientX: number, clientY: number) => {
+    if (dialogOpenRef.current) return;
+    if (modeRef.current === 'Moving' || modeRef.current === 'Resizing')
+      return;
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    const wrapper = wrapperRef.current;
+    if (!chart || !container || !wrapper) return;
+    const rect = container.getBoundingClientRect();
+    const wrapRect = wrapper.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    // Price + time at the click. convertFromPixel returns
+    // { dataIndex, timestamp, value }; fall back to the hovered
+    // candle's close, then the last candle. No data at all: the menu
+    // still opens, but the price actions are disabled.
+    let price: number | null = null;
+    let timestamp: number | null = null;
+    try {
+      const raw = chart.convertFromPixel([{ x: px, y: py }]);
+      const p = Array.isArray(raw) ? raw[0] : raw;
+      if (p && typeof p.value === 'number' && Number.isFinite(p.value)) {
+        price = p.value;
+      }
+      if (
+        p &&
+        typeof p.timestamp === 'number' &&
+        Number.isFinite(p.timestamp)
+      ) {
+        timestamp = p.timestamp;
+      }
+      if (price === null && p && typeof p.dataIndex === 'number') {
+        const list = chart.getDataList();
+        const k =
+          p.dataIndex >= 0 && p.dataIndex < list.length
+            ? list[p.dataIndex]
+            : undefined;
+        if (k) {
+          price = k.close;
+          timestamp = k.timestamp;
+        }
+      }
+    } catch {
+      // Conversion failed: fall through to the last-candle fallback.
+    }
+    if (price === null && lastKline) price = lastKline.close;
+    if (timestamp === null && lastKline) timestamp = lastKline.timestamp;
+    const sel = selectedRef.current;
+    const anchor: ContextMenuState = {
+      x: clientX - wrapRect.left,
+      y: clientY - wrapRect.top,
+      bounds: { width: wrapper.clientWidth, height: wrapper.clientHeight },
+      price,
+      timestamp,
+      selectedId: sel?.id ?? null,
+      locked: sel?.lock ?? false,
+      visible: sel?.visible ?? true,
+    };
+    if (modeRef.current === 'ContextMenu') {
+      contextMenuRef.current = anchor;
+      setContextMenu(anchor);
+      return;
+    }
+    if (!enterOverlayMode('ContextMenu', 'contextmenu:open')) return;
+    chart.setScrollEnabled(false);
+    chart.setZoomEnabled(false);
+    contextMenuRef.current = anchor;
+    setContextMenu(anchor);
+  };
+
+  /** Copy the clicked price to the clipboard. Best-effort and
+   *  silent on failure by design (Phase 0 §6.2 [待驗證]): clipboard
+   *  permission depends on the browser. The copied text is the
+   *  displayed price without thousands separators, so it pastes
+   *  cleanly into a numeric field. */
+  const copyPriceAt = (price: number) => {
+    const text = formatPrice(price).replace(/,/g, '');
+    if (process.env.NODE_ENV !== 'production') {
+      (
+        window as unknown as { __pttCopiedPrice?: string }
+      ).__pttCopiedPrice = text;
+    }
+    try {
+      const done = navigator.clipboard?.writeText(text);
+      if (done && typeof done.catch === 'function') done.catch(() => {});
+    } catch {
+      // Silent: a failed copy must never surface an error.
+    }
+    try {
+      if (!navigator.clipboard) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+    } catch {
+      // Silent (see above).
+    }
+  };
+
+  /** Close the menu first, then run the action in the restored mode:
+   *  Editing opens from Selected (never nested inside ContextMenu),
+   *  delete deselects back to Idle, a new line auto-selects. */
+  const runMenuAction = (fn: () => void) => {
+    closeContextMenu();
+    fn();
+  };
+
+  /** Dispatch one menu item. All branches reuse existing functions;
+   *  nothing here re-implements an edit, copy, lock, hide, reorder
+   *  or delete. */
+  const handleContextMenuSelect = (id: string) => {
+    const menu = contextMenuRef.current;
+    if (!menu) return;
+    switch (id) {
+      case 'copy-price':
+        if (menu.price !== null) {
+          const price = menu.price;
+          runMenuAction(() => copyPriceAt(price));
+        } else {
+          closeContextMenu();
+        }
+        break;
+      case 'add-hline':
+        if (menu.price !== null) {
+          // horizontalStraightLine is a 1-point overlay (totalStep 2,
+          // bundle-verified): one point at the clicked price draws
+          // the full-width line.
+          const price = menu.price;
+          const timestamp = menu.timestamp ?? Date.now();
+          runMenuAction(() =>
+            armOverlay('horizontalStraightLine', [{ timestamp, value: price }]),
+          );
+        } else {
+          closeContextMenu();
+        }
+        break;
+      case 'add-vline':
+        if (menu.timestamp !== null) {
+          // verticalStraightLine is likewise 1-point: one point at
+          // the clicked time (value = clicked price, unused by the
+          // figure) draws the full-height line.
+          const timestamp = menu.timestamp;
+          const value = menu.price ?? 0;
+          runMenuAction(() =>
+            armOverlay('verticalStraightLine', [{ timestamp, value }]),
+          );
+        } else {
+          closeContextMenu();
+        }
+        break;
+      case 'reset-view':
+        runMenuAction(() => applyRange(DEFAULT_RESET_RANGE));
+        break;
+      case 'edit':
+        if (menu.selectedId) {
+          const selectedId = menu.selectedId;
+          runMenuAction(() => openDialogFor(selectedId, 'style'));
+        } else {
+          closeContextMenu();
+        }
+        break;
+      case 'copy':
+        runMenuAction(() => copySelected());
+        break;
+      case 'lock':
+        runMenuAction(() => applyEdit({ lock: !menu.locked }));
+        break;
+      case 'hide':
+        runMenuAction(() => applyEdit({ visible: !menu.visible }));
+        break;
+      case 'front':
+        runMenuAction(() => bringToFront());
+        break;
+      case 'back':
+        runMenuAction(() => sendToBack());
+        break;
+      case 'delete':
+        runMenuAction(() => deleteSelected());
+        break;
+      default:
+        closeContextMenu();
+        break;
+    }
+  };
+
+  /** Container right-click: suppress the browser menu and open ours.
+   *  The dialog-open and mid-drag guards live in openContextMenu. */
+  const handleContainerContextMenu = (e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    openContextMenu(e.clientX, e.clientY);
+  };
+
+  /** Close the menu on any pointer press outside it (same pattern as
+   *  the floating-bar popover effect). Presses on the chart itself
+   *  land on the backdrop first; this covers the toolbar, watchlist
+   *  and range bar. */
+  useEffect(() => {
+    if (contextMenu === null) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      closeContextMenu();
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextMenu]);
+
   useImperativeHandle(ref, () => ({
     clearDrawings() {
       const chart = chartRef.current;
@@ -2067,6 +3019,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       store[symbolRef.current] = [];
       saveDrawingsStore(store);
       deselect();
+      // removeOverlay() above wiped an in-progress draw too, if any.
+      if (modeRef.current === 'Drawing') {
+        transitionMode('Idle', 'clear-drawings');
+      }
     },
     undo() {
       undo();
@@ -2075,38 +3031,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       redo();
     },
     setRange(range: RangeId) {
-      const chart = chartRef.current;
-      const container = containerRef.current;
-      if (!chart || !container) return;
-      const data = chart.getDataList();
-      if (data.length === 0) return;
-      const intervalMs = INTERVAL_MS[intervalRef.current] ?? 0;
-      if (intervalMs <= 0) return;
-      const def = RANGES.find((r) => r.id === range);
-      let count: number;
-      if (range === 'all') {
-        count = data.length;
-      } else if (range === 'ytd') {
-        const yearStart = new Date(
-          new Date().getFullYear(),
-          0,
-          1,
-        ).getTime();
-        const inYear = data.filter((d) => d.timestamp >= yearStart).length;
-        count = inYear > 0 ? inYear : data.length;
-      } else if (def?.ms) {
-        count = Math.min(
-          data.length,
-          Math.max(1, Math.ceil(def.ms / intervalMs)),
-        );
-      } else {
-        count = data.length;
-      }
-      const width = container.clientWidth;
-      if (width <= 0) return;
-      const space = Math.min(50, Math.max(2, width / count));
-      chart.setBarSpace(space);
-      chart.scrollToRealTime();
+      applyRange(range);
     },
   }));
 
@@ -2142,12 +3067,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // mouse leaves it falls back to the last candle. Note the action
     // payload is only { x, y, paneId } (no kLineData despite the
     // Crosshair type), so the hovered candle is resolved through
-    // convertFromPixel -> dataIndex into the loaded list.
+    // convertFromPixel -> dataIndex into the loaded list. Publishing
+    // is rAF-throttled with same-target dedup (see scheduleHover):
+    // a 60-125 Hz mouse must not re-render Chart once per event.
     const onCrosshairChange = (data?: unknown) => {
       const cross = data as Crosshair | undefined;
       if (cross?.x === undefined) {
-        setHoverKline(null);
-        setHoverIndex(null);
+        clearHover();
         return;
       }
       const point = chart.convertFromPixel(
@@ -2157,14 +3083,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       const p = Array.isArray(point) ? point[0] : point;
       const list = chart.getDataList();
       const idx = p?.dataIndex;
-      setHoverKline(
-        idx !== undefined && idx >= 0 && idx < list.length
-          ? list[idx]
-          : null,
-      );
-      setHoverIndex(
-        idx !== undefined && idx >= 0 && idx < list.length ? idx : null,
-      );
+      const valid = idx !== undefined && idx >= 0 && idx < list.length;
+      scheduleHover({
+        kline: valid ? list[idx] : null,
+        index: valid ? idx : null,
+      });
     };
     chart.subscribeAction('onCrosshairChange', onCrosshairChange);
 
@@ -2288,6 +3211,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
     return () => {
       resizeObserver.disconnect();
+      if (hoverRafRef.current !== 0) {
+        cancelAnimationFrame(hoverRafRef.current);
+        hoverRafRef.current = 0;
+      }
       chart.unsubscribeAction('onCrosshairChange', onCrosshairChange);
       socketRef.current?.disconnect();
       socketRef.current = null;
@@ -2312,8 +3239,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // and legend (including a hovered candle from the old symbol).
     setLoadError(null);
     setLastKline(null);
-    setHoverKline(null);
-    setHoverIndex(null);
+    clearHover();
     const prev = prevSymbolIntervalRef.current;
     if (prev === null) {
       prevSymbolIntervalRef.current = { symbol, interval };
@@ -2330,6 +3256,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       deselect();
       // An unfinished drawing cannot survive the switch: cancel it.
       drawingIdRef.current = null;
+      if (modeRef.current === 'Drawing') {
+        transitionMode('Idle', 'symbol-change');
+      }
       if (activeToolRef.current) onToolDoneRef.current();
     }
     prevSymbolIntervalRef.current = { symbol, interval };
@@ -2363,6 +3292,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         chart.removeOverlay({ id: drawingIdRef.current });
         drawingIdRef.current = null;
       }
+      // A draw that ends by disarming (Esc cancel, tool switch)
+      // returns to whatever the selection says.
+      if (modeRef.current === 'Drawing') {
+        transitionMode(
+          selectedRef.current ? 'Selected' : 'Idle',
+          'disarm',
+          { fromDrawEnd: true },
+        );
+      }
       return;
     }
     armOverlay(activeTool);
@@ -2392,6 +3330,17 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       // Escape/Delete/Backspace/Ctrl+Z (the dialog root stops
       // propagation); never let a chart shortcut fire behind it.
       if (dialogOpenRef.current) return;
+      // While the context menu is open it owns the interaction: only
+      // Escape closes it; every other chart shortcut stays paused
+      // until the menu is gone (Phase 0 §7.1: all chart interaction
+      // pauses while ContextMenu is open).
+      if (modeRef.current === 'ContextMenu') {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeContextMenu();
+        }
+        return;
+      }
       if (isEditableTarget(e.target)) return;
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -2490,15 +3439,30 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   }, [indicators]);
 
   // Clicking empty chart space dismisses a finished measure overlay.
-  // Overlay clicks set lastOverlayClickRef first, so they are excluded.
+  // No timer is needed any more (Phase 1 step 3 removes the B10
+  // setTimeout(0) + 100ms last-click guard): the library's
+  // onSelected/onDeselected run synchronously inside the canvas click
+  // handler — before this React onClick bubbles — so by the time this
+  // runs, mode already reflects the click. Only a click on empty
+  // space while Idle dismisses the measure: an overlay click leaves
+  // mode Selected, and a click that places a draw point leaves mode
+  // Drawing — both must keep the measure (the old 100ms guard's real
+  // job was exactly this: the draw's own clicks fired the overlay's
+  // onClick, which is what kept the measure alive while drawing).
+  // One exception, handled by a same-event marker rather than a
+  // timestamp: the click that completes a measure draw
+  // (measureJustDrawnRef) must not dismiss the measure it just
+  // created — at that moment mode is already Idle.
   const handleContainerClick = () => {
-    setTimeout(() => {
-      const chart = chartRef.current;
-      if (!chart) return;
-      if (Date.now() - lastOverlayClickRef.current < 100) return;
-      const measure = chart.getOverlays({ name: MEASURE_NAME })[0];
-      if (measure) chart.removeOverlay({ id: measure.id });
-    }, 0);
+    if (measureJustDrawnRef.current) {
+      measureJustDrawnRef.current = false;
+      return;
+    }
+    if (modeRef.current !== 'Idle') return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    const measure = chart.getOverlays({ name: MEASURE_NAME })[0];
+    if (measure) chart.removeOverlay({ id: measure.id });
   };
 
   /**
@@ -2569,20 +3533,30 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
    * stopPropagation, so these React pointer handlers still fire).
    * A tap is pointerdown -> pointerup, <10px movement, <500ms, with
    * no tool armed and no drawing in progress. The chart's own click
-   * handling gets ~150ms to select something first (its ±2px hit
-   * test wins when it lands); only then do we search for the nearest
-   * overlay within 24 CSS px. A tap on empty space clears the
+   * handling gets TOUCH_FALLBACK_WAIT_MS to select something first
+   * (its ±2px hit test wins when it lands); only then do we search
+   * for the nearest overlay within 24 CSS px. The wait is
+   * unavoidable — the library synthesises its tap handling after
+   * touchend and no compat click reaches the container (measured) —
+   * but the DECISION is mode-based now (Phase 1 step 3): a transition
+   * into Selected cancels the timer (the chart's own synthesis won),
+   * and the callback itself only skips while a drag or an overlay
+   * state owns the interaction. A tap on empty space clears the
    * selection — the fallback never re-selects the overlay it just
    * cleared, because the search runs once per tap.
    */
   const onContainerPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // A new press on the chart ends the measure-just-drawn mark (see
+    // measureJustDrawnRef): the completing click's own pointerdown
+    // predates the draw end, so only a genuinely later press clears
+    // it — the following click may then dismiss the measure.
+    measureJustDrawnRef.current = false;
     if (e.pointerType !== 'touch') return;
     touchTapStartRef.current = {
       pointerId: e.pointerId,
       x: e.clientX,
       y: e.clientY,
       time: Date.now(),
-      selectedId: selectedRef.current?.id ?? null,
     };
   };
 
@@ -2621,20 +3595,36 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (touchFallbackTimerRef.current) {
       clearTimeout(touchFallbackTimerRef.current);
     }
-    const beforeId = start.selectedId;
     touchFallbackTimerRef.current = setTimeout(() => {
       touchFallbackTimerRef.current = null;
-      const nowId = selectedRef.current?.id ?? null;
-      // The chart selected a different overlay on this tap: its own
-      // hit test won, leave it alone.
-      if (nowId !== null && nowId !== beforeId) return;
+      // Mode is the arbiter now, but only for the cases the timer
+      // cannot decide: a drag (Moving/Resizing) or an open dialog /
+      // menu owns the interaction, so the fallback must not run. In
+      // every other mode it runs: Idle (nothing selected), Drawing (a
+      // tool was armed inside the window — the old behaviour also
+      // selected then), and Selected. Selected matters: the library
+      // only changes the selection via onSelected/onDeselected, and
+      // a transition into Selected cancels this timer — so a timer
+      // still pending with mode Selected means the library did NOT
+      // select on this tap (e.g. the selection came from an earlier
+      // fallback tap, which the library never hears about: its stored
+      // click info is already null, so a later blank tap produces no
+      // onDeselected and only this fallback can clear it).
+      if (
+        modeRef.current === 'Moving' ||
+        modeRef.current === 'Resizing' ||
+        modeRef.current === 'Editing' ||
+        modeRef.current === 'ContextMenu'
+      ) {
+        return;
+      }
       const near = nearestOverlayAt(tap.x, tap.y, 24);
       if (near) {
-        if (near.id !== nowId) refreshSelected(near.id);
-      } else if (nowId !== null) {
+        if (near.id !== selectedRef.current?.id) refreshSelected(near.id);
+      } else if (selectedRef.current !== null) {
         deselect();
       }
-    }, 150);
+    }, TOUCH_FALLBACK_WAIT_MS);
   };
 
   // ---- floating edit bar: drag + popovers -------------------------------
@@ -2757,109 +3747,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     window.addEventListener('pointercancel', onUp);
   };
 
-  // Legend candle: the hovered candle while the crosshair is on the
-  // chart, otherwise the last candle. Its change is vs its own open.
-  const legendKline = hoverKline ?? lastKline;
-  const legendChangePct =
-    legendKline !== null && legendKline.open !== 0
-      ? ((legendKline.close - legendKline.open) / legendKline.open) * 100
-      : 0;
-
-  // ---- candle countdown (TradingView-style) -------------------------
-  // Always for the LAST candle, not the hovered one: the countdown is
-  // about the live bar closing. Close of the candle's interval: 1M is
-  // the 1st of next month UTC (INTERVAL_MS['1M'] is only a 30-day
-  // approximation); every other interval is open + its fixed span.
-  const lastCloseMs =
-    lastKline !== null
-      ? interval === '1M'
-        ? Date.UTC(
-            new Date(lastKline.timestamp).getUTCFullYear(),
-            new Date(lastKline.timestamp).getUTCMonth() + 1,
-            1,
-          )
-        : lastKline.timestamp + (INTERVAL_MS[interval] ?? 0)
-      : null;
-  const countdownRemainingMs =
-    lastCloseMs !== null ? lastCloseMs - nowMs : null;
-  // Stale when the close already passed (socket down, no live tick) or
-  // the clock sits before the candle opened: show '—', never a bogus time.
-  const countdownText =
-    countdownRemainingMs !== null &&
-    lastCloseMs !== null &&
-    lastKline !== null &&
-    countdownRemainingMs > 0 &&
-    countdownRemainingMs <= lastCloseMs - lastKline.timestamp
-      ? formatCountdown(countdownRemainingMs)
-      : '—';
-
-  // ---- legend indicator values ---------------------------------------
-  // Read straight from klinecharts' own computed results (never
-  // re-computed here, so the numbers always match the drawn lines).
-  // result[i] holds the indicator's values for dataList[i]; each
-  // figure is one line keyed into that row. Line colours come from
-  // the theme (styles.indicator.lines[i], verified at runtime); the
-  // volume bar takes the candle's up/down colour, like the drawn bar.
-  const legendIndex =
-    hoverIndex ??
-    (chartRef.current ? chartRef.current.getDataList().length - 1 : -1);
-  const legendIndicators: Array<{
-    name: string;
-    values: Array<{ label: string; text: string; color: string }>;
-  }> = (() => {
-    const chart = chartRef.current;
-    if (!chart || legendIndex < 0) return [];
-    const list = chart.getDataList();
-    if (legendIndex >= list.length) return [];
-    const lineColors = chart.getStyles().indicator?.lines ?? [];
-    const rows: Array<{
-      name: string;
-      values: Array<{ label: string; text: string; color: string }>;
-    }> = [];
-    for (const ind of chart.getIndicators()) {
-      if (!indicators.includes(ind.name)) continue;
-      const row = ind.result?.[legendIndex] as
-        | Record<string, unknown>
-        | undefined;
-      if (!row) continue;
-      const values: Array<{ label: string; text: string; color: string }> =
-        [];
-      for (let fi = 0; fi < ind.figures.length; fi += 1) {
-        const fig = ind.figures[fi];
-        const v = row[fig.key];
-        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-        let text: string;
-        if (ind.shouldFormatBigNumber) {
-          // klinecharts' formatBigNumber only compacts >= 1000 (1.23K);
-          // below that it returns the raw float, so format small
-          // volumes to 2 decimals ourselves.
-          text =
-            Math.abs(v) >= 1000
-              ? chart.getFormatter().formatBigNumber(v)
-              : v.toFixed(2);
-        } else if (ind.series === 'price') {
-          text = formatPrice(v);
-        } else {
-          text = v.toFixed(2);
-        }
-        const color =
-          fig.type === 'bar'
-            ? legendChangePct >= 0
-              ? '#26a69a'
-              : '#ef5350'
-            : (lineColors[fi]?.color ?? '#b2b5be');
-        values.push({
-          label: (fig.title ?? fig.key).replace(/:\s*$/, ''),
-          text,
-          color,
-        });
-      }
-      if (values.length > 0) {
-        rows.push({ name: ind.shortName || ind.name, values });
-      }
-    }
-    return rows;
-  })();
+  // Legend (OHLC + indicators + countdown) lives in the memoized
+  // ChartLegend component above: hover updates re-render only that
+  // subtree, never this whole component (Phase 1 step 2b).
 
   // Floating-bar default position: desktop top-centre (top: 8, see the
   // bar's style below); narrow screens dock the compact icon bar at
@@ -2871,61 +3761,24 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       <div
         ref={containerRef}
         onClick={handleContainerClick}
+        onContextMenu={handleContainerContextMenu}
         onPointerDown={onContainerPointerDown}
         onPointerUp={onContainerPointerUp}
         onMouseLeave={() => {
-          setHoverKline(null);
-          setHoverIndex(null);
+          clearHover();
         }}
         className="h-full w-full bg-[#131722]"
         data-testid="chart-container"
       />
-      {legendKline !== null && loadError === null && (
-        <div
-          className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed"
-        >
-          <div className="text-xs font-semibold text-white">
-            {symbol} · {INTERVAL_LABELS[interval]} · Binance
-            <span
-              className="ml-2 font-normal tabular-nums text-[#ffa726]"
-              data-testid="candle-countdown"
-            >
-              收線 {countdownText}
-            </span>
-          </div>
-          <div className="text-[11px] text-[#b2b5be]">
-            開 {formatPrice(legendKline.open)} 高 {formatPrice(legendKline.high)}{' '}
-            低 {formatPrice(legendKline.low)} 收{' '}
-            <span
-              className={
-                legendChangePct >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
-              }
-            >
-              {formatPrice(legendKline.close)}{' '}
-              {legendChangePct >= 0 ? '+' : ''}
-              {legendChangePct.toFixed(2)}%
-            </span>
-          </div>
-          {legendIndicators.map((row) => (
-            <div
-              key={row.name}
-              className="text-[11px]"
-              data-testid={`legend-indicator-${row.name}`}
-            >
-              <span className="text-[#787b86]">{row.name} </span>
-              {row.values.map((v) => (
-                <span
-                  key={v.label}
-                  className="tabular-nums"
-                  style={{ color: v.color }}
-                >
-                  {v.label} {v.text}{' '}
-                </span>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
+      <ChartLegend
+        symbol={symbol}
+        interval={interval}
+        indicators={indicators}
+        lastKline={lastKline}
+        loadError={loadError}
+        getChart={getChart}
+        subscribeHover={subscribeHover}
+      />
       {loadError !== null && (
         <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-2">
           <div className="rounded-md border border-[#ef5350]/50 bg-[#1e222d]/95 px-3 py-2 text-xs leading-relaxed text-[#f5c6c6] shadow-lg">
@@ -2938,8 +3791,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           ref={barRef}
           onClickCapture={(e) => {
             // Swallow the compatibility click from the tap that ended
-            // the draw (see barIgnoreClicksUntilRef): the bar renders
-            // under the finger before that click lands.
+            // the draw (see barIgnoreClicksUntilRef, owned by the
+            // Drawing -> Selected transition): the bar renders under
+            // the finger before that click lands.
             if (Date.now() < barIgnoreClicksUntilRef.current) {
               e.stopPropagation();
               e.preventDefault();
@@ -3352,6 +4206,78 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             </div>
           )}
         </div>
+      )}
+      {contextMenu !== null && (
+        <>
+          {/* Transparent backdrop: swallows pointer/wheel events so
+              the dismissing press can never pan the chart or select
+              an overlay behind the menu. Right-clicking it repositions
+              the menu instead of opening the browser menu. */}
+          <div
+            data-testid="chart-context-menu-backdrop"
+            onPointerDown={closeContextMenu}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              openContextMenu(e.clientX, e.clientY);
+            }}
+            className="absolute inset-0 z-30"
+            aria-hidden="true"
+          />
+          <ChartContextMenu
+            menuRef={menuRef}
+            x={contextMenu.x}
+            y={contextMenu.y}
+            bounds={contextMenu.bounds}
+            sections={[
+              [
+                {
+                  id: 'copy-price',
+                  label:
+                    contextMenu.price !== null
+                      ? `複製價格 ${formatPrice(contextMenu.price)}`
+                      : '複製價格',
+                  disabled: contextMenu.price === null,
+                },
+                {
+                  id: 'add-hline',
+                  label: '加入水平線',
+                  disabled: contextMenu.price === null,
+                },
+                {
+                  id: 'add-vline',
+                  label: '加入垂直線',
+                  disabled: contextMenu.timestamp === null,
+                },
+                { id: 'reset-view', label: '重設圖表檢視' },
+                {
+                  id: 'chart-settings',
+                  label: '圖表設定 [待確認]',
+                  disabled: true,
+                },
+              ],
+              ...(contextMenu.selectedId !== null
+                ? [
+                    [
+                      { id: 'edit', label: '編輯…' },
+                      { id: 'copy', label: '複製' },
+                      {
+                        id: 'lock',
+                        label: contextMenu.locked ? '解鎖' : '鎖定',
+                      },
+                      {
+                        id: 'hide',
+                        label: contextMenu.visible ? '隱藏' : '顯示',
+                      },
+                      { id: 'front', label: '移到前面' },
+                      { id: 'back', label: '移到後面' },
+                      { id: 'delete', label: '刪除', danger: true },
+                    ] satisfies ContextMenuItem[],
+                  ]
+                : []),
+            ]}
+            onSelect={handleContextMenuSelect}
+          />
+        </>
       )}
       {dialogDraft !== null && selected !== null && (
         <OverlaySettingsDialog
