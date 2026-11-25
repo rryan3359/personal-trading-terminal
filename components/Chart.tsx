@@ -118,6 +118,7 @@ import {
   newOverlayId,
   saveDrawingsStore,
   saveLastOverlayStyle,
+  type LastOverlayStyle,
   type OverlayStylePatch,
   type OverlayText,
   type SavedOverlay,
@@ -240,11 +241,63 @@ function BarEyeIcon({ hidden }: { hidden: boolean }) {
   );
 }
 
+/** Proper cog: toothed ring + centre hole. The old circle-and-spokes
+ *  read as a sun on phones. */
 function BarGearIcon() {
   return (
     <svg {...BAR_ICON_PROPS} aria-hidden="true">
-      <circle cx="10" cy="10" r="3" />
-      <path d="M10 2.5v2.4M10 15.1v2.4M2.5 10h2.4M15.1 10h2.4M4.7 4.7l1.7 1.7M13.6 13.6l1.7 1.7M15.3 4.7l-1.7 1.7M6.4 13.6l-1.7 1.7" />
+      <circle cx="10" cy="10" r="6" />
+      <circle cx="10" cy="10" r="2.6" />
+      <g fill="currentColor" stroke="none">
+        <rect x="8.8" y="2" width="2.4" height="2.8" rx="0.6" />
+        <rect x="8.8" y="15.2" width="2.4" height="2.8" rx="0.6" />
+        <rect x="2" y="8.8" width="2.8" height="2.4" rx="0.6" />
+        <rect x="15.2" y="8.8" width="2.8" height="2.4" rx="0.6" />
+        <rect
+          x="13.4"
+          y="4.2"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 14.6 5.4)"
+        />
+        <rect
+          x="4.2"
+          y="4.2"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 5.4 5.4)"
+        />
+        <rect
+          x="4.2"
+          y="13.4"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 5.4 14.6)"
+        />
+        <rect
+          x="13.4"
+          y="13.4"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 14.6 14.6)"
+        />
+      </g>
+    </svg>
+  );
+}
+
+/** Template icon: 2×2 rounded grid (田), matching TV's template button. */
+function BarTemplateIcon() {
+  return (
+    <svg {...BAR_ICON_PROPS} aria-hidden="true">
+      <rect x="3.5" y="3.5" width="6" height="6" rx="1.5" />
+      <rect x="10.5" y="3.5" width="6" height="6" rx="1.5" />
+      <rect x="3.5" y="10.5" width="6" height="6" rx="1.5" />
+      <rect x="10.5" y="10.5" width="6" height="6" rx="1.5" />
     </svg>
   );
 }
@@ -255,6 +308,63 @@ function BarTrashIcon() {
       <path d="M4 5.5h12M8 5.5V4h4v1.5M6.5 5.5l.8 10.5h5.4l.8-10.5M10 8.5v5" />
     </svg>
   );
+}
+
+/**
+ * Overlay style templates, kept in Chart.tsx only (the settings
+ * dialog's template dropdown stays UI-only until Phase 3, and
+ * lib/store.ts is untouched). Stored in localStorage grouped by
+ * overlay name (tool type), so a template saved from a trend line
+ * only lists for trend lines. A saved template is a style snapshot
+ * (colour / opacity / line width / line style / fill opacity) —
+ * extend is NOT stored: extend is derived from the overlay name +
+ * point order and changing it needs delete + recreate.
+ */
+const TEMPLATE_STORAGE_KEY = 'ptt:overlay-templates';
+
+interface OverlayTemplate {
+  name: string;
+  style: LastOverlayStyle;
+}
+
+type OverlayTemplates = Record<string, OverlayTemplate[]>;
+
+function loadTemplates(): OverlayTemplates {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(TEMPLATE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+      return {};
+    const out: OverlayTemplates = {};
+    for (const [key, value] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (!Array.isArray(value)) continue;
+      const list = value.filter(
+        (t): t is OverlayTemplate =>
+          t !== null &&
+          typeof t === 'object' &&
+          typeof (t as OverlayTemplate).name === 'string' &&
+          (t as OverlayTemplate).style !== null &&
+          typeof (t as OverlayTemplate).style === 'object',
+      );
+      if (list.length > 0) out[key] = list;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveTemplates(next: OverlayTemplates): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Storage full / private mode: templates stay in memory only.
+  }
 }
 
 /** Snapshot of one selected overlay for the floating edit bar and the
@@ -614,8 +724,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(null);
   /** Which floating-bar popover is open, if any. */
   const [openPanel, setOpenPanel] = useState<
-    'color' | 'lineStyle' | 'more' | null
+    'color' | 'lineStyle' | 'more' | 'template' | null
   >(null);
+  /** Overlay style templates, grouped by overlay name (tool type). */
+  const [templates, setTemplates] =
+    useState<OverlayTemplates>(loadTemplates);
+  /** Name typed for "save current style as template". */
+  const [templateName, setTemplateName] = useState('');
   /** Outer chart wrapper (the floating bar's offset parent). */
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   /** Floating bar element (measured while dragging). */
@@ -2534,8 +2649,64 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [openPanel]);
 
-  const togglePanel = (panel: 'color' | 'lineStyle' | 'more') => {
+  const togglePanel = (
+    panel: 'color' | 'lineStyle' | 'more' | 'template',
+  ) => {
     setOpenPanel((cur) => (cur === panel ? null : panel));
+  };
+
+  /** Apply a saved template's style to the selected overlay. */
+  const applyTemplate = (tpl: OverlayTemplate) => {
+    applyEdit({
+      color: tpl.style.color,
+      opacity: tpl.style.opacity,
+      size: tpl.style.size,
+      style: tpl.style.style,
+      fillOpacity: tpl.style.fillOpacity,
+    });
+    setOpenPanel(null);
+  };
+
+  /** Save the selected overlay's current style as a template. A
+   *  duplicate name overwrites the existing template in place. */
+  const saveTemplate = () => {
+    const cur = selectedRef.current;
+    if (!cur) return;
+    const name = templateName.trim();
+    if (!name) return;
+    const style: LastOverlayStyle = {
+      color: cur.color,
+      opacity: cur.opacity,
+      size: cur.size,
+      style: cur.style,
+      fillOpacity: cur.fillOpacity,
+    };
+    setTemplates((prev) => {
+      const group = prev[cur.name] ?? [];
+      const idx = group.findIndex((t) => t.name === name);
+      const nextGroup =
+        idx >= 0
+          ? group.map((t, i) => (i === idx ? { name, style } : t))
+          : [...group, { name, style }];
+      const next = { ...prev, [cur.name]: nextGroup };
+      saveTemplates(next);
+      return next;
+    });
+    setTemplateName('');
+  };
+
+  /** Delete a saved template from the selected overlay's group. */
+  const deleteTemplate = (name: string) => {
+    const cur = selectedRef.current;
+    if (!cur) return;
+    setTemplates((prev) => {
+      const group = (prev[cur.name] ?? []).filter((t) => t.name !== name);
+      const next = { ...prev };
+      if (group.length > 0) next[cur.name] = group;
+      else delete next[cur.name];
+      saveTemplates(next);
+      return next;
+    });
   };
 
   /** Start dragging the floating bar from its grip. */
@@ -2808,6 +2979,20 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               the colour / width / line-style controls for it. */}
           {selected.name !== TEXT_ANNOTATION_NAME && (
             <>
+              {/* Mobile: template button (first, icon-only). A text
+                  annotation has no line to style, so it gets no
+                  template button either (same as the colour /
+                  width / line-style controls). */}
+              <button
+                title="範本"
+                aria-label="範本"
+                onClick={() => togglePanel('template')}
+                className={`hidden h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 max-md:flex ${
+                  openPanel === 'template' ? 'bg-white/10' : ''
+                }`}
+              >
+                <BarTemplateIcon />
+              </button>
               <button
                 title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
                 aria-label="顏色"
@@ -3059,6 +3244,71 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   )}
                 </button>
               ))}
+            </div>
+          )}
+          {openPanel === 'template' && (
+            <div className="absolute left-0 top-full z-40 mt-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-2 shadow-xl max-md:bottom-full max-md:top-auto max-md:mb-1 max-md:mt-0">
+              <div className="mb-1 px-1 text-xs font-semibold text-[#d1d4dc]">
+                範本
+              </div>
+              {(templates[selected.name] ?? []).length === 0 ? (
+                <div className="px-1 py-2 text-xs text-[#80858f]">
+                  尚未儲存範本
+                </div>
+              ) : (
+                <div className="max-h-48 overflow-y-auto">
+                  {(templates[selected.name] ?? []).map((tpl) => (
+                    <div
+                      key={tpl.name}
+                      className="flex items-center gap-1 rounded-sm px-1 py-1 hover:bg-white/10"
+                    >
+                      <button
+                        onClick={() => applyTemplate(tpl)}
+                        title={`套用範本 ${tpl.name}`}
+                        className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
+                      >
+                        <span
+                          className="block h-4 w-4 shrink-0 rounded-[2px]"
+                          style={{
+                            backgroundColor: hexToRgba(
+                              tpl.style.color,
+                              tpl.style.opacity,
+                            ),
+                          }}
+                        />
+                        <span className="truncate text-xs">{tpl.name}</span>
+                      </button>
+                      <button
+                        onClick={() => deleteTemplate(tpl.name)}
+                        title={`刪除範本 ${tpl.name}`}
+                        aria-label={`刪除範本 ${tpl.name}`}
+                        className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-[#ef5350] hover:bg-white/10"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-1 flex items-center gap-1 border-t border-[#2a2e39] pt-2">
+                <input
+                  value={templateName}
+                  onChange={(e) => setTemplateName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveTemplate();
+                  }}
+                  placeholder="範本名稱"
+                  aria-label="範本名稱"
+                  className="min-w-0 flex-1 rounded-sm border border-white/20 bg-transparent px-2 py-1.5 text-xs text-[#d1d4dc] placeholder:text-[#80858f] focus:border-[#2962ff] focus:outline-none"
+                />
+                <button
+                  onClick={saveTemplate}
+                  disabled={templateName.trim() === ''}
+                  className="shrink-0 rounded-sm bg-[#2962ff] px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+                >
+                  儲存
+                </button>
+              </div>
             </div>
           )}
           {openPanel === 'more' && (
