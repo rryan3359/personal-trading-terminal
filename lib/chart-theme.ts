@@ -326,6 +326,41 @@ export function registerRectangleOverlay(): void {
 let positionRegistered = false;
 
 /**
+ * Last rendered (entry, stop, target) per position overlay id.
+ * Used to tell an entry drag apart from a stop / target drag or a
+ * programmatic edit (dialog / restore / normalise). `target` is the
+ * stored 3rd point's value; it is undefined for legacy 2-point
+ * saves, whose target is derived from posRR and follows the entry
+ * on its own. Entries are tiny (three numbers) and only live for
+ * the page session; a deleted overlay's entry is simply never read
+ * again.
+ */
+const positionDragCache = new Map<
+  string,
+  { entry: number; stop: number; target: number | undefined }
+>();
+
+/**
+ * Overlay id the user is currently pressing/dragging (set by the
+ * controller's onPressedMoveStart, cleared on onPressedMoveEnd).
+ * The figure callback only translates a position on an entry drag
+ * while this is set: a dialog edit, restore or preset write changes
+ * the same points but is not a drag, so it must never translate.
+ * Only one overlay can be dragged at a time, so a single id is
+ * enough; a stale id is harmless because it only ever enables the
+ * translation for that one (deleted) overlay.
+ */
+let positionDraggingId: string | null = null;
+
+export function markPositionDragStart(id: string): void {
+  positionDraggingId = id;
+}
+
+export function markPositionDragEnd(id: string): void {
+  if (positionDraggingId === id) positionDraggingId = null;
+}
+
+/**
  * Mirror a position stop to the correct side of the entry at the same
  * distance (long: stop below the entry, short: stop above). A stop
  * already on the correct side is returned unchanged. Shared by the
@@ -407,7 +442,7 @@ export function registerPositionOverlays(): void {
         typeof ext.posRR === 'number' && ext.posRR > 0 ? ext.posRR : 2;
       const entry = p0.value;
       const stopRaw = p1.value;
-      const risk = Math.abs(entry - stopRaw);
+      let risk = Math.abs(entry - stopRaw);
       if (risk <= 0) return [];
       // The stop may never cross the entry line: a long's stop sits
       // below the entry, a short's above. A stop placed or dragged
@@ -417,9 +452,13 @@ export function registerPositionOverlays(): void {
       // corrected stop. (The write-back takes effect on the next
       // render; the draw-end normaliser in the controller corrects
       // the committed points immediately, so a freshly drawn
-      // position is never left with a raw stop.)
-      const stop = mirrorPositionStop(isLong, entry, stopRaw);
-      if (stop !== stopRaw) {
+      // position is never left with a raw stop.) `stopMirrored` is
+      // captured here because the whole-position translation below
+      // also changes `stop`, and the pixel computation further down
+      // must tell the two apart.
+      let stop = mirrorPositionStop(isLong, entry, stopRaw);
+      const stopMirrored = stop !== stopRaw;
+      if (stopMirrored) {
         p1.value = stop;
       }
       // The target is the 3rd point when present; legacy 2-point
@@ -445,11 +484,74 @@ export function registerPositionOverlays(): void {
         target = isLong ? entry + posRR * risk : entry - posRR * risk;
         rr = posRR;
       }
+      // ---- Whole-position drag (TV): dragging the entry point
+      // moves entry, stop and target together by the same price
+      // delta, so the risk distance and R:R are unchanged (the
+      // stats pill's quantity is unchanged; TP/SL P&L follow the
+      // entry). Detect it by comparing the stored points with the
+      // last rendered triple for this overlay, and only while the
+      // controller says this overlay is being dragged (a dialog
+      // edit / restore / preset write changes the same points but
+      // is not a drag, so it must never translate): only the entry
+      // moved -> entry drag -> translate stop/target by the same
+      // delta. Only the stop or only the target moved -> that
+      // point's own drag, leave the others alone. Several moved at
+      // once (dialog edit / restore / normalise / whole-overlay
+      // body drag) -> cache only, no translation. The write-back
+      // takes effect on the next render, the same pattern as the
+      // mirror write-backs above; a translation preserves the
+      // entry-stop and entry-target distances, so the mirrors above
+      // stay no-ops for it.
+      const dragPrev = positionDragCache.get(overlay.id);
+      if (dragPrev !== undefined && positionDraggingId === overlay.id) {
+        const entryMoved = entry !== dragPrev.entry;
+        const stopMoved = stop !== dragPrev.stop;
+        const targetMoved = p2?.value !== dragPrev.target;
+        if (entryMoved && !stopMoved && !targetMoved) {
+          const delta = entry - dragPrev.entry;
+          const movedStop = stop + delta;
+          p1.value = movedStop;
+          stop = movedStop;
+          // Risk is unchanged by the translation (entry and stop
+          // moved by the same delta); recompute it first so the
+          // legacy 2-point derived target below uses the right
+          // value.
+          risk = Math.abs(entry - stop);
+          if (p2?.value !== undefined) {
+            const movedTarget = target + delta;
+            p2.value = movedTarget;
+            target = movedTarget;
+          } else {
+            // Legacy 2-point: the target is derived from entry +
+            // posRR * risk, so it follows the entry on its own
+            // once risk is recomputed.
+            target = isLong
+              ? entry + posRR * risk
+              : entry - posRR * risk;
+          }
+          rr = Math.abs(target - entry) / risk;
+        }
+      }
+      positionDragCache.set(overlay.id, {
+        entry,
+        stop,
+        target: p2?.value,
+      });
       const entryY = coordinates[0].y;
-      // Pixel y of the (possibly mirrored) stop: mirror the raw stop
-      // pixel across the entry line to match the corrected value.
-      const stopY =
-        stop !== stopRaw ? 2 * entryY - coordinates[1].y : coordinates[1].y;
+      // Pixel y of the (possibly mirrored) stop. The mirror case
+      // reflects the raw stop pixel across the entry line (existing
+      // behaviour). After a whole-position translation the stop
+      // moved by the same delta as the entry, so its pixel is the
+      // raw stop pixel rescaled by the (translated stop - entry) /
+      // (raw stop - entry) ratio — which reduces to the raw pixel
+      // when nothing was translated. `stopMirrored` (not
+      // `stop !== stopRaw`) is the test, because a translation also
+      // makes `stop` differ from `stopRaw` without mirroring.
+      const stopY = stopMirrored
+        ? 2 * entryY - coordinates[1].y
+        : entryY +
+          ((stop - entry) / (stopRaw - entry)) *
+            (coordinates[1].y - entryY);
       // Pixel y for a price, linearly interpolated/extrapolated from
       // the entry→stop segment (works whichever side stop is on).
       const yFor = (price: number) =>

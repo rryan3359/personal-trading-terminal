@@ -75,6 +75,8 @@ import {
   isPatternTool,
   isPitchforkTool,
   isPositionTool,
+  markPositionDragEnd,
+  markPositionDragStart,
   mirrorPositionStop,
   mirrorPositionTarget,
   pitchExtendOf,
@@ -1058,6 +1060,13 @@ export function createDrawingController(
       onPressedMoveStart: (e) => {
         if (deps.restoringRef.current) return;
         if (saved.name === MEASURE_NAME) return;
+        // Position tools: mark the drag so the figure callback can
+        // tell an entry drag (whole-position move) apart from a
+        // dialog edit / restore / preset write, which change the
+        // same points but must never translate.
+        if (isPositionTool(saved.name)) {
+          markPositionDragStart(e.overlay.id);
+        }
         // Record the pre-move snapshot; history is pushed at move end
         // only if the overlay actually moved. A plain click on a
         // drawing starts a press but moves nothing — pushing there
@@ -1087,6 +1096,12 @@ export function createDrawingController(
         );
       },
       onPressedMoveEnd: (e) => {
+        // Clear the drag mark first: the early returns below must
+        // not leave it set, or a later dialog edit on this overlay
+        // would be mistaken for a drag.
+        if (isPositionTool(saved.name)) {
+          markPositionDragEnd(e.overlay.id);
+        }
         if (deps.restoringRef.current || deps.suppressSaveRef.current) return;
         const snapshot = deps.history.takeMoveStartSnapshot();
         if (snapshot) {
