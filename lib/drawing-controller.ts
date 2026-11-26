@@ -75,6 +75,7 @@ import {
   isPatternTool,
   isPitchforkTool,
   isPositionTool,
+  mirrorPositionStop,
   pitchExtendOf,
   pitchOptionsOf,
   patternOptionsOf,
@@ -690,6 +691,32 @@ export function createDrawingController(
 
   // ---- overlay creation --------------------------------------------
 
+  /**
+   * Mirror a position overlay's stop to the correct side of its entry
+   * (see mirrorPositionStop): a long's stop sits below the entry, a
+   * short's above. Returns the points unchanged when the stop is
+   * already on the correct side. Used at every entry point so a stored
+   * position is never wrong-sided: the draw-end normaliser (the
+   * interactive draw commits the raw clicked point) and programmatic
+   * creation (restore / preset points).
+   */
+  const normalizePositionPoints = (
+    tool: DrawingTool,
+    points: Array<{ timestamp: number; value: number }>,
+  ): Array<{ timestamp: number; value: number }> => {
+    if (!isPositionTool(tool) || points.length < 2) return points;
+    const fixed = mirrorPositionStop(
+      tool === 'longPosition',
+      points[0].value,
+      points[1].value,
+    );
+    if (fixed === points[1].value) return points;
+    return [
+      points[0],
+      { timestamp: points[1].timestamp, value: fixed },
+    ];
+  };
+
   const overlayCreate = (saved: SavedOverlay): OverlayCreate => {
     const style = saved.styles ?? deps.getLastOverlayStyle();
     const ext: Record<string, unknown> = { ...(saved.extendData ?? {}) };
@@ -833,6 +860,32 @@ export function createDrawingController(
       },
       onDrawEnd: (e) => {
         if (deps.restoringRef.current) return;
+        // Position tools: the interactive draw commits the raw
+        // clicked stop, and the figure callback only corrects it on
+        // the next render, so a freshly drawn position could be
+        // persisted with a wrong-side stop and render its handle on
+        // the wrong side. Correct the committed points here, before
+        // the persist below (overrideOverlay repaints, so the handle
+        // snaps to the corrected stop immediately).
+        if (isPositionTool(e.overlay.name)) {
+          const pts = e.overlay.points;
+          if (
+            pts.length >= 2 &&
+            pts[0].value !== undefined &&
+            pts[1].value !== undefined
+          ) {
+            const fixed = normalizePositionPoints(
+              e.overlay.name as DrawingTool,
+              pts as Array<{ timestamp: number; value: number }>,
+            );
+            if (fixed !== pts) {
+              e.chart.overrideOverlay({
+                id: e.overlay.id,
+                points: fixed,
+              });
+            }
+          }
+        }
         // G-11: the draw succeeded, so the arm's pre-draw history
         // push stays (a later cancel must not pop it back).
         deps.history.confirmArmPush();
@@ -1052,7 +1105,9 @@ export function createDrawingController(
     const draft: SavedOverlay = {
       id: '',
       name: tool,
-      points: presetPoints ?? [],
+      points: presetPoints
+        ? normalizePositionPoints(tool, presetPoints)
+        : [],
       styles: {
         color: style.color,
         size: style.size,

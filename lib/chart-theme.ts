@@ -320,15 +320,34 @@ const POS_RISK = '#ef5350';
 let positionRegistered = false;
 
 /**
+ * Mirror a position stop to the correct side of the entry at the same
+ * distance (long: stop below the entry, short: stop above). A stop
+ * already on the correct side is returned unchanged. Shared by the
+ * figure callback (live, during drags) and the draw-end normaliser
+ * (committed points + persistence).
+ */
+export function mirrorPositionStop(
+  isLong: boolean,
+  entry: number,
+  stop: number,
+): number {
+  if (isLong) return stop > entry ? entry - (stop - entry) : stop;
+  return stop < entry ? entry + (entry - stop) : stop;
+}
+
+/**
  * Register the custom "longPosition" / "shortPosition" overlays once
  * per page load. Two points: p0 = entry, p1 = stop. The take-profit
  * is derived: TP = entry ± posRR × |entry − stop| (extendData.posRR,
  * default 2 — i.e. 1:2R), on the profit side of the entry; the risk
  * zone spans entry → stop. The box's horizontal extent is p0.x → p1.x.
- * Zones are fixed green/red (the overlay line colour drives the entry
- * line only); dragging either control point (entry or stop) updates
- * the zones and labels live. Labels: TP + SL with prices and R
- * multiples (right), entry price (left).
+ * The stop may never cross the entry line (long: below, short: above);
+ * a stop placed or dragged onto the wrong side is mirrored to the
+ * correct side at the same distance. Zones are fixed green/red (the
+ * overlay line colour drives the entry line only); dragging either
+ * control point (entry or stop) updates the zones and labels live.
+ * Labels: TP + SL with prices and R multiples (right), entry price
+ * (left).
  */
 export function registerPositionOverlays(): void {
   if (positionRegistered) return;
@@ -349,12 +368,29 @@ export function registerPositionOverlays(): void {
       const rr =
         typeof ext.posRR === 'number' && ext.posRR > 0 ? ext.posRR : 2;
       const entry = p0.value;
-      const stop = p1.value;
-      const risk = Math.abs(entry - stop);
+      const stopRaw = p1.value;
+      const risk = Math.abs(entry - stopRaw);
       if (risk <= 0) return [];
+      // The stop may never cross the entry line: a long's stop sits
+      // below the entry, a short's above. A stop placed or dragged
+      // onto the wrong side is mirrored to the correct side at the
+      // same distance, and written back so the point, the drag
+      // handle, the axis marks and persistence all converge on the
+      // corrected stop. TP depends only on |risk| and direction, so
+      // it is unaffected by the mirror. (The write-back takes effect
+      // on the next render; the draw-end normaliser in the controller
+      // corrects the committed points immediately, so a freshly
+      // drawn position is never left with a raw stop.)
+      const stop = mirrorPositionStop(isLong, entry, stopRaw);
+      if (stop !== stopRaw) {
+        p1.value = stop;
+      }
       const tp = isLong ? entry + rr * risk : entry - rr * risk;
       const entryY = coordinates[0].y;
-      const stopY = coordinates[1].y;
+      // Pixel y of the (possibly mirrored) stop: mirror the raw stop
+      // pixel across the entry line to match the corrected value.
+      const stopY =
+        stop !== stopRaw ? 2 * entryY - coordinates[1].y : coordinates[1].y;
       // Pixel y for a price, linearly interpolated/extrapolated from
       // the entry→stop segment (works whichever side stop is on).
       const yFor = (price: number) =>
