@@ -12,10 +12,14 @@
  * opens the watchlist drawer.
  *
  * The bar scrolls horizontally on narrow screens instead of wrapping.
+ * The three dropdown menus are fixed-positioned and anchored to their
+ * buttons: the header's overflow-x-auto would clip absolutely positioned
+ * menus that extend below the 40px bar (they opened in state but painted
+ * zero pixels, so chart-type / indicators looked unclickable).
  * Magnet and clear live in the left vertical DrawingBar.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { INTERVALS, INTERVAL_LABELS, type Interval } from '@/lib/types';
 import {
   CHART_TYPES,
@@ -115,6 +119,38 @@ export default function Toolbar({
   const [indicatorsOpen, setIndicatorsOpen] = useState(false);
   const [chartTypeOpen, setChartTypeOpen] = useState(false);
   const [symbolOpen, setSymbolOpen] = useState(false);
+  // Fixed menu anchor: viewport position of the button that opened the
+  // menu (clamped so the menu stays inside the viewport). Set together
+  // with the open flag, cleared together with it.
+  const symbolBtnRef = useRef<HTMLButtonElement | null>(null);
+  const chartTypeBtnRef = useRef<HTMLButtonElement | null>(null);
+  const indicatorsBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ left: number; top: number } | null>(null);
+  const closeAllMenus = useCallback(() => {
+    setSymbolOpen(false);
+    setChartTypeOpen(false);
+    setIndicatorsOpen(false);
+    setMenuAnchor(null);
+  }, []);
+  const openMenuAt = (btn: HTMLButtonElement | null, width: number) => {
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+    setMenuAnchor({ left, top: r.bottom + 4 });
+  };
+  useEffect(() => {
+    if (!symbolOpen && !chartTypeOpen && !indicatorsOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeAllMenus();
+    };
+    const onResize = () => closeAllMenus();
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [symbolOpen, chartTypeOpen, indicatorsOpen, closeAllMenus]);
   const [query, setQuery] = useState('');
   const [highlight, setHighlight] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -127,6 +163,7 @@ export default function Toolbar({
 
   const pickSymbol = (next: string) => {
     setSymbolOpen(false);
+    setMenuAnchor(null);
     setQuery('');
     setHighlight(0);
     onSelectSymbol(next);
@@ -145,7 +182,7 @@ export default function Toolbar({
         pickSymbol(results[highlight].symbol);
       }
     } else if (e.key === 'Escape') {
-      setSymbolOpen(false);
+      closeAllMenus();
     }
   };
 
@@ -153,7 +190,7 @@ export default function Toolbar({
     CHART_TYPES.find((t) => t.id === chartType)?.label ?? '蠟燭圖';
 
   return (
-    <header className="flex h-10 shrink-0 items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-[#2a2e39] bg-[#131722] px-3">
+    <header onScroll={closeAllMenus} className="flex h-10 shrink-0 items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-[#2a2e39] bg-[#131722] px-3">
       <button
         onClick={onOpenWatchlist}
         className="shrink-0 rounded px-2 py-1 text-xs text-[#b2b5be] hover:bg-[#1e222d] hover:text-white md:hidden"
@@ -163,8 +200,16 @@ export default function Toolbar({
 
       <div className="relative shrink-0">
         <button
+          ref={symbolBtnRef}
           onClick={() => {
-            setSymbolOpen((open) => !open);
+            if (symbolOpen) {
+              closeAllMenus();
+            } else {
+              setChartTypeOpen(false);
+              setIndicatorsOpen(false);
+              openMenuAt(symbolBtnRef.current, 256);
+              setSymbolOpen(true);
+            }
             setQuery('');
             setHighlight(0);
             if (!symbolOpen) {
@@ -176,13 +221,13 @@ export default function Toolbar({
         >
           {symbol} ▾
         </button>
-        {symbolOpen && (
+        {symbolOpen && menuAnchor && (
           <>
             <div
-              className="fixed inset-0 z-10"
-              onClick={() => setSymbolOpen(false)}
+              className="fixed inset-0 z-40"
+              onClick={closeAllMenus}
             />
-            <div className="absolute left-0 top-full z-20 mt-1 w-64 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg">
+            <div className="fixed z-50 w-64 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
               <input
                 ref={inputRef}
                 value={query}
@@ -254,24 +299,34 @@ export default function Toolbar({
 
       <div className="relative shrink-0">
         <button
-          onClick={() => setChartTypeOpen((open) => !open)}
+          ref={chartTypeBtnRef}
+          onClick={() => {
+            if (chartTypeOpen) {
+              closeAllMenus();
+            } else {
+              setSymbolOpen(false);
+              setIndicatorsOpen(false);
+              openMenuAt(chartTypeBtnRef.current, 112);
+              setChartTypeOpen(true);
+            }
+          }}
           className="text-xs text-[#b2b5be] hover:text-white"
         >
           {chartTypeLabel} ▾
         </button>
-        {chartTypeOpen && (
+        {chartTypeOpen && menuAnchor && (
           <>
             <div
-              className="fixed inset-0 z-10"
-              onClick={() => setChartTypeOpen(false)}
+              className="fixed inset-0 z-40"
+              onClick={closeAllMenus}
             />
-            <div className="absolute left-0 top-full z-20 mt-1 w-28 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg">
+            <div className="fixed z-50 w-28 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
               {CHART_TYPES.map((t) => (
                 <button
                   key={t.id}
                   onClick={() => {
                     onChartTypeChange(t.id);
-                    setChartTypeOpen(false);
+                    closeAllMenus();
                   }}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[#d1d4dc] hover:bg-[#2a2e39]"
                 >
@@ -288,18 +343,28 @@ export default function Toolbar({
 
       <div className="relative shrink-0">
         <button
-          onClick={() => setIndicatorsOpen((open) => !open)}
+          ref={indicatorsBtnRef}
+          onClick={() => {
+            if (indicatorsOpen) {
+              closeAllMenus();
+            } else {
+              setSymbolOpen(false);
+              setChartTypeOpen(false);
+              openMenuAt(indicatorsBtnRef.current, 144);
+              setIndicatorsOpen(true);
+            }
+          }}
           className="text-xs text-[#b2b5be] hover:text-white"
         >
           ƒx 指標
         </button>
-        {indicatorsOpen && (
+        {indicatorsOpen && menuAnchor && (
           <>
             <div
-              className="fixed inset-0 z-10"
-              onClick={() => setIndicatorsOpen(false)}
+              className="fixed inset-0 z-40"
+              onClick={closeAllMenus}
             />
-            <div className="absolute left-0 top-full z-20 mt-1 w-36 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg">
+            <div className="fixed z-50 w-36 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
               {INDICATOR_OPTIONS.map((ind) => {
                 const on = indicators.includes(ind.id);
                 return (
