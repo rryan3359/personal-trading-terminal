@@ -41,7 +41,12 @@ import DrawingBar from '@/components/DrawingBar';
 import Watchlist from '@/components/Watchlist';
 import RangeBar from '@/components/RangeBar';
 import StatusBar from '@/components/StatusBar';
+import ChartAppearanceDialog from '@/components/ChartAppearanceDialog';
 import type { ChartHandle } from '@/components/Chart';
+import {
+  DEFAULT_APPEARANCE,
+  type AppearanceSettings,
+} from '@/lib/chart-appearance';
 import {
   DEFAULT_CHART_TYPE,
   DEFAULT_INDICATORS,
@@ -54,7 +59,7 @@ import {
 // load in the browser. The page itself still prerenders (toolbar +
 // watchlist); the chart mounts on hydration.
 const Chart = dynamic(() => import('@/components/Chart'), { ssr: false });
-import { STORAGE_KEYS, loadJSON, loadString, saveJSON, saveString } from '@/lib/store';
+import { STORAGE_KEYS, getChartAppearance, loadJSON, loadString, saveChartAppearance, saveJSON, saveString } from '@/lib/store';
 import { fetchSymbolList, isKnownSymbol, type SymbolInfo } from '@/lib/symbols';
 import type { Interval } from '@/lib/types';
 import { isInterval } from '@/lib/types';
@@ -76,6 +81,11 @@ export default function Home() {
   const [canRedo, setCanRedo] = useState(false);
   const [indicators, setIndicators] = useState<string[]>(DEFAULT_INDICATORS);
   const [chartType, setChartType] = useState<ChartType>(DEFAULT_CHART_TYPE);
+  /** Chart appearance (colors, grid, axis font size) — one shared
+   *  state for desktop + mobile, persisted in localStorage. */
+  const [appearance, setAppearance] =
+    useState<AppearanceSettings>(DEFAULT_APPEARANCE);
+  const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
   const [activeRange, setActiveRange] = useState<RangeId | null>(null);
   const [connectionStatus, setConnectionStatus] =
     useState<BinanceSocketStatus>('closed');
@@ -116,6 +126,7 @@ export default function Home() {
     setChartType(
       savedChartType === 'area' ? 'area' : DEFAULT_CHART_TYPE,
     );
+    setAppearance(getChartAppearance());
     setHydrated(true);
     // Validate the restored list against the real Binance universe once
     // it loads. A failed fetch leaves the stored list untouched.
@@ -163,6 +174,10 @@ export default function Home() {
     if (!hydrated) return;
     saveString(STORAGE_KEYS.chartType, chartType);
   }, [chartType, hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
+    saveChartAppearance(appearance);
+  }, [appearance, hydrated]);
 
   // A symbol / interval change reloads the chart, so any range fit
   // from before no longer applies. Reset in the change handlers
@@ -259,6 +274,7 @@ export default function Home() {
         onRedo={() => chartRef.current?.redo()}
         canUndo={canUndo}
         canRedo={canRedo}
+        onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
       />
       <div className="flex min-h-0 flex-1">
         <DrawingBar
@@ -276,6 +292,8 @@ export default function Home() {
               onToolDone={() => setActiveTool(null)}
               indicators={indicators}
               chartType={chartType}
+              appearance={appearance}
+              onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
               onConnectionStatus={setConnectionStatus}
               onLastTick={setLastTickAt}
               continuousDraw={drawContinuous}
@@ -316,6 +334,13 @@ export default function Home() {
           onCloseMobile={() => setMobileWatchlistOpen(false)}
         />
       </div>
+      {appearanceDialogOpen && (
+        <ChartAppearanceDialog
+          initial={appearance}
+          onChange={setAppearance}
+          onClose={() => setAppearanceDialogOpen(false)}
+        />
+      )}
     </div>
   );
 }

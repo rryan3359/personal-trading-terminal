@@ -15,23 +15,26 @@ import { COLOR_PALETTE_GRID } from '@/lib/chart-config';
 export interface ColorPickerProps {
   /** Current line color, hex (#rrggbb). */
   color: string;
-  /** Current line opacity, 0–1. */
-  opacity: number;
+  /** Current line opacity, 0–1. Defaults to 1 when omitted. */
+  opacity?: number;
   onColorChange: (hex: string) => void;
-  onOpacityChange: (opacity: number) => void;
+  onOpacityChange?: (opacity: number) => void;
   /** Fired once at the start of an opacity drag / number focus. */
   onOpacityStart?: () => void;
   /** Fired when the opacity drag / number edit ends. */
   onOpacityEnd?: () => void;
+  /** Hide the opacity slider (appearance settings use opaque colors). */
+  showOpacity?: boolean;
 }
 
 export default function ColorPicker({
   color,
-  opacity,
+  opacity = 1,
   onColorChange,
   onOpacityChange,
   onOpacityStart,
   onOpacityEnd,
+  showOpacity = true,
 }: ColorPickerProps) {
   const pct = Math.round(opacity * 100);
   const lower = color.toLowerCase();
@@ -64,6 +67,7 @@ export default function ColorPicker({
         <span className="text-[#b2b5be]">自訂色</span>
         <span className="ml-auto font-mono uppercase">{lower}</span>
       </div>
+      {showOpacity && (
       <div className="mt-2 flex items-center gap-2">
         <span className="shrink-0 text-[#b2b5be]">不透明度</span>
         <input
@@ -77,7 +81,7 @@ export default function ColorPicker({
           onPointerUp={onOpacityEnd}
           onBlur={onOpacityEnd}
           onChange={(e) =>
-            onOpacityChange(Math.max(0, Math.min(100, Number(e.target.value))) / 100)
+            onOpacityChange?.(Math.max(0, Math.min(100, Number(e.target.value))) / 100)
           }
           className="min-w-0 flex-1 accent-[#2962ff]"
         />
@@ -92,12 +96,13 @@ export default function ColorPicker({
           onChange={(e) => {
             const v = Number(e.target.value);
             if (Number.isNaN(v)) return;
-            onOpacityChange(Math.max(0, Math.min(100, v)) / 100);
+            onOpacityChange?.(Math.max(0, Math.min(100, v)) / 100);
           }}
           className="w-14 rounded border border-[#2a2e39] bg-[#131722] px-1 py-0.5 text-right text-[#d1d4dc]"
         />
         <span className="text-[#b2b5be]">%</span>
       </div>
+      )}
     </div>
   );
 }

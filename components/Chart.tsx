@@ -36,7 +36,6 @@
 
 import {
   forwardRef,
-  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -49,7 +48,6 @@ import {
   dispose,
   init,
   type Chart,
-  type Crosshair,
   type DataLoader,
   type DeepPartial,
   type KLineData,
@@ -61,7 +59,7 @@ import {
 } from 'klinecharts';
 import type { Interval, Kline } from '@/lib/types';
 import { INTERVAL_LABELS } from '@/lib/types';
-import { formatCountdown, formatPrice } from '@/lib/format';
+import { formatPrice } from '@/lib/format';
 import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
 import {
   DARK_STYLES,
@@ -94,6 +92,7 @@ import ColorPicker from '@/components/ColorPicker';
 import ChartContextMenu, {
   type ContextMenuItem,
 } from '@/components/ChartContextMenu';
+import ChartLegend from '@/components/ChartLegend';
 import ObjectList, {
   type ObjectListBatchAction,
   type ObjectListItem,
@@ -119,6 +118,15 @@ import {
   type LineStyleId,
   type RangeId,
 } from '@/lib/chart-config';
+import {
+  createCrosshairController,
+  type CrosshairController,
+} from '@/lib/chart-crosshair';
+import {
+  buildAppearanceStyles,
+  type AppearanceSettings,
+} from '@/lib/chart-appearance';
+import { DrawingHistoryManager } from '@/lib/drawing-history';
 import {
   DEFAULT_OVERLAY_STYLE,
   DEFAULT_OVERLAY_TEXT,
@@ -162,6 +170,13 @@ export interface ChartProps {
   indicators: string[];
   /** Candle render style: 蠟燭圖 / 美國線 / 面積圖. */
   chartType: ChartType;
+  /** User-customisable chart appearance (colors, grid, axis font
+   *  size). Owned by the page (shared desktop + mobile, persisted
+   *  in localStorage); applied via setStyles on change. */
+  appearance: AppearanceSettings;
+  /** Open the chart appearance dialog (toolbar gear, chart-corner
+   *  gear, context menu). */
+  onOpenAppearanceSettings?: () => void;
   onConnectionStatus?: (status: BinanceSocketStatus) => void;
   /**
    * Called when a live tick arrives (throttled to at most once per
@@ -202,7 +217,12 @@ function isMainPaneIndicator(name: string): boolean {
   return INDICATOR_OPTIONS.find((o) => o.id === name)?.mainPane ?? false;
 }
 
-const MAX_HISTORY = 50;
+// klinecharts 10.1.1 PaneIdConstants.CANDLE (index.esm.js:845).
+// Main-pane indicators must be created with this paneId: createIndicator
+// mints a fresh indicator_pane_* whenever paneId is absent
+// (index.esm.js:15702), so a bare name always opens a new sub-pane.
+const CANDLE_PANE_ID = 'candle_pane';
+
 const MEASURE_NAME = 'measure';
 /**
  * Range the context menu's 重設圖表檢視 restores. No default-range
@@ -781,239 +801,7 @@ function normalizeZLevels(list: SavedOverlay[]): SavedOverlay[] {
   return list.map((o) => ({ ...o, zLevel: rank.get(o.id) ?? 0 }));
 }
 
-/**
- * Hover target published by the crosshair throttle (Phase 1 step 2a):
- * the candle under the crosshair, or null when the mouse is off the
- * chart. The index is into the chart's current data list.
- */
-interface HoverTarget {
-  kline: KLineData | null;
-  index: number | null;
-}
 
-interface CandleCountdownProps {
-  /** Close time of the last candle (ms), or null when no data. */
-  lastCloseMs: number | null;
-  /** Open time of the last candle (ms), or null when no data. */
-  candleOpenMs: number | null;
-}
-
-/**
- * Candle-close countdown (Phase 1 step 2c). Owns its own 1-second
- * tick in local state: the tick re-renders only this tiny span, never
- * Chart or the legend. The countdown is always about the LAST candle
- * closing, never the hovered one.
- */
-const CandleCountdown = memo(function CandleCountdown({
-  lastCloseMs,
-  candleOpenMs,
-}: CandleCountdownProps) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const countdownRemainingMs =
-    lastCloseMs !== null ? lastCloseMs - nowMs : null;
-  // Stale when the close already passed (socket down, no live tick) or
-  // the clock sits before the candle opened: show '—', never a bogus time.
-  const countdownText =
-    countdownRemainingMs !== null &&
-    lastCloseMs !== null &&
-    candleOpenMs !== null &&
-    countdownRemainingMs > 0 &&
-    countdownRemainingMs <= lastCloseMs - candleOpenMs
-      ? formatCountdown(countdownRemainingMs)
-      : '—';
-  return (
-    <span
-      className="ml-2 font-normal tabular-nums text-[#ffa726]"
-      data-testid="candle-countdown"
-    >
-      收線 {countdownText}
-    </span>
-  );
-});
-
-interface ChartLegendProps {
-  symbol: string;
-  interval: Interval;
-  /** Indicator names currently enabled, e.g. ["MA", "VOL"]. */
-  indicators: string[];
-  /** Last loaded / live candle (legend fallback when not hovering). */
-  lastKline: KLineData | null;
-  loadError: string | null;
-  /** Stable accessor for the chart instance (reads Chart's own ref
-   * inside the callback, never a ref read during Legend's render). */
-  getChart: () => Chart | null;
-  subscribeHover: (fn: (t: HoverTarget) => void) => () => void;
-}
-
-/**
- * Top-left legend (OHLC + indicator values + candle countdown),
- * extracted from Chart in Phase 1 step 2b as an independent memoized
- * component. It owns the hover state: the crosshair throttle publishes
- * to it through `subscribeHover`, so a hover update re-renders only
- * this small subtree — never the whole Chart. It re-renders only when
- * its props change (symbol / interval / indicators / lastKline /
- * loadError) or the hover target changes.
- */
-const ChartLegend = memo(function ChartLegend({
-  symbol,
-  interval,
-  indicators,
-  lastKline,
-  loadError,
-  getChart,
-  subscribeHover,
-}: ChartLegendProps) {
-  // Hover starts empty: no crosshair event can precede this mount,
-  // and symbol switches clear it through the subscription below.
-  const [hover, setHover] = useState<HoverTarget>({
-    kline: null,
-    index: null,
-  });
-  useEffect(() => subscribeHover(setHover), [subscribeHover]);
-
-  // Legend candle: the hovered candle while the crosshair is on the
-  // chart, otherwise the last candle. Its change is vs its own open.
-  const legendKline = hover.kline ?? lastKline;
-  const legendChangePct =
-    legendKline !== null && legendKline.open !== 0
-      ? ((legendKline.close - legendKline.open) / legendKline.open) * 100
-      : 0;
-
-  // ---- candle countdown (TradingView-style) -------------------------
-  // Always for the LAST candle, not the hovered one: the countdown is
-  // about the live bar closing. Close of the candle's interval: 1M is
-  // the 1st of next month UTC (INTERVAL_MS['1M'] is only a 30-day
-  // approximation); every other interval is open + its fixed span.
-  // The ticking text itself lives in CandleCountdown (step 2c), so the
-  // 1-second tick never re-renders this legend or Chart.
-  const lastCloseMs =
-    lastKline !== null
-      ? interval === '1M'
-        ? Date.UTC(
-            new Date(lastKline.timestamp).getUTCFullYear(),
-            new Date(lastKline.timestamp).getUTCMonth() + 1,
-            1,
-          )
-        : lastKline.timestamp + (INTERVAL_MS[interval] ?? 0)
-      : null;
-
-  // ---- legend indicator values ---------------------------------------
-  // Read straight from klinecharts' own computed results (never
-  // re-computed here, so the numbers always match the drawn lines).
-  // result[i] holds the indicator's values for dataList[i]; each
-  // figure is one line keyed into that row. Line colours come from
-  // the theme (styles.indicator.lines[i], verified at runtime); the
-  // volume bar takes the candle's up/down colour, like the drawn bar.
-  const legendChart = getChart();
-  const legendIndex =
-    hover.index ??
-    (legendChart ? legendChart.getDataList().length - 1 : -1);
-  const legendIndicators: Array<{
-    name: string;
-    values: Array<{ label: string; text: string; color: string }>;
-  }> = (() => {
-    const chart = legendChart;
-    if (!chart || legendIndex < 0) return [];
-    const list = chart.getDataList();
-    if (legendIndex >= list.length) return [];
-    const lineColors = chart.getStyles().indicator?.lines ?? [];
-    const rows: Array<{
-      name: string;
-      values: Array<{ label: string; text: string; color: string }>;
-    }> = [];
-    for (const ind of chart.getIndicators()) {
-      if (!indicators.includes(ind.name)) continue;
-      const row = ind.result?.[legendIndex] as
-        | Record<string, unknown>
-        | undefined;
-      if (!row) continue;
-      const values: Array<{ label: string; text: string; color: string }> =
-        [];
-      for (let fi = 0; fi < ind.figures.length; fi += 1) {
-        const fig = ind.figures[fi];
-        const v = row[fig.key];
-        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-        let text: string;
-        if (ind.shouldFormatBigNumber) {
-          // klinecharts' formatBigNumber only compacts >= 1000 (1.23K);
-          // below that it returns the raw float, so format small
-          // volumes to 2 decimals ourselves.
-          text =
-            Math.abs(v) >= 1000
-              ? chart.getFormatter().formatBigNumber(v)
-              : v.toFixed(2);
-        } else if (ind.series === 'price') {
-          text = formatPrice(v);
-        } else {
-          text = v.toFixed(2);
-        }
-        const color =
-          fig.type === 'bar'
-            ? legendChangePct >= 0
-              ? '#26a69a'
-              : '#ef5350'
-            : (lineColors[fi]?.color ?? '#b2b5be');
-        values.push({
-          label: (fig.title ?? fig.key).replace(/:\s*$/, ''),
-          text,
-          color,
-        });
-      }
-      if (values.length > 0) {
-        rows.push({ name: ind.shortName || ind.name, values });
-      }
-    }
-    return rows;
-  })();
-
-  if (legendKline === null || loadError !== null) return null;
-  return (
-    <div className="pointer-events-none absolute left-2 top-2 z-10 leading-relaxed">
-      <div className="text-xs font-semibold text-white">
-        {symbol} · {INTERVAL_LABELS[interval]} · Binance
-        <CandleCountdown
-          lastCloseMs={lastCloseMs}
-          candleOpenMs={lastKline?.timestamp ?? null}
-        />
-      </div>
-      <div className="text-[11px] text-[#b2b5be]">
-        開 {formatPrice(legendKline.open)} 高 {formatPrice(legendKline.high)}{' '}
-        低 {formatPrice(legendKline.low)} 收{' '}
-        <span
-          className={
-            legendChangePct >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
-          }
-        >
-          {formatPrice(legendKline.close)}{' '}
-          {legendChangePct >= 0 ? '+' : ''}
-          {legendChangePct.toFixed(2)}%
-        </span>
-      </div>
-      {legendIndicators.map((row) => (
-        <div
-          key={row.name}
-          className="text-[11px]"
-          data-testid={`legend-indicator-${row.name}`}
-        >
-          <span className="text-[#787b86]">{row.name} </span>
-          {row.values.map((v) => (
-            <span
-              key={v.label}
-              className="tabular-nums"
-              style={{ color: v.color }}
-            >
-              {v.label} {v.text}{' '}
-            </span>
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-});
 
 const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   {
@@ -1023,6 +811,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     onToolDone,
     indicators,
     chartType,
+    appearance,
+    onOpenAppearanceSettings,
     onConnectionStatus,
     onLastTick,
     continuousDraw = false,
@@ -1047,6 +837,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const activeToolRef = useRef(activeTool);
   const continuousDrawRef = useRef(continuousDraw);
   const onHistoryChangeRef = useRef(onHistoryChange);
+  /** Latest appearance for the one-time init (the init effect runs
+   *  once; later changes go through the appearance effect below). */
+  const appearanceRef = useRef(appearance);
+  const onOpenAppearanceSettingsRef = useRef(onOpenAppearanceSettings);
   symbolRef.current = symbol;
   intervalRef.current = interval;
   onToolDoneRef.current = onToolDone;
@@ -1055,6 +849,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   activeToolRef.current = activeTool;
   continuousDrawRef.current = continuousDraw;
   onHistoryChangeRef.current = onHistoryChange;
+  appearanceRef.current = appearance;
+  onOpenAppearanceSettingsRef.current = onOpenAppearanceSettings;
 
   const suppressSaveRef = useRef(false);
   /** True while restoreDrawings / applySnapshot rebuilds overlays. */
@@ -1066,12 +862,6 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
    * stored drawings with an empty live list.
    */
   const lastRestoredKeyRef = useRef<string | null>(null);
-  /**
-   * G-11: true while an interactive arm's pre-draw history push is
-   * still pending. Set when armOverlay pushes, cleared on draw end;
-   * discarding the unfinished draw pops that push back.
-   */
-  const pendingArmPushRef = useRef(false);
   /**
    * G-05: true once the stored drawings JSON was found corrupt, so
    * the console warning is logged once per session (the write itself
@@ -1317,75 +1107,37 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   /** Last loaded / live candle, shown in the top-left legend overlay. */
   const [lastKline, setLastKline] = useState<KLineData | null>(null);
   /**
-   * Candle under the crosshair, or null when the mouse is off the
-   * chart. The legend shows this while hovering (TradingView-style)
-   * and falls back to the last candle otherwise. Step 2b: the hover
-   * target lives in `hoverRef` + ChartLegend's own state, not in
-   * Chart state — a hover update must not re-render Chart.
+   * Crosshair hover state (Phase 3 Step 1): owned by the
+   * CrosshairController in lib/chart-crosshair.ts (origin: Phase 1
+   * step 2a/2b). Chart holds a single instance in a ref; the legend
+   * subscribes through it, so a hover update never re-renders Chart.
+   * The init effect forwards onCrosshairChange to it; the container's
+   * onMouseLeave and the symbol/interval switch clear through it.
    */
+  const crosshairRef = useRef<CrosshairController | null>(null);
+  if (crosshairRef.current === null) {
+    crosshairRef.current = createCrosshairController(
+      () => chartRef.current,
+    );
+  }
+  const crosshair = crosshairRef.current;
   /**
-   * Phase 1 step 2a — crosshair throttling. The hover target lives in
-   * `hoverRef` (source of truth); `publishHover` pushes it to the
-   * legend listeners only when the target actually changed (same
-   * candle + same OHLCV values = no-op), and `scheduleHover`
-   * coalesces bursts to at most one publish per animation frame.
-   * The init effect's onCrosshairChange and the container's
-   * onMouseLeave are the only callers. Refs-only, so the callbacks
-   * are stable for the once-only init effect.
+   * Drawing undo/redo state (Phase 3 Step 2): owned by the
+   * DrawingHistoryManager in lib/drawing-history.ts. Chart holds a
+   * single instance in a ref; the thin wrappers below (pushHistory /
+   * cancelPendingArmPush / undo / redo) delegate to it, and
+   * applySnapshot stays here (it needs overlayCreate + the store +
+   * mode + the object list).
    */
-  const hoverRef = useRef<HoverTarget>({ kline: null, index: null });
-  /** Pending hover target awaiting the next rAF publish. */
-  const pendingHoverRef = useRef<HoverTarget | null>(null);
-  /** In-flight rAF id for hover publishing (0 = none scheduled). */
-  const hoverRafRef = useRef(0);
-  /** Legend hover listeners (ChartLegend subscribes; step 2b). */
-  const hoverListenersRef = useRef(new Set<(t: HoverTarget) => void>());
-  const subscribeHover = useCallback((fn: (t: HoverTarget) => void) => {
-    hoverListenersRef.current.add(fn);
-    return () => {
-      hoverListenersRef.current.delete(fn);
-    };
-  }, []);
+  const historyManagerRef = useRef<DrawingHistoryManager | null>(null);
+  if (historyManagerRef.current === null) {
+    historyManagerRef.current = new DrawingHistoryManager(
+      (canUndo, canRedo) => onHistoryChangeRef.current?.(canUndo, canRedo),
+    );
+  }
+  const historyManager = historyManagerRef.current;
   /** Stable chart accessor for the legend (step 2b). */
   const getChart = useCallback(() => chartRef.current, []);
-  const publishHover = useCallback((target: HoverTarget) => {
-    const prev = hoverRef.current;
-    if (
-      target.index === prev.index &&
-      target.kline?.timestamp === prev.kline?.timestamp &&
-      target.kline?.open === prev.kline?.open &&
-      target.kline?.high === prev.kline?.high &&
-      target.kline?.low === prev.kline?.low &&
-      target.kline?.close === prev.kline?.close &&
-      target.kline?.volume === prev.kline?.volume
-    ) {
-      return;
-    }
-    hoverRef.current = target;
-    hoverListenersRef.current.forEach((fn) => fn(target));
-  }, []);
-  const scheduleHover = useCallback(
-    (target: HoverTarget) => {
-      pendingHoverRef.current = target;
-      if (hoverRafRef.current !== 0) return;
-      hoverRafRef.current = requestAnimationFrame(() => {
-        hoverRafRef.current = 0;
-        const pending = pendingHoverRef.current;
-        pendingHoverRef.current = null;
-        if (pending) publishHover(pending);
-      });
-    },
-    [publishHover],
-  );
-  /** Mouse left the chart: drop any pending publish and clear hover. */
-  const clearHover = useCallback(() => {
-    if (hoverRafRef.current !== 0) {
-      cancelAnimationFrame(hoverRafRef.current);
-      hoverRafRef.current = 0;
-    }
-    pendingHoverRef.current = null;
-    publishHover({ kline: null, index: null });
-  }, [publishHover]);
   /**
    * Dev-only render counter for Phase 1 perf verification (CDP reads
    * window.__pttChartRenders). It runs after every commit of this
@@ -1412,6 +1164,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   );
   /** Whether the last init load delivered data (gates the live socket). */
   const initOkRef = useRef(true);
+  /**
+   * Data-load generation. Incremented once per symbol/interval switch
+   * (and once at first load); each getBars captures the epoch at fetch
+   * start and drops its response if a newer generation has begun, so a
+   * late response from the old symbol/interval can never overwrite the
+   * new one. F3 fix; moves with the DataLoader into ChartEngine (Step 8).
+   */
+  const loadEpochRef = useRef(0);
   const setSelectedState = (s: SelectedOverlayState | null) => {
     selectedRef.current = s;
     setSelected(s);
@@ -1635,29 +1395,14 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   };
 
   // ---- undo / redo -----------------------------------------------------
-
-  const undoStackRef = useRef<SavedOverlay[][]>([]);
-  const redoStackRef = useRef<SavedOverlay[][]>([]);
-  /** Pre-move snapshot, taken at press start and pushed at move end
-   *  only if the overlay actually moved (see onPressedMoveEnd). */
-  const moveStartSnapshotRef = useRef<SavedOverlay[] | null>(null);
-
-  const emitHistoryChange = () => {
-    onHistoryChangeRef.current?.(
-      undoStackRef.current.length > 0,
-      redoStackRef.current.length > 0,
-    );
-  };
+  // Stacks, the pending-arm flag and the pre-move snapshot live in
+  // the DrawingHistoryManager (lib/drawing-history.ts); these are
+  // thin wrappers over it. applySnapshot stays here (see below).
 
   const pushHistory = () => {
-    undoStackRef.current.push(
+    historyManager.push(
       readMergedList(symbolRef.current, intervalRef.current),
     );
-    if (undoStackRef.current.length > MAX_HISTORY) {
-      undoStackRef.current.shift();
-    }
-    redoStackRef.current = [];
-    emitHistoryChange();
   };
 
   /**
@@ -1666,10 +1411,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
    * tool switch, clear-all); a no-op once the draw has ended.
    */
   const cancelPendingArmPush = () => {
-    if (!pendingArmPushRef.current) return;
-    pendingArmPushRef.current = false;
-    undoStackRef.current.pop();
-    emitHistoryChange();
+    historyManager.cancelPendingArmPush();
   };
 
   /**
@@ -1819,25 +1561,19 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   };
 
   const undo = () => {
-    pendingArmPushRef.current = false;
-    const prev = undoStackRef.current.pop();
-    if (!prev) return;
-    redoStackRef.current.push(
+    const prev = historyManager.undo(
       readMergedList(symbolRef.current, intervalRef.current),
     );
+    if (!prev) return;
     applySnapshot(prev);
-    emitHistoryChange();
   };
 
   const redo = () => {
-    pendingArmPushRef.current = false;
-    const next = redoStackRef.current.pop();
-    if (!next) return;
-    undoStackRef.current.push(
+    const next = historyManager.redo(
       readMergedList(symbolRef.current, intervalRef.current),
     );
+    if (!next) return;
     applySnapshot(next);
-    emitHistoryChange();
   };
 
   // ---- overlay creation -------------------------------------------------
@@ -1987,7 +1723,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         if (restoringRef.current) return;
         // G-11: the draw succeeded, so the arm's pre-draw history
         // push stays (a later cancel must not pop it back).
-        pendingArmPushRef.current = false;
+        historyManager.confirmArmPush();
         persistDrawings(symbolRef.current, intervalRef.current);
         refreshObjectList();
         drawingIdRef.current = null;
@@ -2061,9 +1797,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         // only if the overlay actually moved. A plain click on a
         // drawing starts a press but moves nothing — pushing there
         // would silently consume one undo step.
-        moveStartSnapshotRef.current = readMergedList(
-          symbolRef.current,
-          intervalRef.current,
+        historyManager.setMoveStartSnapshot(
+          readMergedList(symbolRef.current, intervalRef.current),
         );
         // Mode: a press on an overlay starts a drag. The library
         // fires onSelected only on the click AFTER the drag (its
@@ -2088,8 +1823,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       },
       onPressedMoveEnd: (e) => {
         if (restoringRef.current || suppressSaveRef.current) return;
-        const snapshot = moveStartSnapshotRef.current;
-        moveStartSnapshotRef.current = null;
+        const snapshot = historyManager.takeMoveStartSnapshot();
         if (snapshot) {
           const before = snapshot.find((o) => o.id === e.overlay.id);
           const after = toSavedOverlay(e.overlay);
@@ -2098,12 +1832,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             after !== null &&
             JSON.stringify(before.points) !== JSON.stringify(after.points)
           ) {
-            undoStackRef.current.push(snapshot);
-            if (undoStackRef.current.length > MAX_HISTORY) {
-              undoStackRef.current.shift();
-            }
-            redoStackRef.current = [];
-            emitHistoryChange();
+            historyManager.push(snapshot);
           }
         }
         syncTextAnnotation(e.overlay.id);
@@ -2204,7 +1933,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       // G-11: this push belongs to the draw in progress; a cancel
       // pops it back. The preset path is a completed programmatic
       // create, so its push is never pending.
-      pendingArmPushRef.current = true;
+      historyManager.markArmPushPending();
     }
     const style = getLastOverlayStyle();
     const draft: SavedOverlay = {
@@ -3470,6 +3199,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       case 'reset-view':
         runMenuAction(() => applyRange(DEFAULT_RESET_RANGE));
         break;
+      case 'chart-settings':
+        runMenuAction(() => onOpenAppearanceSettingsRef.current?.());
+        break;
       case 'edit':
         if (menu.selectedId) {
           const selectedId = menu.selectedId;
@@ -3579,7 +3311,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     registerSimpleTagOverlay();
     registerGeometryOverlays();
 
-    const chart = init(container, { styles: DARK_STYLES });
+    // Appearance styles layer on top of DARK_STYLES: the overlay
+    // styles (point/line/rect) still come from DARK_STYLES, the rest
+    // from the user's appearance (defaults = the DARK_STYLES look).
+    const chart = init(container, {
+      styles: {
+        ...DARK_STYLES,
+        ...buildAppearanceStyles(appearanceRef.current),
+      },
+    });
     if (!chart) return;
     chartRef.current = chart;
 
@@ -3595,28 +3335,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // payload is only { x, y, paneId } (no kLineData despite the
     // Crosshair type), so the hovered candle is resolved through
     // convertFromPixel -> dataIndex into the loaded list. Publishing
-    // is rAF-throttled with same-target dedup (see scheduleHover):
-    // a 60-125 Hz mouse must not re-render Chart once per event.
-    const onCrosshairChange = (data?: unknown) => {
-      const cross = data as Crosshair | undefined;
-      if (cross?.x === undefined) {
-        clearHover();
-        return;
-      }
-      const point = chart.convertFromPixel(
-        [{ x: cross.x, y: cross.y ?? 0 }],
-        cross.paneId ? { paneId: cross.paneId } : undefined,
-      );
-      const p = Array.isArray(point) ? point[0] : point;
-      const list = chart.getDataList();
-      const idx = p?.dataIndex;
-      const valid = idx !== undefined && idx >= 0 && idx < list.length;
-      scheduleHover({
-        kline: valid ? list[idx] : null,
-        index: valid ? idx : null,
-      });
-    };
-    chart.subscribeAction('onCrosshairChange', onCrosshairChange);
+    // is rAF-throttled with same-target dedup (see CrosshairController
+    // in lib/chart-crosshair.ts): a 60-125 Hz mouse must not
+    // re-render Chart once per event.
+    chart.subscribeAction(
+      'onCrosshairChange',
+      crosshair.handleCrosshairChange,
+    );
 
     // Debug handle for browser-console inspection
     // (e.g. __pttChart.getOverlays(), __pttChart.getVisibleRange()).
@@ -3624,6 +3349,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
     chart.setZoomEnabled(true);
     chart.setScrollEnabled(true);
+    // First load generation (see loadEpochRef).
+    loadEpochRef.current += 1;
     chart.setSymbol({ ticker: symbolRef.current, pricePrecision: 2, volumePrecision: 0 });
     chart.setPeriod(periodFor(intervalRef.current));
 
@@ -3640,6 +3367,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         //   when the view scrolls to the left edge and more.forward is true.
         // Getting this backwards duplicates the whole dataset on every
         // load (the chart concatenates, it does not dedupe).
+        // Capture this load's generation; a response that arrives after
+        // a newer generation began is dropped below (no callback — the
+        // library is safe: setSymbol/setPeriod/setDataLoader all go
+        // through resetData, which clears _loading and issues the new
+        // generation's init load synchronously; verified against the
+        // installed klinecharts 10.1.1 bundle, StoreImp.resetData).
+        const epoch = loadEpochRef.current;
         try {
           const params = new URLSearchParams({
             source: 'binance',
@@ -3661,6 +3395,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           const json = (await res.json()) as { klines: Kline[] };
           const klines = (json.klines ?? []) as KLineData[];
           const hasMore = klines.length >= HISTORY_LIMIT;
+          // Stale generation: drop silently. No callback, no state
+          // writes, no restoreDrawings — the newer generation owns the chart.
+          if (epoch !== loadEpochRef.current) return;
           if (type === 'init') {
             // No newer bars exist beyond the latest (live updates arrive
             // via the WebSocket); older history does exist.
@@ -3688,6 +3425,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
             callback(klines, { backward: hasMore });
           }
         } catch {
+          // Stale generation: same drop — not even an error state, the
+          // newer generation's own load reports its own outcome.
+          if (epoch !== loadEpochRef.current) return;
           if (type === 'init') {
             initOkRef.current = false;
             setLoadError(
@@ -3738,11 +3478,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
     return () => {
       resizeObserver.disconnect();
-      if (hoverRafRef.current !== 0) {
-        cancelAnimationFrame(hoverRafRef.current);
-        hoverRafRef.current = 0;
-      }
-      chart.unsubscribeAction('onCrosshairChange', onCrosshairChange);
+      crosshair.dispose();
+      chart.unsubscribeAction(
+        'onCrosshairChange',
+        crosshair.handleCrosshairChange,
+      );
       socketRef.current?.disconnect();
       socketRef.current = null;
       liveCallbackRef.current = null;
@@ -3766,7 +3506,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // and legend (including a hovered candle from the old symbol).
     setLoadError(null);
     setLastKline(null);
-    clearHover();
+    crosshair.clear();
     const prev = prevSymbolIntervalRef.current;
     if (prev === null) {
       prevSymbolIntervalRef.current = { symbol, interval };
@@ -3777,10 +3517,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       persistDrawings(prev.symbol, prev.interval);
       // History is per view — a snapshot from another symbol/interval
       // must not be applied here.
-      undoStackRef.current = [];
-      redoStackRef.current = [];
-      pendingArmPushRef.current = false;
-      emitHistoryChange();
+      historyManager.clear();
       deselect();
       // An unfinished drawing cannot survive the switch: cancel it.
       drawingIdRef.current = null;
@@ -3788,6 +3525,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         transitionMode('Idle', 'symbol-change');
       }
       if (activeToolRef.current) onToolDoneRef.current();
+      // New load generation: the setSymbol/setPeriod below (each firing
+      // its own getBars("init")) belong to this one generation. This must
+      // sit inside the change branch — the effect also re-runs without a
+      // change (dev double-invoke), and incrementing there would orphan
+      // the in-flight load with no replacement load issued.
+      loadEpochRef.current += 1;
     }
     prevSymbolIntervalRef.current = { symbol, interval };
     suppressSaveRef.current = true;
@@ -3953,6 +3696,17 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     chart.setStyles({ candle: { type: chartType } });
   }, [chartType]);
 
+  // ---- appearance -----------------------------------------------------
+  // setStyles is a recursive deep merge (klinecharts bundle merge()),
+  // so this never clobbers the candle type or the tooltip showRule
+  // set above. The background colour is not a Styles field — it lives
+  // on the container div (see the render below).
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.setStyles(buildAppearanceStyles(appearance));
+  }, [appearance]);
+
   // ---- indicators -------------------------------------------------------
 
   useEffect(() => {
@@ -3965,7 +3719,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     const current = new Set(chart.getIndicators().map((i) => i.name));
     for (const name of indicators) {
       if (!current.has(name)) {
-        chart.createIndicator(name, isMainPaneIndicator(name));
+        // isStack=true is required for main-pane indicators: addIndicator
+        // clears the other indicators in the pane when isStack is false,
+        // so MA/EMA/BOLL sharing candle_pane would delete each other.
+        chart.createIndicator(
+          isMainPaneIndicator(name) ? { name, paneId: CANDLE_PANE_ID } : name,
+          isMainPaneIndicator(name),
+        );
       }
     }
   }, [indicators]);
@@ -4249,8 +4009,9 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   };
 
   // Legend (OHLC + indicators + countdown) lives in the memoized
-  // ChartLegend component above: hover updates re-render only that
-  // subtree, never this whole component (Phase 1 step 2b).
+  // ChartLegend component (components/ChartLegend.tsx): hover updates
+  // re-render only that subtree, never this whole component
+  // (Phase 1 step 2b).
 
   // Floating-bar position: one compact icon bar, docked at the
   // bottom centre of the chart on every screen width (desktop now
@@ -4266,9 +4027,12 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         onPointerDown={onContainerPointerDown}
         onPointerUp={onContainerPointerUp}
         onMouseLeave={() => {
-          clearHover();
+          crosshair.clear();
         }}
-        className="h-full w-full bg-[#131722]"
+        className="h-full w-full"
+        // Chart background: klinecharts Styles has no background
+        // field (the canvas is transparent), so it lives here.
+        style={{ backgroundColor: appearance.background }}
         data-testid="chart-container"
       />
       <ChartLegend
@@ -4278,41 +4042,59 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         lastKline={lastKline}
         loadError={loadError}
         getChart={getChart}
-        subscribeHover={subscribeHover}
+        subscribeHover={crosshair.subscribe}
+        upColor={appearance.candleUpColor}
+        downColor={appearance.candleDownColor}
+        labelColor={appearance.axisTextColor}
       />
-      {/* Object list toggle (Phase 2 Step 5, G-07/G-08). Top-right:
-          the legend owns the top-left and the floating bar the bottom
-          centre, so this corner is free on desktop and mobile. */}
-      <button
-        ref={objectListToggleRef}
-        data-testid="object-list-toggle"
-        title="物件清單"
-        aria-label="物件清單"
-        aria-expanded={objectListOpen}
-        onClick={toggleObjectList}
-        className="absolute right-2 top-2 z-20 flex h-8 items-center gap-1.5 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2.5 text-xs text-[#d1d4dc] shadow-lg hover:bg-[#262b38]"
-      >
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 14 14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          aria-hidden="true"
+      {/* Top-right corner: chart settings gear + object list toggle
+          (Phase 2 Step 5, G-07/G-08). The legend owns the top-left
+          and the floating bar the bottom centre, so this corner is
+          free on desktop and mobile. The gear is the always-visible
+          appearance entry — the toolbar gear sits at the far right of
+          a horizontally scrolling bar, so it needs a scroll to reach
+          on phones. */}
+      <div className="absolute right-2 top-2 z-20 flex items-center gap-1.5">
+        <button
+          data-testid="chart-appearance-settings"
+          title="圖表設定"
+          aria-label="圖表設定"
+          onClick={() => onOpenAppearanceSettingsRef.current?.()}
+          className="flex h-8 w-8 items-center justify-center rounded-md border border-[#2a2e39] bg-[#1e222d]/95 text-[#d1d4dc] shadow-lg hover:bg-[#262b38]"
         >
-          <line x1="2" y1="3.5" x2="12" y2="3.5" />
-          <line x1="2" y1="7" x2="12" y2="7" />
-          <line x1="2" y1="10.5" x2="12" y2="10.5" />
-        </svg>
-        物件清單
-        {objectListItems.length > 0 && (
-          <span className="rounded-full bg-[#2962ff] px-1.5 py-px text-[10px] font-semibold text-white">
-            {objectListItems.length}
-          </span>
-        )}
-      </button>
+          <BarGearIcon />
+        </button>
+        <button
+          ref={objectListToggleRef}
+          data-testid="object-list-toggle"
+          title="物件清單"
+          aria-label="物件清單"
+          aria-expanded={objectListOpen}
+          onClick={toggleObjectList}
+          className="flex h-8 items-center gap-1.5 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2.5 text-xs text-[#d1d4dc] shadow-lg hover:bg-[#262b38]"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <line x1="2" y1="3.5" x2="12" y2="3.5" />
+            <line x1="2" y1="7" x2="12" y2="7" />
+            <line x1="2" y1="10.5" x2="12" y2="10.5" />
+          </svg>
+          物件清單
+          {objectListItems.length > 0 && (
+            <span className="rounded-full bg-[#2962ff] px-1.5 py-px text-[10px] font-semibold text-white">
+              {objectListItems.length}
+            </span>
+          )}
+        </button>
+      </div>
       {objectListOpen && (
         <div ref={objectListPanelRef}>
           <ObjectList
@@ -4654,8 +4436,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                 { id: 'reset-view', label: '重設圖表檢視' },
                 {
                   id: 'chart-settings',
-                  label: '圖表設定 [待確認]',
-                  disabled: true,
+                  label: '圖表設定',
                 },
               ],
               ...(contextMenu.selectedId !== null

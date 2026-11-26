@@ -7,6 +7,11 @@
  * crash the app, it just falls back to the default.
  */
 
+import {
+  normalizeAppearance,
+  type AppearanceSettings,
+} from '@/lib/chart-appearance';
+
 export const STORAGE_KEYS = {
   watchlist: 'ptt:watchlist',
   /** TW/US tickers on the stock watchlist (local-only list, no quotes). */
@@ -19,6 +24,8 @@ export const STORAGE_KEYS = {
   magnet: 'ptt:magnet',
   lastOverlayStyle: 'ptt:last-overlay-style',
   chartType: 'ptt:chart-type',
+  /** Chart appearance (colors, grid, axis font size) — see lib/chart-appearance.ts. */
+  chartAppearance: 'ptt:chart-appearance',
 } as const;
 
 /** Current drawings-store format version. v1 was keyed `${symbol}:${interval}`. v2 keyed bare symbols with scope/interval. v3 replaces scope/interval with visibleIntervals + text. */
@@ -56,6 +63,19 @@ export function saveString(key: string, value: string): void {
   } catch {
     // Non-fatal.
   }
+}
+
+/** Chart appearance (colors, grid, axis font size). Missing / corrupt
+ *  fields fall back to DEFAULT_APPEARANCE, so old users upgrade with
+ *  no visible change. */
+export function getChartAppearance(): AppearanceSettings {
+  return normalizeAppearance(
+    loadJSON<Partial<AppearanceSettings>>(STORAGE_KEYS.chartAppearance, {}),
+  );
+}
+
+export function saveChartAppearance(s: AppearanceSettings): void {
+  saveJSON(STORAGE_KEYS.chartAppearance, s);
 }
 
 export function newOverlayId(): string {

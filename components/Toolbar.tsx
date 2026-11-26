@@ -47,6 +47,8 @@ export interface ToolbarProps {
   onRedo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  /** Open the chart appearance (chart settings) dialog. */
+  onOpenAppearanceSettings: () => void;
 }
 
 /** Shared with the StatusBar so both show the same dot + label. */
@@ -97,6 +99,65 @@ function RedoIcon() {
   );
 }
 
+/** Proper cog: toothed ring + centre hole (same as Chart's
+ *  BarGearIcon — a circle-and-spokes reads as a sun on phones). */
+function GearIcon() {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="10" cy="10" r="6" />
+      <circle cx="10" cy="10" r="2.6" />
+      <g fill="currentColor" stroke="none">
+        <rect x="8.8" y="2" width="2.4" height="2.8" rx="0.6" />
+        <rect x="8.8" y="15.2" width="2.4" height="2.8" rx="0.6" />
+        <rect x="2" y="8.8" width="2.8" height="2.4" rx="0.6" />
+        <rect x="15.2" y="8.8" width="2.8" height="2.4" rx="0.6" />
+        <rect
+          x="13.4"
+          y="4.2"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 14.6 5.4)"
+        />
+        <rect
+          x="4.2"
+          y="4.2"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 5.4 5.4)"
+        />
+        <rect
+          x="4.2"
+          y="13.4"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 5.4 14.6)"
+        />
+        <rect
+          x="13.4"
+          y="13.4"
+          width="2.4"
+          height="2.4"
+          rx="0.6"
+          transform="rotate(45 14.6 14.6)"
+        />
+      </g>
+    </svg>
+  );
+}
+
 export default function Toolbar({
   symbol,
   interval,
@@ -113,6 +174,7 @@ export default function Toolbar({
   onRedo,
   canUndo,
   canRedo,
+  onOpenAppearanceSettings,
 }: ToolbarProps) {
   const status = STATUS_META[connectionStatus];
   const [indicatorsOpen, setIndicatorsOpen] = useState(false);
@@ -407,6 +469,15 @@ export default function Toolbar({
         className="ml-auto flex shrink-0 items-center gap-1.5"
         title={status.text}
       >
+        <button
+          onClick={onOpenAppearanceSettings}
+          title="圖表設定"
+          aria-label="圖表設定"
+          data-testid="toolbar-appearance-settings"
+          className="flex h-7 w-7 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white"
+        >
+          <GearIcon />
+        </button>
         <span className={`h-2 w-2 rounded-full ${status.dot}`} />
       </div>
     </header>
