@@ -413,6 +413,205 @@ function CenterListRow({
   );
 }
 
+/** Magnifier timing (ms / px). Enter/exit ~190ms, wheel slide
+ *  180ms — all SMOOTH_EASING, same as the capsule text. */
+const MAG_ENTER_MS = 190;
+const MAG_EXIT_MS = 180;
+const MAG_WHEEL_MS = 180;
+const MAG_WHEEL_PX = 14;
+
+/** Magnifier bubble, centred on screen (TV f_001/f_002, Ryan
+ *  2026-11-27): the 3-row mini wheel (previous / large preview /
+ *  next) floats over the chart centre while a capsule zone is
+ *  dragged — same flex-centre portal and -translate-y-8 card as
+ *  CenterList, so both sit on the same visual centre.
+ *  pointer-events-none throughout, so it can never eat a touch.
+ *  Enter: fade + scale 0.92→1. Preview change: the rows
+ *  wheel-slide in the drag direction (up-drag = new rows from
+ *  below, matching animateCapsuleText). Release: fade + scale
+ *  →0.95, then unmount — the unmount is delayed so the exit fade
+ *  is seen instead of a pop. A fresh drag during the exit cancels
+ *  it and re-enters. */
+function MagnifierBubble({
+  view,
+  step,
+}: {
+  view: {
+    label: string;
+    prev: string;
+    current: string;
+    next: string;
+  } | null;
+  step: number;
+}) {
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const rowsRef = useRef<HTMLDivElement | null>(null);
+  const [shown, setShown] = useState<typeof view>(null);
+  const shownRef = useRef<typeof view>(null);
+  const leaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const enterPendingRef = useRef(false);
+  const prevStepRef = useRef(0);
+  const prevCurrentRef = useRef<string | null>(null);
+
+  // Stage mount lifetime from the parent's view prop: mount on a
+  // fresh appearance, keep mounted through the exit fade.
+  useEffect(() => {
+    if (view !== null) {
+      const wasLeaving = leaveTimerRef.current !== null;
+      if (leaveTimerRef.current !== null) {
+        clearTimeout(leaveTimerRef.current);
+        leaveTimerRef.current = null;
+      }
+      const cur = shownRef.current;
+      if (wasLeaving) {
+        // A fresh drag during the exit: cancel the fade-out and
+        // re-enter on the mounted card right away (the post-render
+        // effect only runs on a shown change, which may not come
+        // if the new preview equals the old one).
+        const card = cardRef.current;
+        card?.getAnimations().forEach((a) => a.cancel());
+        card?.animate(
+          [
+            { opacity: 0, transform: 'scale(0.92)' },
+            { opacity: 1, transform: 'scale(1)' },
+          ],
+          {
+            duration: MAG_ENTER_MS,
+            easing: SMOOTH_EASING,
+            fill: 'backwards',
+          },
+        );
+      } else if (cur === null) {
+        // Fresh mount: the card doesn't exist yet, so the enter
+        // runs in the post-render effect below.
+        enterPendingRef.current = true;
+      }
+      // magView is a fresh object every parent render: only push
+      // a real content change, so unrelated renders (e.g. price
+      // ticks) don't re-render the bubble or restart animations.
+      if (
+        cur === null ||
+        cur.label !== view.label ||
+        cur.prev !== view.prev ||
+        cur.current !== view.current ||
+        cur.next !== view.next
+      ) {
+        shownRef.current = view;
+        setShown(view);
+      }
+      return;
+    }
+    // Only start the exit once per disappearance: the parent
+    // re-renders on price ticks, and re-running this would restart
+    // the fade and reset the unmount timer forever.
+    if (shownRef.current !== null && leaveTimerRef.current === null) {
+      const card = cardRef.current;
+      card?.getAnimations().forEach((a) => a.cancel());
+      card?.animate(
+        [
+          { opacity: 1, transform: 'scale(1)' },
+          { opacity: 0, transform: 'scale(0.95)' },
+        ],
+        {
+          duration: MAG_EXIT_MS,
+          easing: SMOOTH_EASING,
+          fill: 'forwards',
+        },
+      );
+      leaveTimerRef.current = setTimeout(() => {
+        shownRef.current = null;
+        prevCurrentRef.current = null;
+        setShown(null);
+        leaveTimerRef.current = null;
+      }, MAG_EXIT_MS + 10);
+    }
+  }, [view]);
+
+  useEffect(
+    () => () => {
+      if (leaveTimerRef.current !== null) {
+        clearTimeout(leaveTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  // Enter on mount, wheel-slide on preview change. Runs after
+  // every shown update; the refs tell a fresh mount (enter) from
+  // a value change (slide). Cancels any running animation first.
+  useEffect(() => {
+    if (shown === null) return;
+    const card = cardRef.current;
+    const rows = rowsRef.current;
+    if (enterPendingRef.current) {
+      enterPendingRef.current = false;
+      card?.getAnimations().forEach((a) => a.cancel());
+      card?.animate(
+        [
+          { opacity: 0, transform: 'scale(0.92)' },
+          { opacity: 1, transform: 'scale(1)' },
+        ],
+        {
+          duration: MAG_ENTER_MS,
+          easing: SMOOTH_EASING,
+          fill: 'backwards',
+        },
+      );
+      prevCurrentRef.current = shown.current;
+      prevStepRef.current = step;
+      return;
+    }
+    if (
+      prevCurrentRef.current !== null &&
+      shown.current !== prevCurrentRef.current
+    ) {
+      // Drag up (step grows) = new rows from below; drag down =
+      // from above — same direction as animateCapsuleText.
+      const dir = step - prevStepRef.current >= 0 ? 1 : -1;
+      prevCurrentRef.current = shown.current;
+      prevStepRef.current = step;
+      rows?.getAnimations().forEach((a) => a.cancel());
+      rows?.animate(
+        [
+          {
+            transform: `translateY(${dir >= 0 ? MAG_WHEEL_PX : -MAG_WHEEL_PX}px)`,
+            opacity: 0.4,
+          },
+          { transform: 'translateY(0px)', opacity: 1 },
+        ],
+        { duration: MAG_WHEEL_MS, easing: SMOOTH_EASING },
+      );
+    }
+  }, [shown, step]);
+
+  if (shown === null) return null;
+  return createPortal(
+    <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center md:hidden">
+      <div
+        ref={cardRef}
+        className="pointer-events-none -translate-y-8 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 px-4 py-2 text-center shadow-2xl backdrop-blur"
+        data-testid="capsule-magnifier"
+      >
+        <div className="text-[10px] font-medium tracking-wide text-[#787b86]">
+          {shown.label}
+        </div>
+        <div ref={rowsRef} data-testid="capsule-magnifier-rows">
+          <div className="text-xs leading-5 text-[#787b86]">
+            {shown.prev}
+          </div>
+          <div className="text-xl font-bold leading-7 text-white">
+            {shown.current}
+          </div>
+          <div className="text-xs leading-5 text-[#787b86]">
+            {shown.next}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /** One analysis-centre grid cell: icon + label (+ optional sub). */
 function AnalysisCell({
   label,
@@ -1111,10 +1310,11 @@ export default function MobileBottomBar({
 
   /** Magnifier preview while a capsule zone is being dragged (Ryan
    *  2026-11-26: the finger covers the capsule, so the value is
-   *  invisible mid-swipe). The bubble floats above the bar with a
-   *  3-row mini wheel — previous / preview / next, preview large —
-   *  like TradingView's old vertical interval picker. The preview
-   *  is what a release commits, so what he sees is what he gets.
+   *  invisible mid-swipe). The bubble floats over the screen
+   *  centre (see MagnifierBubble) with a 3-row mini wheel —
+   *  previous / preview / next, preview large — like
+   *  TradingView's old vertical interval picker. The preview is
+   *  what a release commits, so what he sees is what he gets.
    *  State drives the bubble; the ref is what the swipe commit
    *  reads (it is set synchronously on every drag move). */
   const [magnifier, setMagnifier] = useState<{
@@ -1490,32 +1690,14 @@ export default function MobileBottomBar({
             </div>,
             document.body,
           )}
-        {/* Capsule wrapper is relative so the magnifier centres
-            over the capsule (the capsule itself is overflow-hidden
-            for the rounded pill, which would clip it). */}
+        {/* Capsule wrapper: the magnifier is portalled to the
+            screen centre (see MagnifierBubble), so this wrapper no
+            longer positions it. */}
         <div className="relative min-w-0 flex-1">
-          {/* Magnifier: floats above the capsule while a zone is
-              being dragged (the finger covers the capsule itself).
-              pointer-events-none so it can never eat a touch. */}
-          {magView && (
-            <div
-              className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-3 -translate-x-1/2 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 px-4 py-2 text-center shadow-2xl backdrop-blur"
-              data-testid="capsule-magnifier"
-            >
-              <div className="text-[10px] font-medium tracking-wide text-[#787b86]">
-                {magView.label}
-              </div>
-              <div className="text-xs leading-5 text-[#787b86]">
-                {magView.prev}
-              </div>
-              <div className="text-xl font-bold leading-7 text-white">
-                {magView.current}
-              </div>
-              <div className="text-xs leading-5 text-[#787b86]">
-                {magView.next}
-              </div>
-            </div>
-          )}
+          <MagnifierBubble
+            view={magView}
+            step={magnifier?.step ?? 0}
+          />
           {/* Bottom capsule: symbol | interval, both swipeable.
               Symbol flexes (left-aligned), interval is a fixed
               76px centred zone. */}
