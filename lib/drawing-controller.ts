@@ -726,16 +726,24 @@ export function createDrawingController(
    * The entry point is likewise kept on the stop's timestamp, so all
    * three control dots sit on the right edge (Ryan 2026-11-27); the
    * box's left edge is stored separately in extendData.posBoxLeft
-   * by the callers, from the pre-snap entry timestamp. Returns the
-   * points unchanged when everything is already correct. Used at
-   * every entry point so a stored position is never wrong-sided:
-   * the draw-end normaliser (the interactive draw commits the raw
-   * clicked point) and programmatic creation (restore / preset
-   * points).
+   * by the callers, from the pre-snap entry timestamp. A 2-point
+   * input with risk > 0 gains its 3rd point here (target at posRR
+   * from the entry, on the stop's timestamp), so a hand-drawn
+   * position always has a draggable target dot: legacy 2-point
+   * saves (drawn before the 3-point change) and zero-risk draws
+   * whose stop was dragged away are both completed at the next
+   * entry point instead of staying 2-point forever. A zero-risk
+   * 2-point input stays 2-point (there is no target to show).
+   * Returns the points unchanged when everything is already correct.
+   * Used at every entry point so a stored position is never
+   * wrong-sided: the draw-end normaliser (the interactive draw
+   * commits the raw clicked point) and programmatic creation
+   * (restore / preset points).
    */
   const normalizePositionPoints = (
     tool: DrawingTool,
     points: Array<{ timestamp: number; value: number }>,
+    posRR = 2,
   ): Array<{ timestamp: number; value: number }> => {
     if (!isPositionTool(tool) || points.length < 2) return points;
     const isLong = tool === 'longPosition';
@@ -754,6 +762,14 @@ export function createDrawingController(
         : points[0];
     const entryChanged = p0 !== points[0];
     if (points.length < 3) {
+      const risk = Math.abs(p0.value - p1.value);
+      if (risk > 0) {
+        const rr = posRR > 0 ? posRR : 2;
+        const target = isLong
+          ? p0.value + rr * risk
+          : p0.value - rr * risk;
+        return [p0, p1, { timestamp: p1.timestamp, value: target }];
+      }
       return stopChanged || entryChanged ? [p0, p1] : points;
     }
     const fixedTarget = mirrorPositionTarget(
@@ -891,12 +907,31 @@ export function createDrawingController(
     if (saved.name === MEASURE_NAME) {
       ext.intervalMs = INTERVAL_MS[deps.getInterval()] ?? 0;
     }
+    // Position tools: normalise on restore — a stored position is
+    // never wrong-sided, and a legacy 2-point save (drawn before
+    // the 3-point change, like Ryan's 4h long in the 2026-11-27
+    // video) gains its 3rd point here, so its target gets a
+    // draggable dot instead of only a derived label. The posBoxLeft
+    // backfill above already ran on the raw saved entry timestamp,
+    // so the box keeps its original left edge. Normalising twice
+    // (armOverlay already normalised preset points) is idempotent.
+    const pointsForCreate =
+      isPositionTool(saved.name) && saved.points.length >= 2
+        ? normalizePositionPoints(
+            saved.name as DrawingTool,
+            saved.points.map((p) => ({
+              timestamp: p.timestamp,
+              value: p.value,
+            })),
+            typeof ext.posRR === 'number' && ext.posRR > 0 ? ext.posRR : 2,
+          )
+        : saved.points;
     return {
       ...(saved.id ? { id: saved.id } : {}),
       name: saved.name,
-      ...(saved.points.length > 0
+      ...(pointsForCreate.length > 0
         ? {
-            points: saved.points.map((p) => ({
+            points: pointsForCreate.map((p) => ({
               timestamp: p.timestamp,
               value: p.value,
             })),
@@ -936,11 +971,12 @@ export function createDrawingController(
         // the wrong side. Correct the committed points here, before
         // the persist below (overrideOverlay repaints, so the handle
         // snaps to the corrected stop immediately). The draw is two
-        // clicks (entry, stop); append the target as the 3rd point
-        // at posRR from the entry (on the stop's timestamp, so the
-        // box width is unchanged) — it then drags freely. A
-        // zero-risk draw gets no target: it stays a 2-point legacy
-        // shape until the stop is dragged away from the entry.
+        // clicks (entry, stop); the normaliser appends the target
+        // as the 3rd point at posRR from the entry (on the stop's
+        // timestamp, so the box width is unchanged) — it then drags
+        // freely. A zero-risk draw gets no target: it stays a
+        // 2-point legacy shape until the stop is dragged away from
+        // the entry (the move-end backfill below completes it then).
         if (isPositionTool(e.overlay.name)) {
           const pts = e.overlay.points;
           if (
@@ -948,10 +984,6 @@ export function createDrawingController(
             pts[0].value !== undefined &&
             pts[1].value !== undefined
           ) {
-            const fixed = normalizePositionPoints(
-              e.overlay.name as DrawingTool,
-              pts as Array<{ timestamp: number; value: number }>,
-            );
             // The entry click's timestamp is the box's left edge:
             // normalize snaps p0 onto the stop's timestamp (all
             // control dots on the right edge), so store it before
@@ -964,23 +996,15 @@ export function createDrawingController(
             if (typeof pts[0].timestamp === 'number') {
               ext.posBoxLeft = pts[0].timestamp;
             }
-            const entry = fixed[0].value;
-            const risk = Math.abs(entry - fixed[1].value);
-            let next = fixed;
-            if (risk > 0) {
-              const posRR =
-                typeof ext.posRR === 'number' && ext.posRR > 0
-                  ? ext.posRR
-                  : 2;
-              const target =
-                e.overlay.name === 'longPosition'
-                  ? entry + posRR * risk
-                  : entry - posRR * risk;
-              next = [
-                ...fixed,
-                { timestamp: fixed[1].timestamp, value: target },
-              ];
-            }
+            const posRR =
+              typeof ext.posRR === 'number' && ext.posRR > 0
+                ? ext.posRR
+                : 2;
+            const next = normalizePositionPoints(
+              e.overlay.name as DrawingTool,
+              pts as Array<{ timestamp: number; value: number }>,
+              posRR,
+            );
             e.chart.overrideOverlay({
               id: e.overlay.id,
               points: next,
@@ -1103,6 +1127,47 @@ export function createDrawingController(
           markPositionDragEnd(e.overlay.id);
         }
         if (deps.restoringRef.current || deps.suppressSaveRef.current) return;
+        // A zero-risk draw stays a 2-point shape with no target
+        // dot; if this drag pulled the stop away from the entry,
+        // complete it now (target at posRR, on the stop's
+        // timestamp) so the target becomes draggable. Before the
+        // history comparison below, so one undo step covers the
+        // move and the appended point together.
+        if (isPositionTool(saved.name)) {
+          const pts = e.overlay.points;
+          if (
+            pts.length === 2 &&
+            pts[0].value !== undefined &&
+            pts[1].value !== undefined &&
+            pts[0].timestamp !== undefined &&
+            pts[1].timestamp !== undefined
+          ) {
+            const entry = pts[0].value;
+            const risk = Math.abs(entry - pts[1].value);
+            if (risk > 0) {
+              const ext = (e.overlay.extendData ?? {}) as Record<
+                string,
+                unknown
+              >;
+              const posRR =
+                typeof ext.posRR === 'number' && ext.posRR > 0
+                  ? ext.posRR
+                  : 2;
+              const target =
+                saved.name === 'longPosition'
+                  ? entry + posRR * risk
+                  : entry - posRR * risk;
+              e.chart.overrideOverlay({
+                id: e.overlay.id,
+                points: [
+                  { timestamp: pts[0].timestamp, value: pts[0].value },
+                  { timestamp: pts[1].timestamp, value: pts[1].value },
+                  { timestamp: pts[1].timestamp, value: target },
+                ],
+              });
+            }
+          }
+        }
         const snapshot = deps.history.takeMoveStartSnapshot();
         if (snapshot) {
           const before = snapshot.find((o) => o.id === e.overlay.id);
@@ -2157,6 +2222,7 @@ export function createDrawingController(
             timestamp: p.timestamp,
             value: p.value,
           })),
+          draft.posRR,
         )
       : draft.points.map((p) => ({
           timestamp: p.timestamp,

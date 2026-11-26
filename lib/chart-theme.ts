@@ -331,13 +331,25 @@ let positionRegistered = false;
  * programmatic edit (dialog / restore / normalise). `target` is the
  * stored 3rd point's value; it is undefined for legacy 2-point
  * saves, whose target is derived from posRR and follows the entry
- * on its own. Entries are tiny (three numbers) and only live for
- * the page session; a deleted overlay's entry is simply never read
- * again.
+ * on its own. `rightTs` is the right-edge timestamp the three
+ * points shared at the last render (all three are kept on the
+ * stop's timestamp); `boxLeftTs` is extendData.posBoxLeft at the
+ * last render. Together they let the figure callback tell a
+ * horizontal drag apart from a vertical one: a point drag moves
+ * only that point's timestamp, a body drag moves all three
+ * together, and the box's left edge only moves on a whole-box
+ * time translation. Entries are tiny and only live for the page
+ * session; a deleted overlay's entry is simply never read again.
  */
 const positionDragCache = new Map<
   string,
-  { entry: number; stop: number; target: number | undefined }
+  {
+    entry: number;
+    stop: number;
+    target: number | undefined;
+    rightTs: number | undefined;
+    boxLeftTs: number | undefined;
+  }
 >();
 
 /**
@@ -463,10 +475,11 @@ export function registerPositionOverlays(): void {
       }
       // The target is the 3rd point when present; legacy 2-point
       // saves derive it from posRR. A target on the loss side is
-      // mirrored to the profit side at the same distance, and its
-      // timestamp is kept on the stop's — the target is a price
-      // level on the box's right edge, so a horizontal drag snaps
-      // back on the next render.
+      // mirrored to the profit side at the same distance. The
+      // target's timestamp is synced to the box's right edge in the
+      // drag section below (with the other two points); a target
+      // point drag moves the right edge with it, it does not snap
+      // back.
       let target: number;
       let rr: number;
       const p2 = overlay.points[2];
@@ -475,9 +488,6 @@ export function registerPositionOverlays(): void {
         target = mirrorPositionTarget(isLong, entry, targetRaw);
         if (target !== targetRaw) {
           p2.value = target;
-        }
-        if (p2.timestamp !== p1.timestamp) {
-          p2.timestamp = p1.timestamp;
         }
         rr = Math.abs(target - entry) / risk;
       } else {
@@ -488,25 +498,75 @@ export function registerPositionOverlays(): void {
       // moves entry, stop and target together by the same price
       // delta, so the risk distance and R:R are unchanged (the
       // stats pill's quantity is unchanged; TP/SL P&L follow the
-      // entry). Detect it by comparing the stored points with the
-      // last rendered triple for this overlay, and only while the
-      // controller says this overlay is being dragged (a dialog
-      // edit / restore / preset write changes the same points but
-      // is not a drag, so it must never translate): only the entry
-      // moved -> entry drag -> translate stop/target by the same
-      // delta. Only the stop or only the target moved -> that
-      // point's own drag, leave the others alone. Several moved at
-      // once (dialog edit / restore / normalise / whole-overlay
-      // body drag) -> cache only, no translation. The write-back
+      // entry). A diagonal drag also moves the box in time: the
+      // entry point's timestamp and posBoxLeft shift by the same
+      // time delta, so the box width is unchanged. Detect both by
+      // comparing the stored points with the last rendered triple
+      // for this overlay, and only while the controller says this
+      // overlay is being dragged (a dialog edit / restore /
+      // preset write changes the same points but is not a drag, so
+      // it must never translate). The library moves only the
+      // pressed point on a point drag, and all points together on
+      // a body drag (from the press-start snapshot), so which
+      // timestamps moved tells the two apart:
+      //   - only the entry moved (value and/or timestamp): entry
+      //     drag -> translate stop/target values by the price
+      //     delta, and translate posBoxLeft + all three
+      //     timestamps by the time delta.
+      //   - only the stop moved: that point's own drag -> the
+      //     right edge follows the stop, posBoxLeft stays.
+      //   - only the target moved: same, the right edge follows
+      //     the target.
+      //   - all three moved by the same time delta (body drag):
+      //     the library already moved every value; translate
+      //     posBoxLeft by the time delta so the box follows
+      //     instead of stretching.
+      //   - several moved differently (dialog / restore /
+      //     normalise): cache only, no translation. The write-back
       // takes effect on the next render, the same pattern as the
       // mirror write-backs above; a translation preserves the
       // entry-stop and entry-target distances, so the mirrors above
-      // stay no-ops for it.
+      // stay no-ops for it. The cache update is what makes the
+      // incremental time shifts exact: a second figures run
+      // without a mouse move sees no timestamp change and adds
+      // nothing, so posBoxLeft can never double-count.
       const dragPrev = positionDragCache.get(overlay.id);
+      // Raw timestamps, read before any sync write-back below.
+      const rawP0Ts = p0.timestamp;
+      const rawP1Ts = p1.timestamp;
+      const rawP2Ts = p2?.timestamp;
+      const prevBoxLeft =
+        typeof ext.posBoxLeft === 'number' ? ext.posBoxLeft : undefined;
+      let newRightTs = rawP1Ts;
       if (dragPrev !== undefined && positionDraggingId === overlay.id) {
         const entryMoved = entry !== dragPrev.entry;
         const stopMoved = stop !== dragPrev.stop;
         const targetMoved = p2?.value !== dragPrev.target;
+        const prevRightTs = dragPrev.rightTs;
+        const p0TsMoved =
+          prevRightTs !== undefined &&
+          rawP0Ts !== undefined &&
+          rawP0Ts !== prevRightTs;
+        const p1TsMoved =
+          prevRightTs !== undefined &&
+          rawP1Ts !== undefined &&
+          rawP1Ts !== prevRightTs;
+        const p2TsMoved =
+          prevRightTs !== undefined &&
+          rawP2Ts !== undefined &&
+          rawP2Ts !== prevRightTs;
+        const onlyP0Ts = p0TsMoved && !p1TsMoved && !p2TsMoved;
+        const onlyP1Ts = p1TsMoved && !p0TsMoved && !p2TsMoved;
+        const onlyP2Ts = p2TsMoved && !p0TsMoved && !p1TsMoved;
+        const allTsMoved =
+          p0TsMoved &&
+          p1TsMoved &&
+          p2TsMoved &&
+          rawP0Ts === rawP1Ts &&
+          rawP1Ts === rawP2Ts;
+        // Price translation: only an entry drag moves the other
+        // points' values (a stop / target drag moves its own
+        // point; a body drag is already moved by the library).
         if (entryMoved && !stopMoved && !targetMoved) {
           const delta = entry - dragPrev.entry;
           const movedStop = stop + delta;
@@ -531,11 +591,57 @@ export function registerPositionOverlays(): void {
           }
           rr = Math.abs(target - entry) / risk;
         }
+        // Time translation: the new right edge is the timestamp of
+        // whichever point moved. Only an entry drag or a body drag
+        // shifts posBoxLeft (whole box); a stop / target drag
+        // moves the right edge only (box width changes).
+        if (onlyP0Ts && rawP0Ts !== undefined) {
+          newRightTs = rawP0Ts;
+          if (prevBoxLeft !== undefined && prevRightTs !== undefined) {
+            ext.posBoxLeft = prevBoxLeft + (rawP0Ts - prevRightTs);
+          }
+        } else if (onlyP1Ts && rawP1Ts !== undefined) {
+          newRightTs = rawP1Ts;
+        } else if (onlyP2Ts && rawP2Ts !== undefined) {
+          newRightTs = rawP2Ts;
+        } else if (
+          allTsMoved &&
+          rawP1Ts !== undefined &&
+          prevRightTs !== undefined
+        ) {
+          newRightTs = rawP1Ts;
+          if (prevBoxLeft !== undefined) {
+            ext.posBoxLeft = prevBoxLeft + (rawP1Ts - prevRightTs);
+          }
+        }
+      }
+      // Keep all three points on the right edge. The p1/p2 syncs
+      // run always (p2 does not exist mid-draw, and p1 is the right
+      // edge by definition). The p0 sync is gated on a defined
+      // posBoxLeft: during an in-progress draw posBoxLeft is not
+      // set yet and p0 is the entry click (the box's future left
+      // edge) — snapping it to the stop here would destroy the
+      // left edge before onDrawEnd stores it, collapsing the box
+      // to zero width. Outside a drag, with posBoxLeft defined,
+      // this is the restore / normalise safety net. After a time
+      // translation above, all three already share newRightTs, so
+      // this is a no-op there.
+      if (newRightTs !== undefined) {
+        if (p1.timestamp !== newRightTs) p1.timestamp = newRightTs;
+        if (p2 !== undefined && p2.timestamp !== newRightTs) {
+          p2.timestamp = newRightTs;
+        }
+        if (prevBoxLeft !== undefined && p0.timestamp !== newRightTs) {
+          p0.timestamp = newRightTs;
+        }
       }
       positionDragCache.set(overlay.id, {
         entry,
         stop,
         target: p2?.value,
+        rightTs: newRightTs,
+        boxLeftTs:
+          typeof ext.posBoxLeft === 'number' ? ext.posBoxLeft : undefined,
       });
       const entryY = coordinates[0].y;
       // Pixel y of the (possibly mirrored) stop. The mirror case
@@ -557,13 +663,12 @@ export function registerPositionOverlays(): void {
       const yFor = (price: number) =>
         entryY + ((entry - price) / (entry - stop)) * (stopY - entryY);
       const tpY = yFor(target);
-      // Box horizontal extent. All three points share the stop's
-      // timestamp (right edge), so min/max of the point pixels is
-      // one x: the left edge comes from extendData.posBoxLeft
-      // (entry click's timestamp) converted back to pixels. The
-      // snap below also keeps a horizontal drag of the entry point
-      // on the right edge — it snaps back on the next render, the
-      // same pattern as the target's timestamp sync above.
+      // Box horizontal extent. All three points share the right
+      // edge timestamp (synced in the drag section above), so
+      // min/max of the point pixels is one x: the left edge comes
+      // from extendData.posBoxLeft (entry click's timestamp)
+      // converted back to pixels. The snap below is a safety net
+      // for a point that somehow still sits off the right edge.
       const boxLeftTs =
         typeof ext.posBoxLeft === 'number' ? ext.posBoxLeft : undefined;
       if (boxLeftTs !== undefined) {
