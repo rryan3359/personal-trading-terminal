@@ -310,13 +310,24 @@ function NumberField({
   ariaLabel?: string;
 }) {
   const [text, setText] = useState(String(value));
-  // No useEffect sync: the parent passes key={value}, so an external
-  // value change remounts the field with the new text. A remount
-  // never steals focus mid-typing — the value only changes on this
-  // field's own blur commit (focus already left) or, for the derived
-  // target price, while the user edits another field.
+  // No useEffect sync: the parent passes key={`${field}-${value}`},
+  // so an external value change remounts the field with the new text.
+  // The field-name prefix keeps sibling keys distinct even when two
+  // fields hold the same value (e.g. leverage 1 and risk 1), which
+  // previously collided as key={1} and made React warn once per
+  // dialog open.
+  // The wrapper is flex-1 min-w-0: the risk field sits in a flex row
+  // next to the %/amount select, and without a grow the flex item
+  // collapsed to its min-content width (18px: padding 16px + border
+  // 2px, 0px left for the digits), so the value rendered blank even
+  // though the DOM value was "1". In the grid cells flex-1 is inert
+  // (grid items ignore flex sizing) and min-w-0 only prevents
+  // min-content blowout, so the other seven fields are unaffected.
+  // A remount never steals focus mid-typing — the value only changes
+  // on this field's own blur commit (focus already left) or, for the
+  // derived target price, while the user edits another field.
   return (
-    <div>
+    <div className="min-w-0 flex-1">
       {label !== '' && <label className={FIELD_LABEL}>{label}</label>}
       <input
         type="number"
@@ -605,7 +616,7 @@ export default function OverlaySettingsDialog({
               </p>
               <div className="grid grid-cols-2 gap-2">
                 <NumberField
-                  key={draft.posAccount}
+                  key={`acct-${draft.posAccount}`}
                   label="帳戶資金（USDT）"
                   value={draft.posAccount}
                   onCommit={(v) =>
@@ -613,7 +624,7 @@ export default function OverlaySettingsDialog({
                   }
                 />
                 <NumberField
-                  key={draft.posLeverage}
+                  key={`lev-${draft.posLeverage}`}
                   label="槓桿"
                   value={draft.posLeverage}
                   onCommit={(v) => patch({ posLeverage: Math.max(1, v) })}
@@ -622,12 +633,17 @@ export default function OverlaySettingsDialog({
                   <label className={FIELD_LABEL}>風險</label>
                   <div className="flex gap-2">
                     <NumberField
-                      key={draft.posRisk}
+                      key={`risk-${draft.posRisk}`}
                       label=""
                       value={draft.posRisk}
                       ariaLabel="風險"
                       onCommit={(v) => patch({ posRisk: Math.max(0, v) })}
                     />
+                    {/* SELECT already contains w-full (via INPUT); w-20!
+                        (Tailwind v4 trailing-! important) is needed so
+                        the 80px width wins, otherwise the select takes
+                        the whole flex row and squeezes the risk input
+                        to its 18px min-content width (value invisible). */}
                     <select
                       value={draft.posRiskMode}
                       aria-label="風險單位"
@@ -636,7 +652,7 @@ export default function OverlaySettingsDialog({
                           posRiskMode: e.target.value as PositionRiskMode,
                         })
                       }
-                      className={`${SELECT} w-20 shrink-0`}
+                      className={`${SELECT} w-20! shrink-0`}
                     >
                       <option value="percent">%</option>
                       <option value="amount">金額</option>
@@ -644,7 +660,7 @@ export default function OverlaySettingsDialog({
                   </div>
                 </div>
                 <NumberField
-                  key={draft.posLotSize}
+                  key={`lot-${draft.posLotSize}`}
                   label="手數"
                   value={draft.posLotSize}
                   onCommit={(v) => patch({ posLotSize: Math.max(0, v) })}
@@ -652,19 +668,19 @@ export default function OverlaySettingsDialog({
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <NumberField
-                  key={draft.points[0]?.value ?? 0}
+                  key={`entry-${draft.points[0]?.value ?? 0}`}
                   label="入場價"
                   value={draft.points[0]?.value ?? 0}
                   onCommit={(v) => patchPointValue(0, v)}
                 />
                 <NumberField
-                  key={draft.points[1]?.value ?? 0}
+                  key={`stop-${draft.points[1]?.value ?? 0}`}
                   label="停損價"
                   value={draft.points[1]?.value ?? 0}
                   onCommit={(v) => patchPointValue(1, v)}
                 />
                 <NumberField
-                  key={draft.points[2]?.value ?? derivedTarget}
+                  key={`target-${draft.points[2]?.value ?? derivedTarget}`}
                   label="目標價"
                   value={draft.points[2]?.value ?? derivedTarget}
                   onCommit={(v) => patchPointValue(2, v)}
@@ -672,7 +688,7 @@ export default function OverlaySettingsDialog({
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <NumberField
-                  key={draft.posQtyPrecision}
+                  key={`prec-${draft.posQtyPrecision}`}
                   label="數量精度（0–8 位小數）"
                   value={draft.posQtyPrecision}
                   step={1}
