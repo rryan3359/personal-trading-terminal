@@ -6,9 +6,11 @@
  * Top: cursor/select tool (active when no drawing tool is armed;
  * clicking it exits drawing mode). Then a favorites button (star;
  * opens a flyout of starred tools, empty until something is
- * starred), then one icon per tool GROUP — 10 groups, 44 tools,
- * per MASTER TASK §4.2 (trend lines, horizontal / vertical lines,
- * channels, Fibonacci, Gann, Pitchfork, geometric shapes, patterns,
+ * starred), then one icon per tool GROUP — 10 groups, 41 tools
+ * (44 registered; the 3 vertical-line tools are hidden from the
+ * toolbar per Ryan's decision, see below), per MASTER TASK §4.2
+ * (trend lines, horizontal lines, channels, Fibonacci, Gann,
+ * Pitchfork, geometric shapes, patterns,
  * text & annotations, measurement): each group shows its last-used
  * tool (armed > last-used > first), with a small chevron. Clicking
  * a group opens a flyout panel to the right of the bar listing that
@@ -47,15 +49,14 @@
  * strength shown under the icon) and clear.
  *
  * Vertical lines (verticalStraightLine, verticalSegment,
- * verticalRayLine) are back in the Horizontal / Vertical group:
- * they were removed from the toolbar 2026-11-25 by Ryan's decision,
- * but MASTER TASK §4.2 (submitted by Ryan 2026-11-25 12:57)
- * explicitly lists them in group 3, so Phase 2 restores them per
- * the task book. TENSION — if Ryan still wants them hidden, say so
- * and they come back out; do not treat this restore as a new
- * decision. The tools stay registered in lib/chart-config.ts /
- * lib/chart-theme.ts / Chart.tsx either way, so drawings saved
- * earlier still render and stay editable.
+ * verticalRayLine) are NOT on this toolbar: removed 2026-11-25 by
+ * Ryan's decision, reaffirmed 2026-11-26 (the MASTER TASK §4.2
+ * group-3 listing does not override it). The tools stay registered
+ * in lib/chart-config.ts / lib/chart-theme.ts / Chart.tsx, so
+ * drawings saved earlier still render and stay editable, and the
+ * context menu "加入垂直線" still creates them. Stored favorites /
+ * last-used entries naming them are filtered out on load (the
+ * stored values are left untouched until the next save).
  *
  * Favorites (`ptt:favorite-tools`) and per-group last-used tools
  * (`ptt:last-used-tools`) persist in localStorage; both keys are
@@ -79,11 +80,13 @@ import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
 /** Logical groups for the toolbar, in display order (MASTER TASK §4.2).
  *  Cursor & selection is the separate cursor button above, not a
  *  TOOL_GROUPS entry — so cursor + these 10 groups = 11 groups.
- *  All 44 tools are in exactly one group; tool ids and registration
- *  are untouched. */
+ *  41 of the 44 tools are in exactly one group; the 3 vertical-line
+ *  tools (see TOOLBAR_HIDDEN_TOOLS) are registered but hidden from
+ *  the toolbar per Ryan's decision, so they are in no group. Tool
+ *  ids and registration are untouched. */
 const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '趨勢線', ids: ['segment', 'straightLine', 'rayLine'] },
-  { title: '水平／垂直線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine', 'verticalStraightLine', 'verticalSegment', 'verticalRayLine'] },
+  { title: '水平線', ids: ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'priceLine'] },
   { title: '通道', ids: ['parallelStraightLine', 'priceChannelLine', 'fibChannel'] },
   { title: '斐波那契', ids: ['fibonacciRetracement', 'fibTimeZones', 'fibFan', 'fibArc', 'fibSpiral', 'fibWedge'] },
   { title: 'Gann', ids: ['gannFan', 'gannSquare', 'gannBox'] },
@@ -94,6 +97,19 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '量測', ids: ['measure'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
+
+/** Tools registered but hidden from the toolbar per Ryan's decision
+ *  (removed 2026-11-25, reaffirmed 2026-11-26). They stay in
+ *  DRAWING_TOOLS / chart-theme / Chart.tsx, so saved drawings still
+ *  render and the context menu "加入垂直線" still creates them.
+ *  Stored favorites / last-used entries naming them are filtered out
+ *  on load below; the stored values themselves are left untouched
+ *  until the next save. */
+const TOOLBAR_HIDDEN_TOOLS: ReadonlySet<DrawingTool> = new Set([
+  'verticalStraightLine',
+  'verticalSegment',
+  'verticalRayLine',
+]);
 
 /** Phase 2 Step 2 localStorage keys — defined here only, never in
  *  lib/store.ts. Favorites: array of tool ids, in starred order.
@@ -110,7 +126,7 @@ function loadFavoriteTools(): DrawingTool[] {
     const known = new Set(DRAWING_TOOLS.map((t) => t.id));
     const out: DrawingTool[] = [];
     for (const v of parsed) {
-      if (typeof v === 'string' && known.has(v as DrawingTool) && !out.includes(v as DrawingTool)) {
+      if (typeof v === 'string' && known.has(v as DrawingTool) && !TOOLBAR_HIDDEN_TOOLS.has(v as DrawingTool) && !out.includes(v as DrawingTool)) {
         out.push(v as DrawingTool);
       }
     }
@@ -137,7 +153,7 @@ function loadLastUsedTools(): Record<string, DrawingTool> {
     const known = new Set(DRAWING_TOOLS.map((t) => t.id));
     const out: Record<string, DrawingTool> = {};
     for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === 'string' && known.has(v as DrawingTool)) {
+      if (typeof v === 'string' && known.has(v as DrawingTool) && !TOOLBAR_HIDDEN_TOOLS.has(v as DrawingTool)) {
         out[k] = v as DrawingTool;
       }
     }
@@ -840,7 +856,10 @@ export default function DrawingBar({
    *  else the last tool picked from the group, else its first tool. */
   const displayedToolFor = (group: (typeof TOOL_GROUPS)[number]) => {
     if (activeTool && group.ids.includes(activeTool)) return activeTool;
-    return lastUsed[group.title] ?? group.ids[0];
+    const last = lastUsed[group.title];
+    // A stale last-used entry (e.g. recorded before the tool left the
+    // toolbar) must never surface a hidden tool as the group icon.
+    return last && group.ids.includes(last) ? last : group.ids[0];
   };
 
   /** Record a pick as the owning group's last-used tool (persisted).
@@ -870,7 +889,7 @@ export default function DrawingBar({
    *  name when nothing has been picked from it yet. */
   const groupTitle = (group: (typeof TOOL_GROUPS)[number]) => {
     const last = lastUsed[group.title];
-    if (!last) return group.title;
+    if (!last || !group.ids.includes(last)) return group.title;
     const label = TOOL_BY_ID.get(last)?.label ?? last;
     return `${group.title} — 最近使用：${label}`;
   };
