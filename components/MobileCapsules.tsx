@@ -939,16 +939,19 @@ export default function MobileBottomBar({
           the drawing tools float instead), so the bar spans the full
           width. Bottom padding is the safe area PLUS a margin: with
           viewport-fit=cover the env() is real (34px on Face ID
-          iPhones), and the extra 0.75rem keeps the capsules visibly
-          inside the viewport — round 1's 8px left them hugging the
-          bottom edge, half under the home indicator. pt-2.5 keeps
+          iPhones). Ryan 2026-11-27: raise the bar a bit higher
+          (extra 1.25rem, was 0.75rem) and make the two capsules
+          even — the bar is a 2-column grid so each pill is exactly
+          half the row (flex-1 measured 177/189 in Chrome: the two
+          pills' content sizes skewed the split), with the right
+          capsule's three buttons centred. pt-2.5 keeps
           them off the chart above. Both capsules are h-12 (48px) so
-          their tops and bottoms align; round 1 had 42px vs 50px. */}
+          their tops and bottoms align. */}
       <div
-        className="relative flex shrink-0 items-center gap-2 pl-2 pr-2 pt-2.5 md:hidden"
+        className="relative grid shrink-0 grid-cols-2 items-center gap-2 pl-2 pr-2 pt-2.5 md:hidden"
         style={{
           paddingBottom:
-            'max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))',
+            'max(1.5rem, calc(env(safe-area-inset-bottom) + 1.25rem))',
         }}
         data-testid="mobile-bottom-bar"
       >
@@ -1019,9 +1022,12 @@ export default function MobileBottomBar({
           </div>
         </div>
 
-        {/* Bottom-right capsule: indicators + chart settings + more. */}
+        {/* Bottom-right capsule: indicators + chart settings + more.
+            flex-1 like the left capsule so the two pills split the
+            row evenly (Ryan 2026-11-27: look balanced); buttons
+            centred inside. */}
         <div
-          className={`flex h-12 shrink-0 items-center gap-0.5 rounded-full px-1.5 ${CAPSULE_BG}`}
+          className={`flex h-12 min-w-0 flex-1 items-center justify-center gap-0.5 rounded-full px-1.5 ${CAPSULE_BG}`}
           data-testid="mobile-actions-capsule"
         >
           <button
