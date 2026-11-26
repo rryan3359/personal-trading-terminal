@@ -43,6 +43,14 @@
  *      screenshot of the overlay tells us exactly where the gesture
  *      dies instead of another round of guessing.
  *
+ * Swipe animation (2026-11-26, Ryan's real-iPhone report): the
+ * swipe itself works (chart redraws), but the capsule value jumps
+ * instantly, so he cannot see what he swiped to. The capsule text
+ * now animates in the swipe direction on every value change
+ * (Web Animations API in an effect — see animateCapsuleText):
+ * swipe up slides the new value in from below, swipe down from
+ * above, ~200ms; tap/sheet changes fade in ~150ms instead.
+ *
  * All sheets are bottom sheets (backdrop + drag handle), mobile-only
  * (`md:hidden`), portalled to document.body. Nothing here renders on
  * desktop.
@@ -470,6 +478,39 @@ function usePointerSwipe(
 const CAPSULE_BG = 'border border-[#2a2e39] bg-[#131722]/90 shadow-lg backdrop-blur';
 
 /**
+ * Animate a capsule's text when its value changes. Swipe up slides
+ * the new value in from below, swipe down from above (~200ms,
+ * ease-out); a change with no swipe direction (tap, bottom sheet)
+ * fades in (~150ms). Web Animations API, applied imperatively:
+ * the swipe handler records the direction in a ref before the
+ * parent state update lands, and the effect consumes it — no
+ * remount/class juggling, so a later re-render can never replay
+ * the animation. The element needs `inline-block` for the
+ * translate to apply.
+ */
+function animateCapsuleText(
+  el: HTMLElement | null,
+  dir: 'up' | 'down' | null,
+) {
+  if (!el) return;
+  if (dir === null) {
+    el.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: 150,
+      easing: 'ease-out',
+    });
+    return;
+  }
+  const from = dir === 'up' ? '100%' : '-100%';
+  el.animate(
+    [
+      { transform: `translateY(${from})`, opacity: 0 },
+      { transform: 'translateY(0)', opacity: 1 },
+    ],
+    { duration: 200, easing: 'ease-out' },
+  );
+}
+
+/**
  * Top-left pill: [symbol | interval], an absolute overlay at the
  * chart's top-left. Tap the symbol to open the watchlist drawer;
  * tap the interval to open the interval sheet. Rendered inside the
@@ -546,6 +587,18 @@ export default function MobileBottomBar({
   sheet,
   onSheetChange,
 }: MobileCapsulesProps) {
+  // Swipe direction for the capsule-text animation, captured by
+  // cycleSymbol/cycleInterval when the value actually changes and
+  // consumed by the effects below. Refs, not state: the animation
+  // must fire exactly once per value change, never on re-render.
+  const symbolDirRef = useRef<'up' | 'down' | null>(null);
+  const intervalDirRef = useRef<'up' | 'down' | null>(null);
+  const symbolTextRef = useRef<HTMLSpanElement | null>(null);
+  const intervalTextRef = useRef<HTMLSpanElement | null>(null);
+  // Skip the mount commit: the capsule must not fade in on load.
+  const symbolMountedRef = useRef(false);
+  const intervalMountedRef = useRef(false);
+
   const cycleSymbol = (dir: 1 | -1) => {
     if (watchlist.length === 0) return;
     const i = watchlist.indexOf(symbol);
@@ -554,7 +607,10 @@ export default function MobileBottomBar({
         (((i < 0 ? 0 : i) + dir) % watchlist.length + watchlist.length) %
         watchlist.length
       ];
-    if (next !== symbol) onSelectSymbol(next);
+    if (next !== symbol) {
+      symbolDirRef.current = dir === 1 ? 'up' : 'down';
+      onSelectSymbol(next);
+    }
   };
   const cycleInterval = (dir: 1 | -1) => {
     const i = SWIPE_INTERVALS.indexOf(interval);
@@ -564,8 +620,32 @@ export default function MobileBottomBar({
           SWIPE_INTERVALS.length) %
         SWIPE_INTERVALS.length
       ];
-    onIntervalChange(next);
+    if (next !== interval) {
+      intervalDirRef.current = dir === 1 ? 'up' : 'down';
+      onIntervalChange(next);
+    }
   };
+
+  // Animate the capsule text on value change (direction from the
+  // swipe that caused it, fade when it came from a tap/sheet).
+  useEffect(() => {
+    if (!symbolMountedRef.current) {
+      symbolMountedRef.current = true;
+      return;
+    }
+    const dir = symbolDirRef.current;
+    symbolDirRef.current = null;
+    animateCapsuleText(symbolTextRef.current, dir);
+  }, [symbol]);
+  useEffect(() => {
+    if (!intervalMountedRef.current) {
+      intervalMountedRef.current = true;
+      return;
+    }
+    const dir = intervalDirRef.current;
+    intervalDirRef.current = null;
+    animateCapsuleText(intervalTextRef.current, dir);
+  }, [interval]);
 
   const closeSheet = () => onSheetChange(null);
 
@@ -719,7 +799,12 @@ export default function MobileBottomBar({
               style={{ touchAction: 'none' }}
               className="flex h-full w-full items-center px-3 text-sm font-semibold text-white"
             >
-              <span className="truncate">{symbol}</span>
+              <span
+                ref={symbolTextRef}
+                className="inline-block truncate"
+              >
+                {symbol}
+              </span>
             </button>
           </div>
           <span className="w-px shrink-0 bg-[#2a2e39]" aria-hidden="true" />
@@ -735,7 +820,9 @@ export default function MobileBottomBar({
               style={{ touchAction: 'none' }}
               className="flex h-full items-center px-3 text-sm font-medium text-white"
             >
-              {INTERVAL_LABELS[interval]}
+              <span ref={intervalTextRef} className="inline-block">
+                {INTERVAL_LABELS[interval]}
+              </span>
             </button>
           </div>
         </div>
