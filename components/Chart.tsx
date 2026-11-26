@@ -119,6 +119,11 @@ import {
   type RangeId,
 } from '@/lib/chart-config';
 import {
+  createContextMenuController,
+  type ContextMenuController,
+  type ContextMenuState,
+} from '@/lib/chart-context-menu';
+import {
   createCrosshairController,
   type CrosshairController,
 } from '@/lib/chart-crosshair';
@@ -128,6 +133,23 @@ import {
 } from '@/lib/chart-appearance';
 import { DrawingHistoryManager } from '@/lib/drawing-history';
 import {
+  isInView,
+  MEASURE_NAME,
+  normalizeZLevels,
+  parseOverlayText,
+  parseVisibleIntervals,
+  TEXT_ANNOTATION_NAME,
+  toSavedOverlay,
+  validateSavedOverlay,
+  type OverlayLineParsers,
+} from '@/lib/drawing-model';
+import {
+  createDrawingPersistence,
+  type DrawingPersistence,
+  type OverlayTemplate,
+  type OverlayTemplates,
+} from '@/lib/drawing-persistence';
+import {
   DEFAULT_OVERLAY_STYLE,
   DEFAULT_OVERLAY_TEXT,
   getLastOverlayStyle,
@@ -136,7 +158,6 @@ import {
   newOverlayId,
   saveDrawingsStore,
   saveLastOverlayStyle,
-  STORAGE_KEYS,
   type LastOverlayStyle,
   type OverlayStylePatch,
   type OverlayText,
@@ -157,6 +178,10 @@ export interface ChartHandle {
    * the widest available window.
    */
   setRange: (range: RangeId) => void;
+  /** Restore the default view (same range as the context menu's 重設圖表檢視). */
+  resetView: () => void;
+  /** Open the object list panel. */
+  openObjectList: () => void;
 }
 
 export interface ChartProps {
@@ -196,16 +221,28 @@ function periodFor(interval: Interval): Period {
   switch (interval) {
     case '1m':
       return { type: 'minute', span: 1 };
+    case '3m':
+      return { type: 'minute', span: 3 };
     case '5m':
       return { type: 'minute', span: 5 };
     case '15m':
       return { type: 'minute', span: 15 };
+    case '30m':
+      return { type: 'minute', span: 30 };
     case '1h':
       return { type: 'hour', span: 1 };
+    case '2h':
+      return { type: 'hour', span: 2 };
     case '4h':
       return { type: 'hour', span: 4 };
+    case '6h':
+      return { type: 'hour', span: 6 };
+    case '12h':
+      return { type: 'hour', span: 12 };
     case '1d':
       return { type: 'day', span: 1 };
+    case '3d':
+      return { type: 'day', span: 3 };
     case '1w':
       return { type: 'week', span: 1 };
     case '1M':
@@ -223,7 +260,6 @@ function isMainPaneIndicator(name: string): boolean {
 // (index.esm.js:15702), so a bare name always opens a new sub-pane.
 const CANDLE_PANE_ID = 'candle_pane';
 
-const MEASURE_NAME = 'measure';
 /**
  * Range the context menu's 重設圖表檢視 restores. No default-range
  * constant exists in the codebase (page starts with activeRange null
@@ -267,9 +303,6 @@ const TOUCH_FALLBACK_WAIT_MS = 150;
  * set only there, cleared when mode leaves Selected.
  */
 const BAR_COMPAT_CLICK_SUPPRESS_MS = 300;
-/** Custom overlay name for a drawing's attached text label. */
-const TEXT_ANNOTATION_NAME = 'textAnnotation';
-
 /** Checkerboard behind translucent color swatches (shows opacity). */
 const CHECKER_BG = {
   backgroundImage:
@@ -383,62 +416,6 @@ function BarTrashIcon() {
   );
 }
 
-/**
- * Overlay style templates, kept in Chart.tsx only (the settings
- * dialog's template dropdown stays UI-only until Phase 3, and
- * lib/store.ts is untouched). Stored in localStorage grouped by
- * overlay name (tool type), so a template saved from a trend line
- * only lists for trend lines. A saved template is a style snapshot
- * (colour / opacity / line width / line style / fill opacity) —
- * extend is NOT stored: extend is derived from the overlay name +
- * point order and changing it needs delete + recreate.
- */
-const TEMPLATE_STORAGE_KEY = 'ptt:overlay-templates';
-
-interface OverlayTemplate {
-  name: string;
-  style: LastOverlayStyle;
-}
-
-type OverlayTemplates = Record<string, OverlayTemplate[]>;
-
-function loadTemplates(): OverlayTemplates {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = window.localStorage.getItem(TEMPLATE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
-      return {};
-    const out: OverlayTemplates = {};
-    for (const [key, value] of Object.entries(
-      parsed as Record<string, unknown>,
-    )) {
-      if (!Array.isArray(value)) continue;
-      const list = value.filter(
-        (t): t is OverlayTemplate =>
-          t !== null &&
-          typeof t === 'object' &&
-          typeof (t as OverlayTemplate).name === 'string' &&
-          (t as OverlayTemplate).style !== null &&
-          typeof (t as OverlayTemplate).style === 'object',
-      );
-      if (list.length > 0) out[key] = list;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function saveTemplates(next: OverlayTemplates): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(next));
-  } catch {
-    // Storage full / private mode: templates stay in memory only.
-  }
-}
 
 /** Snapshot of one selected overlay for the floating edit bar and the
  *  settings dialog. Points/text/visibility/extend are read from the
@@ -598,14 +575,6 @@ function stylesForOverlay(
   };
 }
 
-/** Whether a saved overlay belongs on the given interval's chart.
- *  undefined visibleIntervals = shown on every interval. */
-function isInView(o: SavedOverlay, interval: string): boolean {
-  return (
-    o.visibleIntervals === undefined ||
-    o.visibleIntervals.includes(interval)
-  );
-}
 
 /** Distance from a point to the segment a–b (px). Touch tap fallback. */
 function distToSegment(
@@ -625,181 +594,8 @@ function distToSegment(
 /** Deterministic id of a main line's accompanying text annotation. */
 const textAnnotationId = (mainId: string): string => `${mainId}:text`;
 
-/** Validate an extendData.text value into an OverlayText, or null. */
-function parseOverlayText(v: unknown): OverlayText | null {
-  if (typeof v !== 'object' || v === null) return null;
-  const t = v as Record<string, unknown>;
-  if (typeof t.content !== 'string' || t.content.length === 0) return null;
-  return {
-    content: t.content,
-    color:
-      typeof t.color === 'string' ? t.color : DEFAULT_OVERLAY_TEXT.color,
-    size:
-      typeof t.size === 'number' && t.size > 0
-        ? t.size
-        : DEFAULT_OVERLAY_TEXT.size,
-    bold: t.bold === true,
-    italic: t.italic === true,
-    alignV:
-      t.alignV === 'top' || t.alignV === 'bottom' ? t.alignV : 'middle',
-    alignH:
-      t.alignH === 'left' || t.alignH === 'right' ? t.alignH : 'center',
-  };
-}
 
-/** Validate an extendData.visibleIntervals value. */
-function parseVisibleIntervals(v: unknown): string[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const list = v.filter((x): x is string => typeof x === 'string');
-  return list.length > 0 ? list : [];
-}
 
-/** Only fully-drawn overlays (every point has timestamp + value) are saved.
- *  The measure tool is never saved. A text annotation is never saved
- *  when it is a companion (id `${mainId}:text`, rebuilt from its main
- *  line's text on restore); a STANDALONE text annotation (the 文字標註
- *  tool) is saved like any other drawing. */
-function toSavedOverlay(o: Overlay): SavedOverlay | null {
-  if (o.name === MEASURE_NAME) return null;
-  if (o.name === TEXT_ANNOTATION_NAME && o.id.endsWith(':text')) {
-    return null;
-  }
-  if (o.points.length === 0) return null;
-  const points: SavedOverlay['points'] = [];
-  for (const p of o.points) {
-    if (p.timestamp === undefined || p.value === undefined) return null;
-    points.push({ timestamp: p.timestamp, value: p.value });
-  }
-  const line = o.styles?.line;
-  const ext = (o.extendData ?? {}) as Record<string, unknown>;
-  // First-class fields live on SavedOverlay, not in extendData.
-  const visibleIntervals = parseVisibleIntervals(ext.visibleIntervals);
-  const legacyIntervals =
-    visibleIntervals === undefined &&
-    ext.scope === 'interval' &&
-    typeof ext.interval === 'string'
-      ? [ext.interval]
-      : undefined;
-  const restEntries = Object.entries(ext).filter(
-    ([k]) =>
-      k !== 'scope' &&
-      k !== 'interval' &&
-      k !== 'visibleIntervals' &&
-      k !== 'text',
-  );
-  let styles: OverlayStylePatch | undefined;
-  if (line?.color !== undefined) {
-    const { color, opacity } = parseLineColor(line.color);
-    styles = {
-      color,
-      size: line.size ?? 1,
-      style: logicalLineStyle(line),
-      ...(opacity < 1 ? { opacity } : {}),
-    };
-  }
-  const text = parseOverlayText(ext.text);
-  return {
-    id: o.id,
-    // Old saves used the built-in name; the custom overlay replaces it.
-    name: o.name === 'fibonacciLine' ? 'fibonacciRetracement' : o.name,
-    points,
-    styles,
-    lock: o.lock || undefined,
-    visible: o.visible === false ? false : undefined,
-    extendData: restEntries.length > 0 ? Object.fromEntries(restEntries) : undefined,
-    visibleIntervals: visibleIntervals ?? legacyIntervals,
-    text: text ?? undefined,
-    ...(o.zLevel !== 0 ? { zLevel: o.zLevel } : {}),
-  };
-}
-
-/** Names a restored overlay may carry (G-05 validation). */
-const DRAWING_TOOL_NAMES: ReadonlySet<string> = new Set(
-  DRAWING_TOOLS.map((t) => t.id),
-);
-
-/**
- * Validate one stored overlay before restore (G-05). Returns a
- * sanitised copy, or null when the entry is unusable and must be
- * skipped: unregistered name, non-finite point, duplicate id,
- * companion ':text' id (companions are never persisted), or no
- * points. Bad scalar fields (lock / visible / zLevel / styles /
- * extendData / visibleIntervals / text) are repaired to defaults
- * instead of dropping the drawing. Invalid entries are skipped at
- * restore and, like deleted overlays, are not re-written by the next
- * persist (readMergedList only keeps stored out-of-view entries plus
- * live ones) — the skip counts are console.warned and recorded in
- * the step report.
- */
-function validateSavedOverlay(
-  raw: unknown,
-  seenIds: Set<string>,
-): SavedOverlay | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const o = raw as Partial<SavedOverlay> & Record<string, unknown>;
-  const name =
-    o.name === 'fibonacciLine' ? 'fibonacciRetracement' : o.name;
-  if (typeof name !== 'string' || !DRAWING_TOOL_NAMES.has(name)) return null;
-  const id =
-    typeof o.id === 'string' && o.id.length > 0 ? o.id : newOverlayId();
-  if (id.endsWith(':text')) return null;
-  if (seenIds.has(id)) return null;
-  seenIds.add(id);
-  if (!Array.isArray(o.points) || o.points.length === 0) return null;
-  const points: Array<{ timestamp: number; value: number }> = [];
-  for (const p of o.points as Array<unknown>) {
-    if (typeof p !== 'object' || p === null) return null;
-    const pt = p as { timestamp?: unknown; value?: unknown };
-    if (
-      typeof pt.timestamp !== 'number' ||
-      !Number.isFinite(pt.timestamp) ||
-      typeof pt.value !== 'number' ||
-      !Number.isFinite(pt.value)
-    ) {
-      return null;
-    }
-    points.push({ timestamp: pt.timestamp, value: pt.value });
-  }
-  const styles =
-    typeof o.styles === 'object' && o.styles !== null
-      ? (o.styles as OverlayStylePatch)
-      : undefined;
-  const extendData =
-    typeof o.extendData === 'object' && o.extendData !== null
-      ? (o.extendData as Record<string, unknown>)
-      : undefined;
-  return {
-    id,
-    name,
-    points,
-    styles,
-    lock: o.lock === true,
-    visible: o.visible !== false,
-    extendData,
-    visibleIntervals: parseVisibleIntervals(o.visibleIntervals),
-    text: parseOverlayText(o.text) ?? undefined,
-    zLevel:
-      typeof o.zLevel === 'number' && Number.isFinite(o.zLevel)
-        ? o.zLevel
-        : 0,
-  };
-}
-
-/**
- * Renumber zLevels to consecutive integers 0..n-1, preserving the
- * current order (stable for ties) — G-16. Applied on restore and on
- * undo/redo snapshots; copy / bring-to-front / send-to-back keep
- * their max+1 / min-1 behaviour and are normalised on the next
- * restore / undo instead.
- */
-function normalizeZLevels(list: SavedOverlay[]): SavedOverlay[] {
-  const ranked = list
-    .map((o, i) => ({ o, i }))
-    .sort((a, b) => (a.o.zLevel ?? 0) - (b.o.zLevel ?? 0) || a.i - b.i);
-  const rank = new Map<string, number>();
-  ranked.forEach(({ o }, r) => rank.set(o.id, r));
-  return list.map((o) => ({ ...o, zLevel: rank.get(o.id) ?? 0 }));
-}
 
 
 
@@ -863,11 +659,27 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
    */
   const lastRestoredKeyRef = useRef<string | null>(null);
   /**
-   * G-05: true once the stored drawings JSON was found corrupt, so
-   * the console warning is logged once per session (the write itself
-   * stays suppressed until the raw value parses again).
+   * Drawing persistence (Phase 3 Step 3): owns readMergedList /
+   * persist / templates in lib/drawing-persistence.ts (origin:
+   * inline in this file). Chart holds a single instance in a ref;
+   * the thin wrappers below (readMergedList / persistDrawings)
+   * delegate to it. The line parsers stay here (Step 7 style
+   * helpers) and are injected; the G-05 corrupt-once flag lives in
+   * the instance. Created before the templates state below, whose
+   * lazy initializer reads through it.
    */
-  const drawingsStoreCorruptRef = useRef(false);
+  const lineParsers: OverlayLineParsers = {
+    parseLineColor,
+    logicalLineStyle,
+  };
+  const persistenceRef = useRef<DrawingPersistence | null>(null);
+  if (persistenceRef.current === null) {
+    persistenceRef.current = createDrawingPersistence(
+      () => chartRef.current,
+      lineParsers,
+    );
+  }
+  const persistence = persistenceRef.current;
   /** Id of the overlay currently being drawn, if any. */
   const drawingIdRef = useRef<string | null>(null);
   /** Whether Ctrl/Cmd is currently held (temporarily inverts magnet). */
@@ -1074,7 +886,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   >(null);
   /** Overlay style templates, grouped by overlay name (tool type). */
   const [templates, setTemplates] =
-    useState<OverlayTemplates>(loadTemplates);
+    useState<OverlayTemplates>(() => persistence.loadTemplates());
   /** Name typed for "save current style as template". */
   const [templateName, setTemplateName] = useState('');
   /**
@@ -1106,6 +918,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
   /** Last loaded / live candle, shown in the top-left legend overlay. */
   const [lastKline, setLastKline] = useState<KLineData | null>(null);
+  /** Ref mirror so the once-created context-menu controller (Step 4)
+   *  always reads the latest candle for its price/time fallback. */
+  const lastKlineRef = useRef<KLineData | null>(null);
+  lastKlineRef.current = lastKline;
   /**
    * Crosshair hover state (Phase 3 Step 1): owned by the
    * CrosshairController in lib/chart-crosshair.ts (origin: Phase 1
@@ -1199,83 +1015,23 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   };
 
   // ---- drawing persistence -------------------------------------------
+  // Thin wrappers over the DrawingPersistence instance (created
+  // above): every existing call site keeps calling these names.
+  // persist returns a PersistResult; `warning: undefined` means the
+  // write was skipped, so the saveWarning banner is left untouched
+  // (as the old inline early returns did); null clears it.
 
-  /**
-   * Full symbol-level list: stored overlays outside the current view
-   * (overlays not visible on this interval) + the live overlays on
-   * this chart. Live overlays win on id collisions.
-   */
   const readMergedList = (
     symbol: string,
     interval: string,
-  ): SavedOverlay[] => {
-    const store = loadDrawingsStore();
-    const stored = store[symbol] ?? [];
-    const others = stored.filter((o) => !isInView(o, interval));
-    const chart = chartRef.current;
-    if (!chart) return stored;
-    const live = chart
-      .getOverlays()
-      .map(toSavedOverlay)
-      .filter((o): o is SavedOverlay => o !== null);
-    const liveIds = new Set(live.map((o) => o.id));
-    return [...others.filter((o) => !liveIds.has(o.id)), ...live];
-  };
+  ): SavedOverlay[] => persistence.readMergedList(symbol, interval);
 
   const persistDrawings = (symbol: string, interval: string) => {
-    if (suppressSaveRef.current) return;
-    // G-19: never persist for a view whose first restore has not
-    // completed — the live list is still empty then, and writing it
-    // would wipe the stored drawings for the symbol.
-    if (lastRestoredKeyRef.current !== `${symbol}:${interval}`) return;
-    // G-05: a corrupt stored JSON must never be overwritten with the
-    // (fallback-empty) store. Suppress the write and warn once.
-    let raw: string | null = null;
-    try {
-      raw = window.localStorage.getItem(STORAGE_KEYS.drawings);
-      if (raw !== null) {
-        const parsed: unknown = JSON.parse(raw);
-        if (typeof parsed !== 'object' || parsed === null) {
-          throw new Error('drawings store is not an object');
-        }
-      }
-    } catch {
-      if (raw !== null) {
-        if (!drawingsStoreCorruptRef.current) {
-          drawingsStoreCorruptRef.current = true;
-          console.warn(
-            '[ptt] drawings store corrupt, persist suppressed to avoid overwriting it',
-          );
-        }
-        setSaveWarning(
-          '畫線存檔損毀，已暫停自動儲存以免覆蓋舊資料。',
-        );
-        return;
-      }
-      // getItem itself threw (storage unavailable): fall through to
-      // the write attempt; the read-back check below reports it.
-    }
-    const store = loadDrawingsStore();
-    store[symbol] = readMergedList(symbol, interval);
-    const intended = JSON.stringify(store);
-    saveDrawingsStore(store);
-    // G-12: verify the write landed — a silent quota / private-mode
-    // failure used to look like a successful save.
-    let written: string | null = null;
-    try {
-      written = window.localStorage.getItem(STORAGE_KEYS.drawings);
-    } catch {
-      written = null;
-    }
-    if (written !== intended) {
-      setSaveWarning(
-        '畫線儲存失敗（瀏覽器儲存空間已滿或處於私密模式），重整後畫線可能消失。',
-      );
-    } else {
-      // Same-value setState bails out, so this is a no-op when no
-      // warning is showing.
-      setSaveWarning(null);
-    }
+    const result = persistence.persist(symbol, interval, {
+      suppressSave: suppressSaveRef.current,
+      lastRestoredKey: lastRestoredKeyRef.current,
+    });
+    if (result.warning !== undefined) setSaveWarning(result.warning);
   };
 
   // ---- text annotation (Phase 2) ---------------------------------------
@@ -1826,7 +1582,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         const snapshot = historyManager.takeMoveStartSnapshot();
         if (snapshot) {
           const before = snapshot.find((o) => o.id === e.overlay.id);
-          const after = toSavedOverlay(e.overlay);
+          const after = toSavedOverlay(e.overlay, lineParsers);
           if (
             before !== undefined &&
             after !== null &&
@@ -2339,7 +2095,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     if (!chart) return;
     const o = chart.getOverlays({ id: cur.id })[0];
     if (!o) return;
-    const saved = toSavedOverlay(o);
+    const saved = toSavedOverlay(o, lineParsers);
     if (!saved) return;
     pushHistory();
     // In-place copy: same points, on top of the original (max zLevel + 1)
@@ -2985,276 +2741,68 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     chart.scrollToRealTime();
   };
 
-  // ---- context menu (Phase 1 step 4, Phase 0 §6.2 / §7.1) ------------
+  // ---- context menu (Phase 3 Step 4, Phase 0 §6.2 / §7.1) -----------
   //
-  // Opening / closing goes through the step-3 ContextMenu overlay
-  // state (enterOverlayMode records previousMode; close restores it,
-  // never assuming Idle). While the menu is open every chart
-  // interaction pauses: the backdrop swallows pointer/wheel events
-  // before they reach the canvas, scroll + zoom are disabled at the
-  // chart, arming is refused by transitionMode, and the keyboard
-  // effect only answers Escape. All actions reuse existing
-  // functions — nothing here invents a second implementation.
-
-  /** Snapshot taken when the menu opens (anchor + price/time + selection). */
-  interface ContextMenuState {
-    /** Anchor in wrapper-relative px (the menu flips inside the wrapper). */
-    x: number;
-    y: number;
-    /** Wrapper client size at open time, for the menu's edge flip. */
-    bounds: { width: number; height: number };
-    /** Price-axis value at the click; null when no data is loaded. */
-    price: number | null;
-    /** Candle timestamp at the click; null when no data is loaded. */
-    timestamp: number | null;
-    /** Selected overlay id at open time; null = chart-only menu. */
-    selectedId: string | null;
-    locked: boolean;
-    visible: boolean;
-  }
+  // Owned by the ContextMenuController in lib/chart-context-menu.ts
+  // (was inline here since Phase 1 step 4). Chart holds a single
+  // instance in a ref; the menu state is mirrored to React state
+  // through onStateChange for ChartContextMenu.tsx (pure
+  // presentation, untouched) to render. The controller only issues
+  // action requests through `actions` — it never operates the chart
+  // itself, except for the scroll/zoom enable-disable that brackets
+  // the open menu. G-18 holds: right-clicking an overlay never
+  // deletes it; `delete` goes through the normal deleteSelected path.
+  // chart-settings opens the appearance dialog (outer appearance
+  // track); openDialogFor is bound to the 'style' tab here because
+  // DialogTab lives in Chart.
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(
     null,
   );
-  const contextMenuRef = useRef<ContextMenuState | null>(null);
-  /** Menu root element (outside-pointerdown close check). */
-  const menuRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuControllerRef = useRef<ContextMenuController | null>(null);
+  if (contextMenuControllerRef.current === null) {
+    contextMenuControllerRef.current = createContextMenuController({
+      getChart: () => chartRef.current,
+      getContainer: () => containerRef.current,
+      getWrapper: () => wrapperRef.current,
+      getSelected: () => selectedRef.current,
+      getLastKline: () => lastKlineRef.current,
+      isDialogOpen: () => dialogOpenRef.current,
+      isDragging: () =>
+        modeRef.current === 'Moving' || modeRef.current === 'Resizing',
+      isOpen: () => modeRef.current === 'ContextMenu',
+      onModeEnter: () => enterOverlayMode('ContextMenu', 'contextmenu:open'),
+      onModeExit: () => exitOverlayMode('contextmenu:close'),
+      onStateChange: setContextMenu,
+      actions: {
+        armHorizontalAt: (timestamp, price) =>
+          armOverlay('horizontalStraightLine', [{ timestamp, value: price }]),
+        armVerticalAt: (timestamp, price) =>
+          armOverlay('verticalStraightLine', [{ timestamp, value: price }]),
+        deleteSelected: () => deleteSelected(),
+        copySelected: () => copySelected(),
+        bringToFront: () => bringToFront(),
+        sendToBack: () => sendToBack(),
+        toggleLock: (locked) => applyEdit({ lock: locked }),
+        toggleVisible: (visible) => applyEdit({ visible }),
+        openDialogFor: (id) => openDialogFor(id, 'style'),
+        openAppearanceSettings: () =>
+          onOpenAppearanceSettingsRef.current?.(),
+        resetView: () => applyRange(DEFAULT_RESET_RANGE),
+      },
+    });
+  }
+  const contextMenuController = contextMenuControllerRef.current;
 
-  /** Single funnel for closing the menu: restore pan/zoom, exit the
-   *  overlay state back to previousMode. No-op when no menu is open,
-   *  so the backdrop and the document listener can both call it for
-   *  the same press without logging a rejected transition. */
-  const closeContextMenu = () => {
-    if (modeRef.current !== 'ContextMenu') return;
-    contextMenuRef.current = null;
-    setContextMenu(null);
-    const chart = chartRef.current;
-    if (chart) {
-      chart.setScrollEnabled(true);
-      chart.setZoomEnabled(true);
-    }
-    exitOverlayMode('contextmenu:close');
-  };
-
-  /** Open the menu at a viewport point. Returns early (no menu, no
-   *  mode change) while the settings dialog is open — the dialog owns
-   *  focus, same rule as the chart keyboard shortcuts — and mid-drag,
-   *  where the drag owns the pointer. Right-clicking while the menu
-   *  is already open repositions it instead of nesting states. */
-  const openContextMenu = (clientX: number, clientY: number) => {
-    if (dialogOpenRef.current) return;
-    if (modeRef.current === 'Moving' || modeRef.current === 'Resizing')
-      return;
-    const chart = chartRef.current;
-    const container = containerRef.current;
-    const wrapper = wrapperRef.current;
-    if (!chart || !container || !wrapper) return;
-    const rect = container.getBoundingClientRect();
-    const wrapRect = wrapper.getBoundingClientRect();
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
-    // Price + time at the click. convertFromPixel returns
-    // { dataIndex, timestamp, value }; fall back to the hovered
-    // candle's close, then the last candle. No data at all: the menu
-    // still opens, but the price actions are disabled.
-    let price: number | null = null;
-    let timestamp: number | null = null;
-    try {
-      const raw = chart.convertFromPixel([{ x: px, y: py }]);
-      const p = Array.isArray(raw) ? raw[0] : raw;
-      if (p && typeof p.value === 'number' && Number.isFinite(p.value)) {
-        price = p.value;
-      }
-      if (
-        p &&
-        typeof p.timestamp === 'number' &&
-        Number.isFinite(p.timestamp)
-      ) {
-        timestamp = p.timestamp;
-      }
-      if (price === null && p && typeof p.dataIndex === 'number') {
-        const list = chart.getDataList();
-        const k =
-          p.dataIndex >= 0 && p.dataIndex < list.length
-            ? list[p.dataIndex]
-            : undefined;
-        if (k) {
-          price = k.close;
-          timestamp = k.timestamp;
-        }
-      }
-    } catch {
-      // Conversion failed: fall through to the last-candle fallback.
-    }
-    if (price === null && lastKline) price = lastKline.close;
-    if (timestamp === null && lastKline) timestamp = lastKline.timestamp;
-    const sel = selectedRef.current;
-    const anchor: ContextMenuState = {
-      x: clientX - wrapRect.left,
-      y: clientY - wrapRect.top,
-      bounds: { width: wrapper.clientWidth, height: wrapper.clientHeight },
-      price,
-      timestamp,
-      selectedId: sel?.id ?? null,
-      locked: sel?.lock ?? false,
-      visible: sel?.visible ?? true,
-    };
-    if (modeRef.current === 'ContextMenu') {
-      contextMenuRef.current = anchor;
-      setContextMenu(anchor);
-      return;
-    }
-    if (!enterOverlayMode('ContextMenu', 'contextmenu:open')) return;
-    chart.setScrollEnabled(false);
-    chart.setZoomEnabled(false);
-    contextMenuRef.current = anchor;
-    setContextMenu(anchor);
-  };
-
-  /** Copy the clicked price to the clipboard. Best-effort and
-   *  silent on failure by design (Phase 0 §6.2 [待驗證]): clipboard
-   *  permission depends on the browser. The copied text is the
-   *  displayed price without thousands separators, so it pastes
-   *  cleanly into a numeric field. */
-  const copyPriceAt = (price: number) => {
-    const text = formatPrice(price).replace(/,/g, '');
-    if (process.env.NODE_ENV !== 'production') {
-      (
-        window as unknown as { __pttCopiedPrice?: string }
-      ).__pttCopiedPrice = text;
-    }
-    try {
-      const done = navigator.clipboard?.writeText(text);
-      if (done && typeof done.catch === 'function') done.catch(() => {});
-    } catch {
-      // Silent: a failed copy must never surface an error.
-    }
-    try {
-      if (!navigator.clipboard) {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
-    } catch {
-      // Silent (see above).
-    }
-  };
-
-  /** Close the menu first, then run the action in the restored mode:
-   *  Editing opens from Selected (never nested inside ContextMenu),
-   *  delete deselects back to Idle, a new line auto-selects. */
-  const runMenuAction = (fn: () => void) => {
-    closeContextMenu();
-    fn();
-  };
-
-  /** Dispatch one menu item. All branches reuse existing functions;
-   *  nothing here re-implements an edit, copy, lock, hide, reorder
-   *  or delete. */
-  const handleContextMenuSelect = (id: string) => {
-    const menu = contextMenuRef.current;
-    if (!menu) return;
-    switch (id) {
-      case 'copy-price':
-        if (menu.price !== null) {
-          const price = menu.price;
-          runMenuAction(() => copyPriceAt(price));
-        } else {
-          closeContextMenu();
-        }
-        break;
-      case 'add-hline':
-        if (menu.price !== null) {
-          // horizontalStraightLine is a 1-point overlay (totalStep 2,
-          // bundle-verified): one point at the clicked price draws
-          // the full-width line.
-          const price = menu.price;
-          const timestamp = menu.timestamp ?? Date.now();
-          runMenuAction(() =>
-            armOverlay('horizontalStraightLine', [{ timestamp, value: price }]),
-          );
-        } else {
-          closeContextMenu();
-        }
-        break;
-      case 'add-vline':
-        if (menu.timestamp !== null) {
-          // verticalStraightLine is likewise 1-point: one point at
-          // the clicked time (value = clicked price, unused by the
-          // figure) draws the full-height line.
-          const timestamp = menu.timestamp;
-          const value = menu.price ?? 0;
-          runMenuAction(() =>
-            armOverlay('verticalStraightLine', [{ timestamp, value }]),
-          );
-        } else {
-          closeContextMenu();
-        }
-        break;
-      case 'reset-view':
-        runMenuAction(() => applyRange(DEFAULT_RESET_RANGE));
-        break;
-      case 'chart-settings':
-        runMenuAction(() => onOpenAppearanceSettingsRef.current?.());
-        break;
-      case 'edit':
-        if (menu.selectedId) {
-          const selectedId = menu.selectedId;
-          runMenuAction(() => openDialogFor(selectedId, 'style'));
-        } else {
-          closeContextMenu();
-        }
-        break;
-      case 'copy':
-        runMenuAction(() => copySelected());
-        break;
-      case 'lock':
-        runMenuAction(() => applyEdit({ lock: !menu.locked }));
-        break;
-      case 'hide':
-        runMenuAction(() => applyEdit({ visible: !menu.visible }));
-        break;
-      case 'front':
-        runMenuAction(() => bringToFront());
-        break;
-      case 'back':
-        runMenuAction(() => sendToBack());
-        break;
-      case 'delete':
-        runMenuAction(() => deleteSelected());
-        break;
-      default:
-        closeContextMenu();
-        break;
-    }
-  };
-
-  /** Container right-click: suppress the browser menu and open ours.
-   *  The dialog-open and mid-drag guards live in openContextMenu. */
-  const handleContainerContextMenu = (e: ReactMouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    openContextMenu(e.clientX, e.clientY);
-  };
-
-  /** Close the menu on any pointer press outside it (same pattern as
-   *  the floating-bar popover effect). Presses on the chart itself
-   *  land on the backdrop first; this covers the toolbar, watchlist
-   *  and range bar. */
+  /** Close the menu on any pointer press outside it (effect lives
+   *  here because it is React state-driven; the listener itself is
+   *  owned by the controller). Presses on the chart itself land on
+   *  the backdrop first; this covers the toolbar, watchlist and
+   *  range bar. */
   useEffect(() => {
     if (contextMenu === null) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (menuRef.current?.contains(e.target as Node)) return;
-      closeContextMenu();
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextMenu]);
+    return contextMenuController.attachOutsideClose();
+  }, [contextMenu, contextMenuController]);
 
   useImperativeHandle(ref, () => ({
     clearDrawings() {
@@ -3291,6 +2839,13 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     },
     setRange(range: RangeId) {
       applyRange(range);
+    },
+    resetView() {
+      applyRange(DEFAULT_RESET_RANGE);
+    },
+    openObjectList() {
+      refreshObjectList();
+      setObjectListOpen(true);
     },
   }));
 
@@ -3610,7 +3165,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       if (modeRef.current === 'ContextMenu') {
         if (e.key === 'Escape') {
           e.preventDefault();
-          closeContextMenu();
+          contextMenuController.close();
         }
         return;
       }
@@ -3988,7 +3543,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           ? group.map((t, i) => (i === idx ? { name, style } : t))
           : [...group, { name, style }];
       const next = { ...prev, [cur.name]: nextGroup };
-      saveTemplates(next);
+      persistence.saveTemplates(next);
       return next;
     });
     setTemplateName('');
@@ -4003,7 +3558,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       const next = { ...prev };
       if (group.length > 0) next[cur.name] = group;
       else delete next[cur.name];
-      saveTemplates(next);
+      persistence.saveTemplates(next);
       return next;
     });
   };
@@ -4023,7 +3578,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       <div
         ref={containerRef}
         onClick={handleContainerClick}
-        onContextMenu={handleContainerContextMenu}
+        onContextMenu={contextMenuController.handleContainerContextMenu}
         onPointerDown={onContainerPointerDown}
         onPointerUp={onContainerPointerUp}
         onMouseLeave={() => {
@@ -4400,16 +3955,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               the menu instead of opening the browser menu. */}
           <div
             data-testid="chart-context-menu-backdrop"
-            onPointerDown={closeContextMenu}
+            onPointerDown={() => contextMenuController.close()}
             onContextMenu={(e) => {
               e.preventDefault();
-              openContextMenu(e.clientX, e.clientY);
+              contextMenuController.open(e.clientX, e.clientY);
             }}
             className="absolute inset-0 z-30"
             aria-hidden="true"
           />
           <ChartContextMenu
-            menuRef={menuRef}
+            menuRef={contextMenuController.menuRef}
             x={contextMenu.x}
             y={contextMenu.y}
             bounds={contextMenu.bounds}
@@ -4459,7 +4014,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
                   ]
                 : []),
             ]}
-            onSelect={handleContextMenuSelect}
+            onSelect={contextMenuController.select}
           />
         </>
       )}

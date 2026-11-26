@@ -16,10 +16,14 @@
  *   │   Binance WS 連線狀態 + 最後 tick)                │
  *   └───────────────────────────────────────────────────┘
  *
- * Mobile (<md): the drawing bar stays on the left, the watchlist
- * becomes a slide-over drawer from the right opened from the toolbar
- * (☰ 自選), and the chart takes the remaining width. The root uses
- * h-dvh so the mobile browser chrome does not cut the layout off.
+ * Mobile (<md): the top toolbar, range bar and status bar are hidden
+ * and replaced by floating capsules over a full-bleed chart: a
+ * top-left symbol/interval pill, a favorites-only drawing bar on the
+ * left (undo + full-list button at its bottom), a swipeable
+ * symbol/interval capsule at bottom-left, and an actions capsule at
+ * bottom-right. The watchlist stays a slide-over drawer from the
+ * right. The root uses h-dvh so the mobile browser chrome does not
+ * cut the layout off. Desktop (md+) is unchanged.
  *
  * Symbol, interval, watchlist and indicator settings are persisted in
  * localStorage and restored on the next visit. Drawings are persisted by
@@ -42,6 +46,7 @@ import Watchlist from '@/components/Watchlist';
 import RangeBar from '@/components/RangeBar';
 import StatusBar from '@/components/StatusBar';
 import ChartAppearanceDialog from '@/components/ChartAppearanceDialog';
+import MobileCapsules from '@/components/MobileCapsules';
 import type { ChartHandle } from '@/components/Chart';
 import {
   DEFAULT_APPEARANCE,
@@ -254,6 +259,9 @@ export default function Home() {
 
   return (
     <div className="flex h-dvh flex-col bg-[#0b0e11] text-[#d1d4dc]">
+      {/* Desktop only: the top toolbar is hidden on mobile (the
+          floating capsules replace it). */}
+      <div className="hidden md:block">
       <Toolbar
         symbol={symbol}
         interval={interval}
@@ -276,14 +284,17 @@ export default function Home() {
         canRedo={canRedo}
         onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
       />
+      </div>
       <div className="flex min-h-0 flex-1">
         <DrawingBar
           activeTool={activeTool}
           onToolChange={handleToolChange}
           onClear={() => chartRef.current?.clearDrawings()}
+          onUndo={() => chartRef.current?.undo()}
+          canUndo={canUndo}
         />
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1">
+          <div className="relative min-h-0 flex-1">
             <Chart
               ref={chartRef}
               symbol={symbol}
@@ -299,7 +310,33 @@ export default function Home() {
               continuousDraw={drawContinuous}
               onHistoryChange={handleHistoryChange}
             />
+            {/* Mobile (<md): floating capsules over the chart (top pill,
+                swipeable bottom capsule, actions capsule). */}
+            <MobileCapsules
+              symbol={symbol}
+              interval={interval}
+              watchlist={watchlist}
+              onSelectSymbol={selectSymbol}
+              onIntervalChange={(tf) => {
+                setInterval(tf);
+                setActiveTool(null);
+                setActiveRange(null);
+              }}
+              onOpenWatchlist={() => setMobileWatchlistOpen(true)}
+              indicators={indicators}
+              onToggleIndicator={toggleIndicator}
+              onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
+              chartType={chartType}
+              onChartTypeChange={setChartType}
+              onOpenObjectList={() => chartRef.current?.openObjectList()}
+              onRedo={() => chartRef.current?.redo()}
+              canRedo={canRedo}
+              onResetView={() => chartRef.current?.resetView()}
+            />
           </div>
+          {/* Desktop only: hidden on mobile, the chart fills to the
+              capsules instead (see the layout comment at the top). */}
+          <div className="hidden md:block">
           <RangeBar
             activeRange={activeRange}
             onRange={(range) => {
@@ -307,12 +344,15 @@ export default function Home() {
               setActiveRange(range);
             }}
           />
+          </div>
+          <div className="hidden md:block">
           <StatusBar
             symbol={symbol}
             interval={interval}
             connectionStatus={connectionStatus}
             lastTickAt={lastTickAt}
           />
+          </div>
         </main>
         <Watchlist
           symbols={watchlist}

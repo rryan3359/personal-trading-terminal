@@ -177,6 +177,10 @@ export interface DrawingBarProps {
   onToolChange: (tool: DrawingTool | null, continuous: boolean) => void;
   /** Remove all drawings on the current symbol. */
   onClear: () => void;
+  /** Mobile compact bar only: undo the last drawing change. */
+  onUndo?: () => void;
+  /** Mobile compact bar only: whether undo is available. */
+  canUndo?: boolean;
 }
 
 const MAGNET_ORDER: MagnetMode[] = ['off', 'weak', 'strong'];
@@ -592,6 +596,178 @@ function ClearIcon() {
   );
 }
 
+/** Undo arrow (same path as the Toolbar's UndoIcon). */
+function UndoIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 5L3 10l5 5" />
+      <path d="M3 10h10a4 4 0 0 1 0 8h-3" />
+    </svg>
+  );
+}
+
+/** Horizontal "⋯" (opens the full tool list on mobile). */
+function DotsIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <circle cx="4" cy="10" r="1.6" />
+      <circle cx="10" cy="10" r="1.6" />
+      <circle cx="16" cy="10" r="1.6" />
+    </svg>
+  );
+}
+
+/** Mobile compact bar: tools shown when nothing is starred yet. */
+const DEFAULT_COMPACT_TOOLS: DrawingTool[] = [
+  'segment',
+  'horizontalStraightLine',
+  'rectangle',
+];
+
+/** Display order for compact-bar favorites: group order, then tool
+ *  order within the group (not starred order). */
+function sortToolsByGroup(ids: DrawingTool[]): DrawingTool[] {
+  const order = new Map<DrawingTool, [number, number]>();
+  TOOL_GROUPS.forEach((g, gi) =>
+    g.ids.forEach((id, ii) => order.set(id, [gi, ii])),
+  );
+  return [...ids].sort((a, b) => {
+    const [ga, ia] = order.get(a) ?? [999, 999];
+    const [gb, ib] = order.get(b) ?? [999, 999];
+    return ga - gb || ia - ib;
+  });
+}
+
+/**
+ * Mobile bottom sheet with the full tool list (all 10 groups), each
+ * tool with its favorite star — same state and toggles as the desktop
+ * flyouts. Picking a tool arms it and closes the sheet.
+ */
+function FullToolsSheet({
+  favorites,
+  activeTool,
+  onSelect,
+  onToggleFavorite,
+  onClose,
+}: {
+  favorites: DrawingTool[];
+  activeTool: DrawingTool | null;
+  onSelect: (tool: DrawingTool, continuous: boolean) => void;
+  onToggleFavorite: (tool: DrawingTool) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 md:hidden"
+      role="dialog"
+      aria-label="全部畫線工具"
+    >
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div className="absolute bottom-0 left-0 right-0 max-h-[70vh] overflow-y-auto rounded-t-2xl border-t border-[#2a2e39] bg-[#131722] px-4 pb-6 pt-2">
+        <div
+          className="mx-auto mb-1 h-1 w-10 rounded-full bg-[#2a2e39]"
+          aria-hidden="true"
+        />
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-sm font-semibold text-white">畫線工具</span>
+          <button
+            onClick={onClose}
+            aria-label="關閉"
+            className="flex h-8 w-8 items-center justify-center rounded text-[#b2b5be] hover:bg-[#2a2e39] hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+        {TOOL_GROUPS.map((group) => (
+          <div key={group.title} className="mb-3">
+            <div className="mb-1 text-[11px] font-medium text-[#787b86]">
+              {group.title}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {group.ids.map((id) => {
+                const tool = TOOL_BY_ID.get(id);
+                if (!tool) return null;
+                const active = activeTool === id;
+                const isFavorite = favorites.includes(id);
+                return (
+                  <div
+                    key={id}
+                    className={`flex items-center rounded-md border ${
+                      active
+                        ? 'border-[#2962ff] bg-[#2a2e39]'
+                        : 'border-[#2a2e39] bg-[#1e222d]'
+                    }`}
+                  >
+                    <button
+                      onClick={() => onSelect(id, false)}
+                      className="flex items-center gap-1.5 px-2.5 py-2 text-[13px] text-[#d1d4dc]"
+                    >
+                      <span className="flex h-5 w-5 items-center justify-center">
+                        <ToolIcon tool={id} />
+                      </span>
+                      {tool.label}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={
+                        isFavorite
+                          ? `取消收藏 ${tool.label}`
+                          : `收藏 ${tool.label}`
+                      }
+                      aria-pressed={isFavorite}
+                      title={
+                        isFavorite
+                          ? `取消收藏 ${tool.label}`
+                          : `收藏 ${tool.label}`
+                      }
+                      onClick={() => onToggleFavorite(id)}
+                      className={`flex h-8 w-7 shrink-0 items-center justify-center rounded hover:bg-[#2a2e39] ${
+                        isFavorite
+                          ? 'text-[#ff9800]'
+                          : 'text-[#787b86] hover:text-white'
+                      }`}
+                    >
+                      <StarIcon filled={isFavorite} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /** Star for the favorites button / flyout favorite toggles. */
 function StarIcon({ filled, size = 14 }: { filled: boolean; size?: number }) {
   return (
@@ -758,6 +934,8 @@ export default function DrawingBar({
   activeTool,
   onToolChange,
   onClear,
+  onUndo,
+  canUndo = false,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
   /** Title of the group whose flyout is open, or null. '收藏' is the
@@ -769,6 +947,14 @@ export default function DrawingBar({
    *  Persisted (ptt:last-used-tools); was session-only useState. */
   const [lastUsed, setLastUsed] = useState<Record<string, DrawingTool>>(() => loadLastUsedTools());
   const [anchor, setAnchor] = useState<FlyoutAnchor | null>(null);
+  /** Mobile: full tool list bottom sheet open. */
+  const [fullSheetOpen, setFullSheetOpen] = useState(false);
+  /** Mobile compact bar: starred tools in group order, or the 3
+   *  defaults when nothing is starred yet. */
+  const compactTools =
+    favorites.length > 0
+      ? sortToolsByGroup(favorites)
+      : DEFAULT_COMPACT_TOOLS;
   const groupBtnRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const cycleMagnet = () => {
@@ -918,6 +1104,10 @@ export default function DrawingBar({
       data-drawing-bar
       className="flex w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1"
     >
+      {/* Desktop: full bar (cursor + favorites + 10 groups + magnet +
+          clear). Hidden below md; `contents` keeps the children as
+          direct flex items of the aside, exactly as before. */}
+      <div className="hidden w-full flex-col items-center gap-0.5 md:contents">
       <button
         title="游標／選取（退出繪製模式）"
         onClick={() => onToolChange(null, false)}
@@ -1081,6 +1271,67 @@ export default function DrawingBar({
       >
         <ClearIcon />
       </button>
+      </div>
+
+      {/* Mobile (<md): favorites only (defaults when none starred),
+          then undo + full-list buttons pinned to the bottom. The
+          cursor button stays so drawing mode can always be exited. */}
+      <div className="flex w-full flex-1 flex-col items-center gap-0.5 md:hidden">
+        <button
+          title="游標／選取（退出繪製模式）"
+          aria-label="游標／選取"
+          onClick={() => onToolChange(null, false)}
+          className={`${BUTTON_BASE} ${
+            activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          }`}
+        >
+          {activeTool === null && <ActiveBar />}
+          <CursorIcon />
+        </button>
+        <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+        {compactTools.map((id) => {
+          const tool = TOOL_BY_ID.get(id);
+          if (!tool) return null;
+          const active = activeTool === id;
+          return (
+            <button
+              key={id}
+              title={tool.label}
+              aria-label={tool.label}
+              aria-pressed={active}
+              data-testid={`compact-tool-${id}`}
+              onClick={() => handleSelect(id, false)}
+              className={`${BUTTON_BASE} ${
+                active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+              }`}
+            >
+              {active && <ActiveBar />}
+              <ToolIcon tool={id} />
+            </button>
+          );
+        })}
+        <div className="mt-auto flex flex-col items-center gap-2 pb-1 pt-2">
+          <button
+            onClick={onUndo}
+            disabled={!canUndo}
+            title="復原"
+            aria-label="復原"
+            data-testid="compact-undo"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d] text-[#b2b5be] hover:text-white disabled:opacity-30 disabled:hover:bg-[#1e222d] disabled:hover:text-[#b2b5be]"
+          >
+            <UndoIcon />
+          </button>
+          <button
+            onClick={() => setFullSheetOpen(true)}
+            title="全部畫線工具"
+            aria-label="全部畫線工具"
+            data-testid="compact-all-tools"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d] text-[#b2b5be] hover:text-white"
+          >
+            <DotsIcon />
+          </button>
+        </div>
+      </div>
 
       {openGroupDef && anchor &&
         createPortal(
@@ -1094,6 +1345,18 @@ export default function DrawingBar({
           />,
           document.body,
         )}
+      {fullSheetOpen && (
+        <FullToolsSheet
+          favorites={favorites}
+          activeTool={activeTool}
+          onSelect={(id, continuous) => {
+            setFullSheetOpen(false);
+            handleSelect(id, continuous);
+          }}
+          onToggleFavorite={toggleFavorite}
+          onClose={() => setFullSheetOpen(false)}
+        />
+      )}
     </aside>
   );
 }
