@@ -11,6 +11,11 @@ import {
   normalizeAppearance,
   type AppearanceSettings,
 } from '@/lib/chart-appearance';
+import {
+  DEFAULT_POSITION_SETTINGS,
+  readPositionSettings,
+  type PositionSettings,
+} from '@/lib/position-calc';
 
 export const STORAGE_KEYS = {
   watchlist: 'ptt:watchlist',
@@ -23,6 +28,10 @@ export const STORAGE_KEYS = {
   lastInterval: 'ptt:last-interval',
   magnet: 'ptt:magnet',
   lastOverlayStyle: 'ptt:last-overlay-style',
+  /** Last-used position settings (account / risk / leverage / lot /
+   *  qty precision + zone colours / text size / stats options), reused
+   *  for the next new long/short position. */
+  lastPositionInputs: 'ptt:last-position-inputs',
   chartType: 'ptt:chart-type',
   /** Chart appearance (colors, grid, axis font size) — see lib/chart-appearance.ts. */
   chartAppearance: 'ptt:chart-appearance',
@@ -127,6 +136,27 @@ export function getLastOverlayStyle(): LastOverlayStyle {
 
 export function saveLastOverlayStyle(style: LastOverlayStyle): void {
   saveJSON(STORAGE_KEYS.lastOverlayStyle, style);
+}
+
+/**
+ * Last-used position settings, reused for the next new long/short
+ * position (same pattern as the last overlay style). The values are
+ * neutral defaults (account 10,000 USDT / risk 1% / leverage 1) —
+ * not Ryan's actual account; he sets his own in the dialog.
+ */
+export function getLastPositionInputs(): PositionSettings {
+  const saved = loadJSON<Partial<PositionSettings>>(
+    STORAGE_KEYS.lastPositionInputs,
+    {},
+  );
+  return readPositionSettings({
+    ...DEFAULT_POSITION_SETTINGS,
+    ...saved,
+  });
+}
+
+export function saveLastPositionInputs(settings: PositionSettings): void {
+  saveJSON(STORAGE_KEYS.lastPositionInputs, settings);
 }
 
 export type OverlayScope = 'symbol' | 'interval';

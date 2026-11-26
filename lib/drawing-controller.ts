@@ -76,10 +76,15 @@ import {
   isPitchforkTool,
   isPositionTool,
   mirrorPositionStop,
+  mirrorPositionTarget,
   pitchExtendOf,
   pitchOptionsOf,
   patternOptionsOf,
 } from '@/lib/chart-theme';
+import {
+  readPositionSettings,
+  type PositionSettings,
+} from '@/lib/position-calc';
 import type { InteractionModeController } from '@/lib/chart-interaction-mode';
 import type { DrawingHistoryManager } from '@/lib/drawing-history';
 import {
@@ -101,6 +106,7 @@ import {
   newOverlayId,
   saveDrawingsStore,
   saveLastOverlayStyle,
+  saveLastPositionInputs,
   type LastOverlayStyle,
   type MagnetMode,
   type OverlayStylePatch,
@@ -176,6 +182,22 @@ export interface SelectedOverlayState {
   patternShowNeckline: boolean;
   patternShowDashed: boolean;
   patternShowRatios: boolean;
+  /** Position tools: target/RR fallback for legacy 2-point saves. */
+  posRR: number;
+  /** Position tools: calculation inputs + display options (see
+   *  lib/position-calc.ts). Read from extendData, defaults applied. */
+  posAccount: number;
+  posRiskMode: 'percent' | 'amount';
+  posRisk: number;
+  posLeverage: number;
+  posLotSize: number;
+  posQtyPrecision: number;
+  posProfitColor: string;
+  posRiskColor: string;
+  posTextSize: number;
+  posStats: 'all' | 'qty-pnl' | 'balance';
+  posCompact: boolean;
+  posShowStats: boolean;
 }
 
 /** Horizontal tools show their price on the right Y axis. */
@@ -305,6 +327,8 @@ export interface DrawingControllerDeps {
   getMagnetMode: () => MagnetMode;
   isModifierHeld: () => boolean;
   getLastOverlayStyle: () => LastOverlayStyle;
+  /** Last-used position settings (account / risk / leverage / ...). */
+  getLastPositionInputs: () => PositionSettings;
   mode: InteractionModeController;
   history: DrawingHistoryManager;
   persistence: DrawingPersistence;
@@ -694,26 +718,46 @@ export function createDrawingController(
   /**
    * Mirror a position overlay's stop to the correct side of its entry
    * (see mirrorPositionStop): a long's stop sits below the entry, a
-   * short's above. Returns the points unchanged when the stop is
-   * already on the correct side. Used at every entry point so a stored
-   * position is never wrong-sided: the draw-end normaliser (the
-   * interactive draw commits the raw clicked point) and programmatic
-   * creation (restore / preset points).
+   * short's above. The 3rd point (target), when present, is mirrored
+   * to the profit side (mirrorPositionTarget) and kept on the stop's
+   * timestamp — the target is a price level on the box's right edge.
+   * Returns the points unchanged when everything is already correct.
+   * Used at every entry point so a stored position is never
+   * wrong-sided: the draw-end normaliser (the interactive draw
+   * commits the raw clicked point) and programmatic creation
+   * (restore / preset points).
    */
   const normalizePositionPoints = (
     tool: DrawingTool,
     points: Array<{ timestamp: number; value: number }>,
   ): Array<{ timestamp: number; value: number }> => {
     if (!isPositionTool(tool) || points.length < 2) return points;
-    const fixed = mirrorPositionStop(
-      tool === 'longPosition',
+    const isLong = tool === 'longPosition';
+    const fixedStop = mirrorPositionStop(
+      isLong,
       points[0].value,
       points[1].value,
     );
-    if (fixed === points[1].value) return points;
+    const stopChanged = fixedStop !== points[1].value;
+    const p1 = stopChanged
+      ? { timestamp: points[1].timestamp, value: fixedStop }
+      : points[1];
+    if (points.length < 3) {
+      return stopChanged ? [points[0], p1] : points;
+    }
+    const fixedTarget = mirrorPositionTarget(
+      isLong,
+      points[0].value,
+      points[2].value,
+    );
+    const targetChanged =
+      fixedTarget !== points[2].value ||
+      points[2].timestamp !== p1.timestamp;
+    if (!stopChanged && !targetChanged) return points;
     return [
       points[0],
-      { timestamp: points[1].timestamp, value: fixed },
+      p1,
+      { timestamp: p1.timestamp, value: fixedTarget },
     ];
   };
 
@@ -866,7 +910,12 @@ export function createDrawingController(
         // persisted with a wrong-side stop and render its handle on
         // the wrong side. Correct the committed points here, before
         // the persist below (overrideOverlay repaints, so the handle
-        // snaps to the corrected stop immediately).
+        // snaps to the corrected stop immediately). The draw is two
+        // clicks (entry, stop); append the target as the 3rd point
+        // at posRR from the entry (on the stop's timestamp, so the
+        // box width is unchanged) — it then drags freely. A
+        // zero-risk draw gets no target: it stays a 2-point legacy
+        // shape until the stop is dragged away from the entry.
         if (isPositionTool(e.overlay.name)) {
           const pts = e.overlay.points;
           if (
@@ -878,12 +927,31 @@ export function createDrawingController(
               e.overlay.name as DrawingTool,
               pts as Array<{ timestamp: number; value: number }>,
             );
-            if (fixed !== pts) {
-              e.chart.overrideOverlay({
-                id: e.overlay.id,
-                points: fixed,
-              });
+            const entry = fixed[0].value;
+            const risk = Math.abs(entry - fixed[1].value);
+            let next = fixed;
+            if (risk > 0) {
+              const ext = (e.overlay.extendData ?? {}) as Record<
+                string,
+                unknown
+              >;
+              const posRR =
+                typeof ext.posRR === 'number' && ext.posRR > 0
+                  ? ext.posRR
+                  : 2;
+              const target =
+                e.overlay.name === 'longPosition'
+                  ? entry + posRR * risk
+                  : entry - posRR * risk;
+              next = [
+                ...fixed,
+                { timestamp: fixed[1].timestamp, value: target },
+              ];
             }
+            e.chart.overrideOverlay({
+              id: e.overlay.id,
+              points: next,
+            });
           }
         }
         // G-11: the draw succeeded, so the arm's pre-draw history
@@ -1127,7 +1195,7 @@ export function createDrawingController(
         tool === 'rectangle'
           ? { fillOpacity: style.fillOpacity }
           : isPositionTool(tool)
-            ? { posRR: 2 }
+            ? { posRR: 2, ...deps.getLastPositionInputs() }
             : undefined,
     };
     const id = chart.createOverlay(overlayCreate(draft));
@@ -1337,6 +1405,9 @@ export function createDrawingController(
       patternShowNeckline: patternOpts.showNeckline,
       patternShowDashed: patternOpts.showDashed,
       patternShowRatios: patternOpts.showRatios,
+      posRR:
+        typeof ext.posRR === 'number' && ext.posRR > 0 ? ext.posRR : 2,
+      ...readPositionSettings(ext),
     });
     const m = deps.mode.modeRef.current;
     if (m === 'Idle' || m === 'Selected') {
@@ -1830,6 +1901,19 @@ export function createDrawingController(
     patternShowNeckline: cur.patternShowNeckline,
     patternShowDashed: cur.patternShowDashed,
     patternShowRatios: cur.patternShowRatios,
+    posRR: cur.posRR,
+    posAccount: cur.posAccount,
+    posRiskMode: cur.posRiskMode,
+    posRisk: cur.posRisk,
+    posLeverage: cur.posLeverage,
+    posLotSize: cur.posLotSize,
+    posQtyPrecision: cur.posQtyPrecision,
+    posProfitColor: cur.posProfitColor,
+    posRiskColor: cur.posRiskColor,
+    posTextSize: cur.posTextSize,
+    posStats: cur.posStats,
+    posCompact: cur.posCompact,
+    posShowStats: cur.posShowStats,
     text: cur.text ? { ...cur.text } : null,
     tagText: cur.tagText,
     points: cur.points.map((p) => ({ ...p })),
@@ -1853,7 +1937,11 @@ export function createDrawingController(
     if (cur.name === TEXT_ANNOTATION_NAME && draft.text === null) {
       draft.text = { ...DEFAULT_OVERLAY_TEXT };
     }
-    deps.onDialogOpen(draft, tab, bars);
+    // Position tools open on the Inputs tab (TV behaviour): it is the
+    // first tab and holds the account / risk / leverage fields.
+    const initialTab: DialogTab =
+      isPositionTool(cur.name) && tab === 'style' ? 'inputs' : tab;
+    deps.onDialogOpen(draft, initialTab, bars);
     // Overlay state: closeDialog restores the mode from before the
     // dialog opened (Selected in the normal path — never assume Idle).
     deps.mode.enterOverlayMode('Editing', 'dialog:open');
@@ -1996,10 +2084,32 @@ export function createDrawingController(
       ext.patternShowDashed = draft.patternShowDashed;
       ext.patternShowRatios = draft.patternShowRatios;
     }
-    const points = draft.points.map((p) => ({
-      timestamp: p.timestamp,
-      value: p.value,
-    }));
+    if (isPositionTool(o.name)) {
+      ext.posAccount = draft.posAccount;
+      ext.posRiskMode = draft.posRiskMode;
+      ext.posRisk = draft.posRisk;
+      ext.posLeverage = draft.posLeverage;
+      ext.posLotSize = draft.posLotSize;
+      ext.posQtyPrecision = draft.posQtyPrecision;
+      ext.posProfitColor = draft.posProfitColor;
+      ext.posRiskColor = draft.posRiskColor;
+      ext.posTextSize = draft.posTextSize;
+      ext.posStats = draft.posStats;
+      ext.posCompact = draft.posCompact;
+      ext.posShowStats = draft.posShowStats;
+    }
+    const points = isPositionTool(o.name)
+      ? normalizePositionPoints(
+          o.name as DrawingTool,
+          draft.points.map((p) => ({
+            timestamp: p.timestamp,
+            value: p.value,
+          })),
+        )
+      : draft.points.map((p) => ({
+          timestamp: p.timestamp,
+          value: p.value,
+        }));
     const styles = stylesForOverlay(
       {
         color: draft.color,
@@ -2081,6 +2191,24 @@ export function createDrawingController(
       opacity: draft.opacity,
       fillOpacity: draft.fillOpacity,
     });
+    if (isPositionTool(o.name)) {
+      // The confirmed inputs become the defaults for the next new
+      // position (same pattern as the last overlay style).
+      saveLastPositionInputs({
+        posAccount: draft.posAccount,
+        posRiskMode: draft.posRiskMode,
+        posRisk: draft.posRisk,
+        posLeverage: draft.posLeverage,
+        posLotSize: draft.posLotSize,
+        posQtyPrecision: draft.posQtyPrecision,
+        posProfitColor: draft.posProfitColor,
+        posRiskColor: draft.posRiskColor,
+        posTextSize: draft.posTextSize,
+        posStats: draft.posStats,
+        posCompact: draft.posCompact,
+        posShowStats: draft.posShowStats,
+      });
+    }
     // Persist BEFORE removing a now-hidden overlay (see applyEdit).
     persistDrawings(deps.getSymbol(), deps.getInterval());
     if (

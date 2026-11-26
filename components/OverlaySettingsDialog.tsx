@@ -19,7 +19,13 @@ import {
   isGannTool,
   isPatternTool,
   isPitchforkTool,
+  isPositionTool,
 } from '@/lib/chart-theme';
+import {
+  calcPosition,
+  type PositionRiskMode,
+  type PositionStatsMode,
+} from '@/lib/position-calc';
 import {
   LINE_STYLE_OPTIONS,
   TOOL_LABELS_BY_NAME,
@@ -31,7 +37,7 @@ import {
 import { DEFAULT_OVERLAY_TEXT, type OverlayText } from '@/lib/store';
 import { INTERVALS, INTERVAL_LABELS } from '@/lib/types';
 
-export type DialogTab = 'style' | 'text' | 'coords' | 'visibility';
+export type DialogTab = 'inputs' | 'style' | 'text' | 'coords' | 'visibility';
 
 /** Complete editable state for one drawing. Built by Chart.tsx from the
  *  selected overlay; returned unchanged except for the user's edits. */
@@ -80,6 +86,21 @@ export interface OverlayDialogDraft {
   patternShowNeckline: boolean;
   patternShowDashed: boolean;
   patternShowRatios: boolean;
+  /** Position tools: target/RR fallback for legacy 2-point saves. */
+  posRR: number;
+  /** Position tools: calculation inputs + display options. */
+  posAccount: number;
+  posRiskMode: PositionRiskMode;
+  posRisk: number;
+  posLeverage: number;
+  posLotSize: number;
+  posQtyPrecision: number;
+  posProfitColor: string;
+  posRiskColor: string;
+  posTextSize: number;
+  posStats: PositionStatsMode;
+  posCompact: boolean;
+  posShowStats: boolean;
   /** Attached text. null = no text. */
   text: OverlayText | null;
   /** simpleTag only: Y-axis tag text ('' = show the price). Written to
@@ -118,6 +139,12 @@ const TABS: Array<{ id: DialogTab; label: string }> = [
   { id: 'text', label: '文字' },
   { id: 'coords', label: '座標' },
   { id: 'visibility', label: '可見性' },
+];
+
+/** Position tools put the Inputs tab first (TV behaviour). */
+const POSITION_TABS: Array<{ id: DialogTab; label: string }> = [
+  { id: 'inputs', label: '輸入' },
+  ...TABS,
 ];
 
 const TEXT_SIZES = [10, 12, 14, 16, 18, 20, 24];
@@ -254,7 +281,64 @@ function coordLabel(toolName: string, i: number): string {
     return `#${i + 1}（${['驅動 1', '回調', '驅動 2', '回調', '驅動 3', '終點'][i] ?? '點'}）`;
   if (toolName === 'path' || toolName === 'pen')
     return `#${i + 1}（點 ${i + 1}）`;
+  if (isPositionTool(toolName))
+    return `#${i + 1}（${['入場', '停損', '目標'][i] ?? '點'}）`;
   return `#${i + 1}（價格，K棒）`;
+}
+
+/**
+ * Number input that commits on blur (typing an intermediate value
+ * never touches the draft). The text follows the value prop when it
+ * changes from outside (e.g. the derived target after the entry or
+ * stop is edited).
+ */
+function NumberField({
+  label,
+  value,
+  onCommit,
+  step = 'any',
+  min,
+  max,
+  ariaLabel,
+}: {
+  label: string;
+  value: number;
+  onCommit: (v: number) => void;
+  step?: string | number;
+  min?: number;
+  max?: number;
+  ariaLabel?: string;
+}) {
+  const [text, setText] = useState(String(value));
+  // No useEffect sync: the parent passes key={value}, so an external
+  // value change remounts the field with the new text. A remount
+  // never steals focus mid-typing — the value only changes on this
+  // field's own blur commit (focus already left) or, for the derived
+  // target price, while the user edits another field.
+  return (
+    <div>
+      {label !== '' && <label className={FIELD_LABEL}>{label}</label>}
+      <input
+        type="number"
+        step={step}
+        min={min}
+        max={max}
+        value={text}
+        aria-label={ariaLabel ?? label}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          const v = Number(text);
+          if (!Number.isNaN(v) && Number.isFinite(v)) {
+            onCommit(v);
+            setText(String(v));
+          } else {
+            setText(String(value));
+          }
+        }}
+        className={INPUT}
+      />
+    </div>
+  );
 }
 
 export default function OverlaySettingsDialog({
@@ -334,6 +418,50 @@ export default function OverlaySettingsDialog({
   /** Its own Y-axis tag already shows the price. */
   const isSimpleTag = toolName === 'simpleTag';
   const isPriceLine = toolName === 'priceLine';
+  /** Long/short position tools: Inputs tab + position style section. */
+  const isPosition = isPositionTool(toolName);
+  const isLongPosition = toolName === 'longPosition';
+  const tabs = isPosition ? POSITION_TABS : TABS;
+  /** Live quantity preview for the Inputs tab (last close unknown
+   *  here, so open P&L is not shown in the dialog). */
+  const posPreview =
+    isPosition && draft.points.length >= 2
+      ? (() => {
+          const entry = draft.points[0].value;
+          const stop = draft.points[1].value;
+          const target =
+            draft.points[2]?.value ??
+            (isLongPosition
+              ? entry + draft.posRR * Math.abs(entry - stop)
+              : entry - draft.posRR * Math.abs(entry - stop));
+          return calcPosition(draft, isLongPosition, entry, stop, target, null);
+        })()
+      : null;
+  /** Update one point's price in the draft (inputs tab price fields). */
+  const patchPointValue = (i: number, value: number) => {
+    setDraft((d) => {
+      const points = d.points.map((p) => ({ ...p }));
+      if (i < points.length) {
+        points[i] = { ...points[i], value };
+      } else if (i === 2 && points.length === 2) {
+        // Editing the target of a legacy 2-point position appends
+        // the 3rd point (on the stop's timestamp).
+        points.push({ timestamp: points[1].timestamp, value });
+      }
+      return { ...d, points };
+    });
+  };
+  /** Derived target for a legacy 2-point position (inputs tab display). */
+  const derivedTarget =
+    isPosition && draft.points.length >= 2
+      ? isLongPosition
+        ? draft.points[0].value +
+          draft.posRR *
+            Math.abs(draft.points[0].value - draft.points[1].value)
+        : draft.points[0].value -
+          draft.posRR *
+            Math.abs(draft.points[0].value - draft.points[1].value)
+      : 0;
   const title = TOOL_LABELS_BY_NAME[toolName] ?? toolName;
 
   // Escape closes the dialog even when focus is outside it (e.g. on the
@@ -453,7 +581,7 @@ export default function OverlaySettingsDialog({
         </div>
 
         <div className="flex border-b border-[#2a2e39] px-2">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
@@ -469,6 +597,108 @@ export default function OverlaySettingsDialog({
         </div>
 
         <div className="space-y-4 px-4 py-4">
+          {tab === 'inputs' && isPosition && (
+            <>
+              <p className="text-xs leading-relaxed text-[#787b86]">
+                倉位計算（TradingView 公式）：數量取風險數量與槓桿數量的較小值；確認後會成為下一個新倉位的預設值。帳戶資金為中性預設 10,000
+                USDT，請填入實際帳戶。
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                  key={draft.posAccount}
+                  label="帳戶資金（USDT）"
+                  value={draft.posAccount}
+                  onCommit={(v) =>
+                    patch({ posAccount: Math.max(0, v) })
+                  }
+                />
+                <NumberField
+                  key={draft.posLeverage}
+                  label="槓桿"
+                  value={draft.posLeverage}
+                  onCommit={(v) => patch({ posLeverage: Math.max(1, v) })}
+                />
+                <div>
+                  <label className={FIELD_LABEL}>風險</label>
+                  <div className="flex gap-2">
+                    <NumberField
+                      key={draft.posRisk}
+                      label=""
+                      value={draft.posRisk}
+                      ariaLabel="風險"
+                      onCommit={(v) => patch({ posRisk: Math.max(0, v) })}
+                    />
+                    <select
+                      value={draft.posRiskMode}
+                      aria-label="風險單位"
+                      onChange={(e) =>
+                        patch({
+                          posRiskMode: e.target.value as PositionRiskMode,
+                        })
+                      }
+                      className={`${SELECT} w-20 shrink-0`}
+                    >
+                      <option value="percent">%</option>
+                      <option value="amount">金額</option>
+                    </select>
+                  </div>
+                </div>
+                <NumberField
+                  key={draft.posLotSize}
+                  label="手數"
+                  value={draft.posLotSize}
+                  onCommit={(v) => patch({ posLotSize: Math.max(0, v) })}
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <NumberField
+                  key={draft.points[0]?.value ?? 0}
+                  label="入場價"
+                  value={draft.points[0]?.value ?? 0}
+                  onCommit={(v) => patchPointValue(0, v)}
+                />
+                <NumberField
+                  key={draft.points[1]?.value ?? 0}
+                  label="停損價"
+                  value={draft.points[1]?.value ?? 0}
+                  onCommit={(v) => patchPointValue(1, v)}
+                />
+                <NumberField
+                  key={draft.points[2]?.value ?? derivedTarget}
+                  label="目標價"
+                  value={draft.points[2]?.value ?? derivedTarget}
+                  onCommit={(v) => patchPointValue(2, v)}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                  key={draft.posQtyPrecision}
+                  label="數量精度（0–8 位小數）"
+                  value={draft.posQtyPrecision}
+                  step={1}
+                  min={0}
+                  max={8}
+                  onCommit={(v) =>
+                    patch({
+                      posQtyPrecision: Math.max(
+                        0,
+                        Math.min(8, Math.floor(v)),
+                      ),
+                    })
+                  }
+                />
+                <div>
+                  <span className={FIELD_LABEL}>預估</span>
+                  <div className="rounded border border-[#2a2e39] bg-[#131722] px-2 py-1.5 text-sm text-[#d1d4dc]">
+                    {posPreview !== null
+                      ? `數量 ${posPreview.qty.toFixed(draft.posQtyPrecision)} · 風險 $${posPreview.riskSize.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · R:R ${posPreview.rr.toFixed(2)}`
+                      : '—'}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
           {tab === 'style' && (
             <>
               {isTextTool ? (
@@ -1021,6 +1251,90 @@ export default function OverlaySettingsDialog({
                       回撤比例標示（各段中點）
                     </label>
                   )}
+                </div>
+              )}
+              {isPosition && (
+                <div className="space-y-3 rounded border border-[#2a2e39] p-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className={FIELD_LABEL}>目標顏色</label>
+                      <input
+                        type="color"
+                        value={draft.posProfitColor}
+                        onChange={(e) =>
+                          patch({ posProfitColor: e.target.value })
+                        }
+                        className="h-8 w-10 cursor-pointer bg-transparent p-0"
+                      />
+                    </div>
+                    <div>
+                      <label className={FIELD_LABEL}>停損顏色</label>
+                      <input
+                        type="color"
+                        value={draft.posRiskColor}
+                        onChange={(e) =>
+                          patch({ posRiskColor: e.target.value })
+                        }
+                        className="h-8 w-10 cursor-pointer bg-transparent p-0"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className={FIELD_LABEL}>文字大小</label>
+                      <select
+                        value={draft.posTextSize}
+                        onChange={(e) =>
+                          patch({ posTextSize: Number(e.target.value) })
+                        }
+                        className={SELECT}
+                      >
+                        {TEXT_SIZES.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className={FIELD_LABEL}>統計項目</label>
+                      <select
+                        value={draft.posStats}
+                        onChange={(e) =>
+                          patch({
+                            posStats: e.target.value as PositionStatsMode,
+                          })
+                        }
+                        className={SELECT}
+                      >
+                        <option value="all">全部統計</option>
+                        <option value="qty-pnl">數量與損益</option>
+                        <option value="balance">帳戶餘額</option>
+                      </select>
+                    </div>
+                  </div>
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.posCompact}
+                      onChange={(e) =>
+                        patch({ posCompact: e.target.checked })
+                      }
+                      className="accent-[#2962ff]"
+                    />
+                    精簡統計模式（只顯示數量、R:R 與 TP／SL 損益）
+                  </label>
+                  <label className={CHECK_ROW}>
+                    <input
+                      type="checkbox"
+                      checked={draft.posShowStats}
+                      onChange={(e) =>
+                        patch({ posShowStats: e.target.checked })
+                      }
+                      className="accent-[#2962ff]"
+                    />
+                    始終顯示統計（關閉時只顯示 R:R 與數量）
+                  </label>
                 </div>
               )}
                 </>

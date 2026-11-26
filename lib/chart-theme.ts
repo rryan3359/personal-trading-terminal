@@ -119,6 +119,10 @@ import {
   type TextStyle,
 } from 'klinecharts';
 import { MULTI_POINT_MAX_POINTS } from '@/lib/chart-config';
+import {
+  calcPosition,
+  readPositionSettings,
+} from '@/lib/position-calc';
 
 /**
  * G-18 (Phase 2 Step 4): klinecharts 10.1.1 deletes an overlay on
@@ -196,12 +200,31 @@ export const DARK_STYLES: DeepPartial<Styles> = {
   },
 };
 
-/** Hex colour (#rrggbb) -> rgba() with the given alpha. */
+/**
+ * Colour (hex #rrggbb, or rgb()/rgba()) -> rgba() with the given
+ * alpha. UI-drawn overlays store the line colour as rgba (the
+ * opacity is folded in by stylesForOverlay), so a fill computed
+ * from it must replace the alpha instead of passing the opaque
+ * rgba through — otherwise the fill comes out solid and hides the
+ * candles underneath (and the arrows drawn in the same colour).
+ * Hex input keeps the existing behaviour; anything else is
+ * returned unchanged.
+ */
 export function hexToRgba(hex: string, alpha: number): string {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+  const s = hex.trim();
+  const m = /^#?([0-9a-f]{6})$/i.exec(s);
+  if (m) {
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+  }
+  const rgb =
+    /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)$/i.exec(
+      s,
+    );
+  if (rgb) {
+    return `rgba(${Number(rgb[1])}, ${Number(rgb[2])}, ${Number(rgb[3])}, ${alpha})`;
+  }
+  return hex;
 }
 
 let rectangleRegistered = false;
@@ -300,10 +323,6 @@ export function registerRectangleOverlay(): void {
   });
 }
 
-/** Profit / risk zone colours for the position tools (TradingView-style). */
-const POS_PROFIT = '#26a69a';
-const POS_RISK = '#ef5350';
-
 let positionRegistered = false;
 
 /**
@@ -323,18 +342,41 @@ export function mirrorPositionStop(
 }
 
 /**
+ * Mirror a position target to the profit side of the entry at the
+ * same distance (long: target above the entry, short: below). A
+ * target already on the profit side is returned unchanged. The
+ * target is a price level, so equality with the entry is left alone
+ * (it is not wrong-sided, just zero reward).
+ */
+export function mirrorPositionTarget(
+  isLong: boolean,
+  entry: number,
+  target: number,
+): number {
+  if (isLong) return target < entry ? entry + (entry - target) : target;
+  return target > entry ? entry - (target - entry) : target;
+}
+
+/**
  * Register the custom "longPosition" / "shortPosition" overlays once
- * per page load. Two points: p0 = entry, p1 = stop. The take-profit
- * is derived: TP = entry ± posRR × |entry − stop| (extendData.posRR,
- * default 2 — i.e. 1:2R), on the profit side of the entry; the risk
- * zone spans entry → stop. The box's horizontal extent is p0.x → p1.x.
- * The stop may never cross the entry line (long: below, short: above);
- * a stop placed or dragged onto the wrong side is mirrored to the
- * correct side at the same distance. Zones are fixed green/red (the
- * overlay line colour drives the entry line only); dragging either
- * control point (entry or stop) updates the zones and labels live.
- * Labels: TP + SL with prices and R multiples (right), entry price
- * (left).
+ * per page load. Three points: p0 = entry, p1 = stop, p2 = target.
+ * The draw takes two clicks (entry, stop); the target is appended
+ * at draw end at posRR (default 2 — i.e. 1:2R) from the entry, then
+ * drags freely as the third point. Legacy 2-point saves have no p2
+ * and keep deriving the target from extendData.posRR. The risk zone
+ * spans entry → stop; the profit zone entry → target. The box's
+ * horizontal extent is p0.x → p1.x (p2 shares p1's timestamp).
+ * The stop may never cross the entry line (long: below, short:
+ * above) and the target may never cross to the loss side; a point
+ * placed or dragged onto the wrong side is mirrored to the correct
+ * side at the same distance. Zones use the per-overlay profit/risk
+ * colours (extendData.posProfitColor / posRiskColor); the entry line
+ * uses the overlay line colour. Labels: TP + SL with prices and R
+ * multiples (right), entry price (left). The stats pill (TV-style)
+ * shows quantity, TP/SL P&L + %, account balance after TP/SL, R:R
+ * and open P&L (last close); compact mode and the stats-item preset
+ * trim it, and with "always show stats" off only a compact R:R +
+ * Qty label is drawn at the entry line.
  */
 export function registerPositionOverlays(): void {
   if (positionRegistered) return;
@@ -352,7 +394,8 @@ export function registerPositionOverlays(): void {
       if (p0?.value === undefined || p1?.value === undefined) return [];
       const precision = chart.getSymbol?.()?.pricePrecision ?? 2;
       const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
-      const rr =
+      const settings = readPositionSettings(ext);
+      const posRR =
         typeof ext.posRR === 'number' && ext.posRR > 0 ? ext.posRR : 2;
       const entry = p0.value;
       const stopRaw = p1.value;
@@ -363,16 +406,37 @@ export function registerPositionOverlays(): void {
       // onto the wrong side is mirrored to the correct side at the
       // same distance, and written back so the point, the drag
       // handle, the axis marks and persistence all converge on the
-      // corrected stop. TP depends only on |risk| and direction, so
-      // it is unaffected by the mirror. (The write-back takes effect
-      // on the next render; the draw-end normaliser in the controller
-      // corrects the committed points immediately, so a freshly
-      // drawn position is never left with a raw stop.)
+      // corrected stop. (The write-back takes effect on the next
+      // render; the draw-end normaliser in the controller corrects
+      // the committed points immediately, so a freshly drawn
+      // position is never left with a raw stop.)
       const stop = mirrorPositionStop(isLong, entry, stopRaw);
       if (stop !== stopRaw) {
         p1.value = stop;
       }
-      const tp = isLong ? entry + rr * risk : entry - rr * risk;
+      // The target is the 3rd point when present; legacy 2-point
+      // saves derive it from posRR. A target on the loss side is
+      // mirrored to the profit side at the same distance, and its
+      // timestamp is kept on the stop's — the target is a price
+      // level on the box's right edge, so a horizontal drag snaps
+      // back on the next render.
+      let target: number;
+      let rr: number;
+      const p2 = overlay.points[2];
+      if (p2?.value !== undefined) {
+        const targetRaw = p2.value;
+        target = mirrorPositionTarget(isLong, entry, targetRaw);
+        if (target !== targetRaw) {
+          p2.value = target;
+        }
+        if (p2.timestamp !== p1.timestamp) {
+          p2.timestamp = p1.timestamp;
+        }
+        rr = Math.abs(target - entry) / risk;
+      } else {
+        target = isLong ? entry + posRR * risk : entry - posRR * risk;
+        rr = posRR;
+      }
       const entryY = coordinates[0].y;
       // Pixel y of the (possibly mirrored) stop: mirror the raw stop
       // pixel across the entry line to match the corrected value.
@@ -382,15 +446,19 @@ export function registerPositionOverlays(): void {
       // the entry→stop segment (works whichever side stop is on).
       const yFor = (price: number) =>
         entryY + ((entry - price) / (entry - stop)) * (stopY - entryY);
-      const tpY = yFor(tp);
-      const x0 = Math.min(coordinates[0].x, coordinates[1].x);
-      const x1 = Math.max(coordinates[0].x, coordinates[1].x);
+      const tpY = yFor(target);
+      const xs = coordinates.map((c) => c.x);
+      const x0 = Math.min(...xs);
+      const x1 = Math.max(...xs);
       const w = Math.max(1, x1 - x0);
       const profitTop = Math.min(entryY, tpY);
       const profitH = Math.max(1, Math.abs(tpY - entryY));
       const riskTop = Math.min(entryY, stopY);
       const riskH = Math.max(1, Math.abs(stopY - entryY));
       const lineColor = overlay.styles?.line?.color ?? '#2962ff';
+      const profitColor = settings.posProfitColor;
+      const riskColor = settings.posRiskColor;
+      const textSize = settings.posTextSize;
       const fmt = (v: number) => v.toFixed(precision);
       const figures: Array<Record<string, unknown>> = [
         {
@@ -398,8 +466,8 @@ export function registerPositionOverlays(): void {
           attrs: { x: x0, y: profitTop, width: w, height: profitH },
           styles: {
             style: 'stroke_fill',
-            color: hexToRgba(POS_PROFIT, 0.12),
-            borderColor: POS_PROFIT,
+            color: hexToRgba(profitColor, 0.12),
+            borderColor: profitColor,
             borderSize: 1,
             borderStyle: 'solid',
           },
@@ -409,8 +477,8 @@ export function registerPositionOverlays(): void {
           attrs: { x: x0, y: riskTop, width: w, height: riskH },
           styles: {
             style: 'stroke_fill',
-            color: hexToRgba(POS_RISK, 0.12),
-            borderColor: POS_RISK,
+            color: hexToRgba(riskColor, 0.12),
+            borderColor: riskColor,
             borderSize: 1,
             borderStyle: 'solid',
           },
@@ -427,17 +495,17 @@ export function registerPositionOverlays(): void {
         },
       ];
       const tpText: OverlayTextLike = {
-        content: `TP ${fmt(tp)}\n+${rr.toFixed(2)}R`,
-        color: POS_PROFIT,
-        size: 11,
+        content: `TP ${fmt(target)}\n+${rr.toFixed(2)}R`,
+        color: profitColor,
+        size: textSize,
         bold: true,
         alignH: 'right',
         alignV: 'middle',
       };
       const slText: OverlayTextLike = {
         content: `SL ${fmt(stop)}\n-1.00R`,
-        color: POS_RISK,
-        size: 11,
+        color: riskColor,
+        size: textSize,
         bold: true,
         alignH: 'right',
         alignV: 'middle',
@@ -445,7 +513,7 @@ export function registerPositionOverlays(): void {
       const entryText: OverlayTextLike = {
         content: `入場 ${fmt(entry)}`,
         color: '#d1d4dc',
-        size: 11,
+        size: textSize,
         alignH: 'left',
         alignV: 'middle',
       };
@@ -454,6 +522,170 @@ export function registerPositionOverlays(): void {
         ...textFigures(slText.content, x1 - 6, riskTop + riskH / 2, slText),
         ...textFigures(entryText.content, x0 + 6, entryY, entryText),
       );
+      // ---- stats (TV position calculation) ----
+      let lastClose: number | null = null;
+      try {
+        const data = chart.getDataList() ?? [];
+        const last = data[data.length - 1];
+        if (typeof last?.close === 'number') lastClose = last.close;
+      } catch {
+        lastClose = null;
+      }
+      const calc = calcPosition(
+        settings,
+        isLong,
+        entry,
+        stop,
+        target,
+        lastClose,
+      );
+      const fmtMoney = (v: number) =>
+        `$${Math.abs(v).toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+      const fmtSignedMoney = (v: number) =>
+        `${v < 0 ? '-' : '+'}${fmtMoney(v)}`;
+      const fmtPct = (v: number) =>
+        `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+      const qtyText = calc.qty.toFixed(settings.posQtyPrecision);
+      if (!settings.posShowStats) {
+        // Compact R:R + Qty label at the entry line (right end);
+        // the full pill stays hidden until the user turns stats on.
+        const midText: OverlayTextLike = {
+          content: `R:R ${rr.toFixed(2)} · 數量 ${qtyText}`,
+          color: '#d1d4dc',
+          size: textSize,
+          bold: true,
+          alignH: 'right',
+          alignV: 'middle',
+        };
+        figures.push(
+          ...textFigures(midText.content, x1 - 6, entryY, midText),
+        );
+        return figures as never;
+      }
+      // Pill lines (text + per-line colour). The stats preset trims
+      // the list; compact mode shows quantity + R:R + TP/SL P&L only.
+      type PillLine = { text: string; color: string };
+      const tpLine: PillLine = {
+        text: `TP ${fmtSignedMoney(calc.pnlTp)} (${fmtPct(calc.pctTp)})`,
+        color: profitColor,
+      };
+      const slLine: PillLine = {
+        text: `SL ${fmtSignedMoney(calc.pnlSl)} (${fmtPct(calc.pctSl)})`,
+        color: riskColor,
+      };
+      let pillLines: PillLine[];
+      if (settings.posCompact) {
+        pillLines = [
+          { text: `數量 ${qtyText} · R:R ${rr.toFixed(2)}`, color: '#d1d4dc' },
+          {
+            text: `TP ${fmtSignedMoney(calc.pnlTp)} / SL ${fmtSignedMoney(calc.pnlSl)}`,
+            color: '#d1d4dc',
+          },
+        ];
+      } else if (settings.posStats === 'qty-pnl') {
+        pillLines = [
+          { text: `數量 ${qtyText}`, color: '#d1d4dc' },
+          tpLine,
+          slLine,
+          { text: `R:R ${rr.toFixed(2)}`, color: '#d1d4dc' },
+        ];
+      } else if (settings.posStats === 'balance') {
+        pillLines = [
+          { text: `數量 ${qtyText}`, color: '#d1d4dc' },
+          {
+            text: `TP 後帳戶 ${fmtMoney(calc.balanceTp)}`,
+            color: '#d1d4dc',
+          },
+          {
+            text: `SL 後帳戶 ${fmtMoney(calc.balanceSl)}`,
+            color: '#d1d4dc',
+          },
+          { text: `R:R ${rr.toFixed(2)}`, color: '#d1d4dc' },
+        ];
+      } else {
+        pillLines = [
+          { text: `數量 ${qtyText}`, color: '#d1d4dc' },
+          tpLine,
+          slLine,
+          {
+            text: `TP 後帳戶 ${fmtMoney(calc.balanceTp)}`,
+            color: '#d1d4dc',
+          },
+          {
+            text: `SL 後帳戶 ${fmtMoney(calc.balanceSl)}`,
+            color: '#d1d4dc',
+          },
+          { text: `R:R ${rr.toFixed(2)}`, color: '#d1d4dc' },
+        ];
+        if (calc.openPnl !== null && calc.openPct !== null) {
+          pillLines.push({
+            text: `開倉損益 ${fmtSignedMoney(calc.openPnl)} (${fmtPct(calc.openPct)})`,
+            color: calc.openPnl >= 0 ? profitColor : riskColor,
+          });
+        }
+      }
+      // Pill geometry: right of the box, centred on the entry line;
+      // flip to the left when it would run off the pane.
+      const lh = Math.round(textSize * 1.4);
+      const pad = 6;
+      const pillW =
+        Math.max(
+          ...pillLines.map((l) =>
+            textNoHitWidth(l.text, textSize, 'normal'),
+          ),
+        ) +
+        pad * 2;
+      const pillH = pillLines.length * lh + pad * 2;
+      let paneW: number | null = null;
+      let paneH: number | null = null;
+      try {
+        const size = chart.getSize?.('candle_pane');
+        if (size) {
+          paneW = size.width;
+          paneH = size.height;
+        }
+      } catch {
+        paneW = null;
+        paneH = null;
+      }
+      const onRight = paneW === null || x1 + 8 + pillW <= paneW - 4;
+      const pillX = onRight ? x1 + 8 : x0 - 8 - pillW;
+      let pillY = entryY - pillH / 2;
+      if (paneH !== null) {
+        pillY = Math.max(4, Math.min(pillY, paneH - pillH - 4));
+      }
+      figures.push({
+        type: 'rect',
+        attrs: { x: pillX, y: pillY, width: pillW, height: pillH },
+        styles: {
+          style: 'stroke_fill',
+          color: 'rgba(30,34,45,0.95)',
+          borderColor: '#2a2e39',
+          borderSize: 1,
+          borderStyle: 'solid',
+        },
+      });
+      pillLines.forEach((line, i) => {
+        const t: OverlayTextLike = {
+          content: line.text,
+          color: line.color,
+          size: textSize,
+          bold: false,
+          alignH: 'left',
+          alignV: 'top',
+        };
+        figures.push(
+          ...textFigures(
+            line.text,
+            pillX + pad,
+            pillY + pad + i * lh,
+            t,
+          ),
+        );
+      });
       return figures as never;
     };
 

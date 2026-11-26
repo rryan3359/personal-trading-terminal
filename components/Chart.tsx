@@ -117,6 +117,7 @@ import {
 } from '@/lib/drawing-controller';
 import {
   getLastOverlayStyle,
+  getLastPositionInputs,
   getMagnetMode,
   loadDrawingsStore,
   saveDrawingsStore,
@@ -580,6 +581,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       getMagnetMode,
       isModifierHeld: () => modifierRef.current,
       getLastOverlayStyle,
+      getLastPositionInputs,
       mode: interactionMode,
       history: historyManager,
       persistence,
