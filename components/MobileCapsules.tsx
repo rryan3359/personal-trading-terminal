@@ -86,17 +86,18 @@ import {
 } from '@/lib/types';
 import type { SavedLayout } from '@/lib/store';
 
-/** Vertical swipe threshold (px) and tap threshold (px). 20px: the
- *  capsules are only 48px tall, so a natural flick on one is short;
- *  30px (round 1) could silently swallow real swipes. */
-const SWIPE_MIN_DY = 20;
+/** Vertical swipe threshold (px) and tap threshold (px). 30px:
+ *  Ryan 2026-11-27 asked for lower sensitivity — the swipe was
+ *  too twitchy (a short drag flew through several values). */
+const SWIPE_MIN_DY = 30;
 const TAP_MAX_MOVE = 10;
-/** Magnifier preview: the first step needs the swipe threshold
- *  (20px), each further step 30px more of drag. */
-const MAG_STEP_PX = 30;
+/** Swipe preview: the first step needs the swipe threshold
+ *  (30px), each further step 50px more of drag. 100px of drag is
+ *  now ~2 steps, where 20px/30px used to give ~3. */
+const MAG_STEP_PX = 50;
 /** Finger-follow cap (px): the capsule text translates 1:1 with the
  *  drag while swiping, clamped so it never slides fully out of the
- *  48px capsule — the magnifier bubble carries the value. */
+ *  48px capsule — the swipe preview list carries the value. */
 const FOLLOW_MAX_PX = 26;
 /** Smoother switch easing (easeOutQuint-ish): the old plain
  *  ease-out 200ms felt abrupt/janky (Ryan 2026-11-27). */
@@ -413,45 +414,90 @@ function CenterListRow({
   );
 }
 
-/** Magnifier timing (ms / px). Enter/exit ~190ms, wheel slide
- *  180ms — all SMOOTH_EASING, same as the capsule text. */
+/** Swipe-preview timing (ms). Enter ~190ms, exit ~180ms — all
+ *  SMOOTH_EASING, same as the capsule text. */
 const MAG_ENTER_MS = 190;
 const MAG_EXIT_MS = 180;
-const MAG_WHEEL_MS = 180;
-const MAG_WHEEL_PX = 14;
 
-/** Magnifier bubble, centred on screen (TV f_001/f_002, Ryan
- *  2026-11-27): the 3-row mini wheel (previous / large preview /
- *  next) floats over the chart centre while a capsule zone is
- *  dragged — same flex-centre portal and -translate-y-8 card as
- *  CenterList, so both sit on the same visual centre.
+/** One gear detent: a single haptic tick per preview step, so a
+ *  drag feels like a ratchet (Ryan 2026-11-27). Android Chrome:
+ *  navigator.vibrate(10). iPhone Safari has no Vibration API, so
+ *  it falls back to a very short, very quiet WebAudio tick
+ *  (sine blip, ~35ms, gain 0.06) — created/resumed inside the
+ *  drag gesture, so it stays allowed; any failure is swallowed
+ *  silently and never blocks the drag. */
+function fireGearTick(audioCtxRef: { current: AudioContext | null }): void {
+  try {
+    if (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.vibrate === 'function'
+    ) {
+      navigator.vibrate(10);
+      return;
+    }
+  } catch {
+    // vibrate threw (or is not really there) — fall through to audio.
+  }
+  try {
+    let ctx = audioCtxRef.current;
+    if (ctx === null) {
+      const AC =
+        window.AudioContext ??
+        (
+          window as unknown as {
+            webkitAudioContext?: typeof AudioContext;
+          }
+        ).webkitAudioContext;
+      if (!AC) return;
+      ctx = new AC();
+      audioCtxRef.current = ctx;
+    }
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {});
+    }
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 1800;
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0.06, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.04);
+  } catch {
+    // Audio unavailable / blocked — the drag still works.
+  }
+}
+
+/** Swipe preview list (Ryan 2026-11-27): dragging a capsule zone
+ *  now floats the whole list over the chart centre — the same
+ *  300px / -translate-y-8 / #1e222d card as CenterList, with the
+ *  preview row pill-highlighted (#3a3f4a) and kept in the card's
+ *  vertical centre, so the list looks like it ratchets past a
+ *  fixed window one row at a time (TV f_001 screenshot). This
+ *  replaces the 3-row MagnifierBubble mini wheel.
  *  pointer-events-none throughout, so it can never eat a touch.
- *  Enter: fade + scale 0.92→1. Preview change: the rows
- *  wheel-slide in the drag direction (up-drag = new rows from
- *  below, matching animateCapsuleText). Release: fade + scale
- *  →0.95, then unmount — the unmount is delayed so the exit fade
- *  is seen instead of a pop. A fresh drag during the exit cancels
+ *  Enter: fade + scale 0.92→1. Release: fade + scale →0.95,
+ *  then unmount — the unmount is delayed so the exit fade is
+ *  seen instead of a pop. A fresh drag during the exit cancels
  *  it and re-enters. */
-function MagnifierBubble({
+function SwipePreviewList({
   view,
-  step,
 }: {
   view: {
-    label: string;
-    prev: string;
-    current: string;
-    next: string;
+    zone: 'symbol' | 'interval';
+    previewId: string;
+    items: Array<{ id: string; label: string; icon?: string }>;
   } | null;
-  step: number;
 }) {
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const rowsRef = useRef<HTMLDivElement | null>(null);
   const [shown, setShown] = useState<typeof view>(null);
   const shownRef = useRef<typeof view>(null);
   const leaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const enterPendingRef = useRef(false);
-  const prevStepRef = useRef(0);
-  const prevCurrentRef = useRef<string | null>(null);
+  const prevPreviewRef = useRef<string | null>(null);
 
   // Stage mount lifetime from the parent's view prop: mount on a
   // fresh appearance, keep mounted through the exit fade.
@@ -486,15 +532,13 @@ function MagnifierBubble({
         // runs in the post-render effect below.
         enterPendingRef.current = true;
       }
-      // magView is a fresh object every parent render: only push
-      // a real content change, so unrelated renders (e.g. price
-      // ticks) don't re-render the bubble or restart animations.
+      // view is a fresh object every parent render: only push a
+      // real content change, so unrelated renders (e.g. price
+      // ticks) don't re-render the list or restart animations.
       if (
         cur === null ||
-        cur.label !== view.label ||
-        cur.prev !== view.prev ||
-        cur.current !== view.current ||
-        cur.next !== view.next
+        cur.zone !== view.zone ||
+        cur.previewId !== view.previewId
       ) {
         shownRef.current = view;
         setShown(view);
@@ -520,7 +564,7 @@ function MagnifierBubble({
       );
       leaveTimerRef.current = setTimeout(() => {
         shownRef.current = null;
-        prevCurrentRef.current = null;
+        prevPreviewRef.current = null;
         setShown(null);
         leaveTimerRef.current = null;
       }, MAG_EXIT_MS + 10);
@@ -536,13 +580,13 @@ function MagnifierBubble({
     [],
   );
 
-  // Enter on mount, wheel-slide on preview change. Runs after
-  // every shown update; the refs tell a fresh mount (enter) from
-  // a value change (slide). Cancels any running animation first.
+  // Enter on mount; centre the preview row on every preview
+  // change. First appearance centres instantly (no glide from
+  // the top); later steps smooth-scroll, so the highlight stays
+  // parked in the middle while the rows ratchet past it.
   useEffect(() => {
     if (shown === null) return;
     const card = cardRef.current;
-    const rows = rowsRef.current;
     if (enterPendingRef.current) {
       enterPendingRef.current = false;
       card?.getAnimations().forEach((a) => a.cancel());
@@ -557,55 +601,56 @@ function MagnifierBubble({
           fill: 'backwards',
         },
       );
-      prevCurrentRef.current = shown.current;
-      prevStepRef.current = step;
-      return;
     }
-    if (
-      prevCurrentRef.current !== null &&
-      shown.current !== prevCurrentRef.current
-    ) {
-      // Drag up (step grows) = new rows from below; drag down =
-      // from above — same direction as animateCapsuleText.
-      const dir = step - prevStepRef.current >= 0 ? 1 : -1;
-      prevCurrentRef.current = shown.current;
-      prevStepRef.current = step;
-      rows?.getAnimations().forEach((a) => a.cancel());
-      rows?.animate(
-        [
-          {
-            transform: `translateY(${dir >= 0 ? MAG_WHEEL_PX : -MAG_WHEEL_PX}px)`,
-            opacity: 0.4,
-          },
-          { transform: 'translateY(0px)', opacity: 1 },
-        ],
-        { duration: MAG_WHEEL_MS, easing: SMOOTH_EASING },
-      );
-    }
-  }, [shown, step]);
+    const first = prevPreviewRef.current === null;
+    prevPreviewRef.current = shown.previewId;
+    const row = card?.querySelector(
+      `[data-gear-row="${shown.previewId}"]`,
+    ) as HTMLElement | null;
+    if (!card || !row) return;
+    const top =
+      row.offsetTop - (card.clientHeight - row.offsetHeight) / 2;
+    card.scrollTo({ top, behavior: first ? 'auto' : 'smooth' });
+  }, [shown]);
 
   if (shown === null) return null;
   return createPortal(
     <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center md:hidden">
       <div
         ref={cardRef}
-        className="pointer-events-none -translate-y-8 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 px-4 py-2 text-center shadow-2xl backdrop-blur"
+        className="pointer-events-none h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-y-auto rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-2 shadow-2xl backdrop-blur"
         data-testid="capsule-magnifier"
       >
-        <div className="text-[10px] font-medium tracking-wide text-[#787b86]">
-          {shown.label}
-        </div>
-        <div ref={rowsRef} data-testid="capsule-magnifier-rows">
-          <div className="text-xs leading-5 text-[#787b86]">
-            {shown.prev}
-          </div>
-          <div className="text-xl font-bold leading-7 text-white">
-            {shown.current}
-          </div>
-          <div className="text-xs leading-5 text-[#787b86]">
-            {shown.next}
-          </div>
-        </div>
+        {/* Top/bottom spacers (half the viewport minus half a
+            row) so even the first/last row can scroll to the
+            card's vertical centre. */}
+        <div className="h-[140px] shrink-0" aria-hidden="true" />
+        {shown.items.map((item) => {
+          const selected = item.id === shown.previewId;
+          return (
+            <div
+              key={item.id}
+              data-gear-row={item.id}
+              data-testid={`gear-row-${item.id}`}
+              className={`flex h-11 w-full shrink-0 items-center gap-3 rounded-2xl px-3 text-[15px] ${
+                selected
+                  ? 'bg-[#3a3f4a] font-semibold text-white'
+                  : 'font-normal text-[#787b86]'
+              }`}
+            >
+              {item.icon !== undefined && (
+                <span
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
+                  aria-hidden="true"
+                >
+                  {item.icon}
+                </span>
+              )}
+              <span className="truncate">{item.label}</span>
+            </div>
+          );
+        })}
+        <div className="h-[140px] shrink-0" aria-hidden="true" />
       </div>
     </div>,
     document.body,
@@ -1308,15 +1353,14 @@ export default function MobileBottomBar({
     }
   };
 
-  /** Magnifier preview while a capsule zone is being dragged (Ryan
+  /** Swipe preview while a capsule zone is being dragged (Ryan
    *  2026-11-26: the finger covers the capsule, so the value is
-   *  invisible mid-swipe). The bubble floats over the screen
-   *  centre (see MagnifierBubble) with a 3-row mini wheel —
-   *  previous / preview / next, preview large — like
-   *  TradingView's old vertical interval picker. The preview is
-   *  what a release commits, so what he sees is what he gets.
-   *  State drives the bubble; the ref is what the swipe commit
-   *  reads (it is set synchronously on every drag move). */
+   *  invisible mid-swipe; 2026-11-27: the preview is now the whole
+   *  list, pill-highlighted and centred — see SwipePreviewList).
+   *  The preview is what a release commits, so what he sees is
+   *  what he gets. State drives the list; the ref is what the
+   *  swipe commit reads (it is set synchronously on every drag
+   *  move). */
   const [magnifier, setMagnifier] = useState<{
     zone: 'symbol' | 'interval';
     previewId: string;
@@ -1327,6 +1371,9 @@ export default function MobileBottomBar({
     previewId: string;
     step: number;
   } | null>(null);
+  /** Lazily created WebAudio context for the gear tick on iPhones
+   *  (no Vibration API there) — see fireGearTick. */
+  const gearAudioRef = useRef<AudioContext | null>(null);
 
   /** Minimal toast (no toast system in the app): a dark pill above
    *  the bottom bar, auto-dismissed. Used for 尚未支援 / 儲存確認 /
@@ -1352,7 +1399,7 @@ export default function MobileBottomBar({
   );
 
   /** Preview value for a drag offset: no step until the swipe
-   *  threshold, then one step per 30px of drag. Null while the
+   *  threshold, then one step per 50px of drag. Null while the
    *  drag is still a tap (<= 10px). */
   const previewFor = (
     zone: 'symbol' | 'interval',
@@ -1412,6 +1459,12 @@ export default function MobileBottomBar({
         prev.zone !== zone ||
         prev.previewId !== next.previewId
       ) {
+        // Gear detent (Ryan 2026-11-27): one tick per step
+        // change. A first appearance with step 0 is not a step
+        // (the drag is still inside the dead zone), so no tick.
+        if (prev !== null || next.step !== 0) {
+          fireGearTick(gearAudioRef);
+        }
         const m = { zone, previewId: next.previewId, step: next.step };
         magRef.current = m;
         setMagnifier(m);
@@ -1474,36 +1527,27 @@ export default function MobileBottomBar({
     return false;
   };
 
-  // 3-row mini wheel for the bubble: neighbours of the preview.
-  const magView =
+  // The list the swipe walks, with the preview row highlighted.
+  // Symbol zone: the watchlist (icon + code rows); interval
+  // zone: the favourite intervals (plain label rows).
+  const gearView =
     magnifier === null
       ? null
-      : magnifier.zone === 'symbol'
-        ? {
-            label: '標的',
-            prev: cycleValue(watchlist, magnifier.previewId, -1),
-            current: magnifier.previewId,
-            next: cycleValue(watchlist, magnifier.previewId, 1),
-          }
-        : {
-            label: '週期',
-            prev: INTERVAL_LABELS[
-              cycleValue(
-                swipeIntervals,
-                magnifier.previewId as Interval,
-                -1,
-              )
-            ],
-            current:
-              INTERVAL_LABELS[magnifier.previewId as Interval],
-            next: INTERVAL_LABELS[
-              cycleValue(
-                swipeIntervals,
-                magnifier.previewId as Interval,
-                1,
-              )
-            ],
-          };
+      : {
+          zone: magnifier.zone,
+          previewId: magnifier.previewId,
+          items:
+            magnifier.zone === 'symbol'
+              ? watchlist.map((s) => ({
+                  id: s,
+                  label: s,
+                  icon: s.charAt(0),
+                }))
+              : swipeIntervals.map((iv) => ({
+                  id: iv,
+                  label: INTERVAL_LABELS[iv],
+                })),
+        };
 
   // Animate the capsule text on value change (direction from the
   // swipe that caused it, fade when it came from a tap/sheet).
@@ -1690,14 +1734,11 @@ export default function MobileBottomBar({
             </div>,
             document.body,
           )}
-        {/* Capsule wrapper: the magnifier is portalled to the
-            screen centre (see MagnifierBubble), so this wrapper no
-            longer positions it. */}
+        {/* Capsule wrapper: the swipe preview list is portalled
+            to the screen centre (see SwipePreviewList), so this
+            wrapper no longer positions it. */}
         <div className="relative min-w-0 flex-1">
-          <MagnifierBubble
-            view={magView}
-            step={magnifier?.step ?? 0}
-          />
+          <SwipePreviewList view={gearView} />
           {/* Bottom capsule: symbol | interval, both swipeable.
               Symbol flexes (left-aligned), interval is a fixed
               76px centred zone. */}
