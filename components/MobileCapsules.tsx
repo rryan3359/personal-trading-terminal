@@ -8,17 +8,35 @@
  * volume pane + time axis, could not be swiped, and the left rail's
  * bottom buttons were clipped by them):
  *
- *   MobileTopPill — the [symbol | interval] pill, an absolute
- *   overlay at the chart's top-left (unchanged position).
+ *   MobileTopBar — TV-style top bar, an absolute overlay across
+ *   the chart's top: left [icon symbol | green dot interval
+ *   badge], right circular chevron to collapse / expand it.
  *   MobileBottomBar (default export) — a real flex row BELOW the
  *   chart row (page.tsx renders it under the chart, above the
- *   home-indicator safe area): a flexible [symbol | interval]
- *   capsule on the left and a compact [ƒx | gear | ⋯] capsule on
- *   the right. Because it is a normal flex child, not an overlay,
- *   the chart's volume pane and time axis are fully visible. (The
- *   fixed left rail is gone on mobile since 2026-11-26 — the
- *   drawing tools float instead, see DrawingBar.)
+ *   home-indicator safe area): a TV-proportioned [symbol |
+ *   interval] capsule on the left (symbol wider, interval in its
+ *   own centred zone) plus three separate circular buttons
+ *   (brush / indicators / ⋯). Because it is a normal flex child,
+ *   not an overlay, the chart's volume pane and time axis are
+ *   fully visible. (The fixed left rail is gone on mobile since
+ *   2026-11-26 — the drawing tools float instead, see
+ *   DrawingBar.)
  *
+ * Overlays (all mobile-only, `md:hidden`, portalled to
+ * document.body):
+ *   Centre lists — tapping a capsule zone (or the top bar) floats
+ *   a rounded list over the chart centre (TV-style, f_001/f_002):
+ *   symbol list (watchlist + stock watchlist) and interval list
+ *   (favourite intervals only, with a 管理收藏週期 mode that
+ *   stars all 14). Selected row = light-grey pill.
+ *   Bottom sheets — indicators list and the 分析中心 (was 更多):
+ *   a TV-style grid (版面設定 / 管理 ICT / 圖表設定 / 新 / 儲存
+ *   / 開啟, then a 工具 section). Cells that map to an existing
+ *   feature open it; unbuilt ones (比較 / 快訊 / K線重播 / 版面
+ *   設定 / 管理 ICT / 新） show a 尚未支援 toast instead of
+ *   faking the feature. 儲存／開啟 use the localStorage layouts
+ *   in lib/store.ts (ptt:layouts); no broker button anywhere,
+ *   no TV logo anywhere.
  * Swipe — round 1 (native non-passive touch + preventDefault +
  * touchcancel completes the swipe) passed CDP but STILL failed on
  * Ryan's real iPhone (16:42 screenshot: new layout live, swipe
@@ -51,15 +69,13 @@
  * swipe up slides the new value in from below, swipe down from
  * above, ~200ms; tap/sheet changes fade in ~150ms instead.
  *
- * All sheets are bottom sheets (backdrop + drag handle), mobile-only
- * (`md:hidden`), portalled to document.body. Nothing here renders on
- * desktop.
+ * Overlays are mobile-only (`md:hidden`), portalled to
+ * document.body. Nothing here renders on desktop.
  */
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  CHART_TYPES,
   INDICATOR_OPTIONS,
   type ChartType,
 } from '@/lib/chart-config';
@@ -68,6 +84,7 @@ import {
   SWIPE_INTERVALS,
   type Interval,
 } from '@/lib/types';
+import type { SavedLayout } from '@/lib/store';
 
 /** Vertical swipe threshold (px) and tap threshold (px). 20px: the
  *  capsules are only 48px tall, so a natural flick on one is short;
@@ -77,6 +94,35 @@ const TAP_MAX_MOVE = 10;
 /** Magnifier preview: the first step needs the swipe threshold
  *  (20px), each further step 30px more of drag. */
 const MAG_STEP_PX = 30;
+/** Finger-follow cap (px): the capsule text translates 1:1 with the
+ *  drag while swiping, clamped so it never slides fully out of the
+ *  48px capsule — the magnifier bubble carries the value. */
+const FOLLOW_MAX_PX = 26;
+/** Smoother switch easing (easeOutQuint-ish): the old plain
+ *  ease-out 200ms felt abrupt/janky (Ryan 2026-11-27). */
+const SMOOTH_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
+/** Default favourite intervals (Ryan 2026-11-27): swiping the
+ *  interval zone only walks these; the full 14 stay in the sheet. */
+const DEFAULT_FAVORITE_INTERVALS: Interval[] = ['15m', '1h', '4h', '1d'];
+const FAVORITE_INTERVALS_KEY = 'ptt:favorite-intervals';
+/** Stored favourites, or null when the key was never written (use
+ *  the defaults). An explicitly stored empty list is returned as
+ *  [] — the caller falls back to the full list then. */
+function loadFavoriteIntervals(): Interval[] | null {
+  try {
+    const raw = window.localStorage.getItem(FAVORITE_INTERVALS_KEY);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter(
+      (v): v is Interval =>
+        typeof v === 'string' &&
+        (SWIPE_INTERVALS as string[]).includes(v),
+    );
+  } catch {
+    return null;
+  }
+}
 /** Value `steps` away from `current` in a wrapping list (the
  *  magnifier preview cycles the watchlist / interval list). */
 function cycleValue<T>(list: readonly T[], current: T, steps: number): T {
@@ -85,22 +131,45 @@ function cycleValue<T>(list: readonly T[], current: T, steps: number): T {
   const i = list.indexOf(current);
   return list[(((i < 0 ? 0 : i) + steps) % n + n) % n];
 }
+/** Persist the favourite intervals (empty array is a real value:
+ *  swiping then falls back to the full list). */
+function saveFavoriteIntervals(ids: Interval[]): void {
+  try {
+    window.localStorage.setItem(
+      FAVORITE_INTERVALS_KEY,
+      JSON.stringify(ids),
+    );
+  } catch {
+    // Storage full / unavailable (private mode) — non-fatal.
+  }
+}
 /** A click arriving this soon after a swipe is the swipe's own
  *  synthetic click — swallow it so a swipe never also taps. */
 const SWIPE_CLICK_GUARD_MS = 400;
 
-/** Which bottom sheet is open (owned by page.tsx, shared by the
- *  pill and the bottom bar). */
-export type MobileSheetKind = 'interval' | 'indicators' | 'more';
+/** Which overlay is open (owned by page.tsx, shared by the top bar
+ *  and the bottom bar). 'symbol' / 'interval' are the TV-style
+ *  centre-floating lists; 'indicators' is the bottom sheet;
+ *  'analysis' is the TV-style 分析中心 bottom sheet (was 'more'). */
+export type MobileSheetKind =
+  | 'symbol'
+  | 'interval'
+  | 'indicators'
+  | 'analysis';
 
 export interface MobileCapsulesProps {
   symbol: string;
   interval: Interval;
   watchlist: string[];
+  /** TW/US tickers on the stock watchlist (shown in the symbol list
+   *  with 尚未支援報價 — they never touch the chart). */
+  stockWatchlist: string[];
   onSelectSymbol: (symbol: string) => void;
   onIntervalChange: (interval: Interval) => void;
-  /** Open the watchlist drawer. */
+  /** Open the watchlist drawer (full list with search / add). */
   onOpenWatchlist: () => void;
+  /** Open the drawing sheet (DrawingBar, TV-style). */
+  onOpenDrawingSheet: () => void;
   indicators: string[];
   onToggleIndicator: (name: string) => void;
   /** Open the chart appearance (chart settings) dialog. */
@@ -117,7 +186,16 @@ export interface MobileCapsulesProps {
   canRedo: boolean;
   /** Restore the default chart view. */
   onResetView: () => void;
-  /** Open bottom sheet, or null when none is open. */
+  /** Saved chart layouts (analysis centre 儲存／開啟). */
+  layouts: SavedLayout[];
+  /** Save the current view as a layout; returns the saved name. */
+  onSaveLayout: () => string;
+  /** Apply a saved layout (symbol / interval / indicators / chart
+   *  type / appearance). */
+  onOpenLayout: (id: string) => void;
+  /** Delete a saved layout. */
+  onDeleteLayout: (id: string) => void;
+  /** Open bottom sheet / centre list, or null when none is open. */
   sheet: MobileSheetKind | null;
   onSheetChange: (sheet: MobileSheetKind | null) => void;
 }
@@ -154,6 +232,26 @@ function GearIcon({ size = 18 }: { size?: number }) {
 }
 
 /** Horizontal "⋯". */
+/** Diagonal pencil (drawing-sheet trigger, TV-style brush button). */
+function BrushIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M13.8 3.2a2.1 2.1 0 013 3L8.5 14.5 4 15.5l1-4.5 8.8-7.8z" />
+      <path d="M11.5 5.5l3 3" />
+    </svg>
+  );
+}
+
 function DotsIcon() {
   return (
     <svg
@@ -224,6 +322,246 @@ function MobileSheet({
     </div>,
     document.body,
   );
+}
+
+/** Orange favourite star (same colour as the drawing-sheet stars). */
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      width={18}
+      height={18}
+      viewBox="0 0 20 20"
+      fill={filled ? '#f79009' : 'none'}
+      stroke={filled ? '#f79009' : '#787b86'}
+      strokeWidth={1.5}
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M10 1.8l2.5 5.2 5.7.7-4.2 3.9 1.1 5.6L10 14.4l-5.1 2.8 1.1-5.6L1.8 7.7l5.7-.7L10 1.8z" />
+    </svg>
+  );
+}
+
+/**
+ * Centre-floating list (TV-style, f_001/f_002): a rounded dark card
+ * floating over the chart centre, the selected row a light-grey
+ * pill. No dim backdrop — the chart stays visible around it.
+ * Backdrop tap or Esc closes. Portalled to document.body.
+ */
+function CenterList({
+  testId,
+  label,
+  onClose,
+  children,
+}: {
+  testId: string;
+  label: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center md:hidden"
+      role="dialog"
+      aria-label={label}
+      data-testid={testId}
+    >
+      <div
+        className="absolute inset-0"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div className="relative max-h-[62vh] w-[300px] -translate-y-8 overflow-y-auto rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-2 shadow-2xl backdrop-blur">
+        {children}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** One row of a centre list: selected = light-grey pill (f_001). */
+function CenterListRow({
+  selected,
+  onClick,
+  testId,
+  children,
+}: {
+  selected: boolean;
+  onClick: () => void;
+  testId: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      data-testid={testId}
+      className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-[15px] ${
+        selected
+          ? 'bg-[#3a3f4a] font-semibold text-white'
+          : 'font-normal text-[#d1d4dc]'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** One analysis-centre grid cell: icon + label (+ optional sub). */
+function AnalysisCell({
+  label,
+  sub,
+  onClick,
+  disabled,
+  testId,
+  icon,
+}: {
+  label: string;
+  sub?: string;
+  onClick: () => void;
+  disabled?: boolean;
+  testId: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      data-testid={testId}
+      className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-[#2a2e39] bg-[#1e222d] px-2 py-3.5 text-[#d1d4dc] disabled:opacity-30"
+    >
+      <span className="text-[#b2b5be]">{icon}</span>
+      <span className="text-[13px] leading-tight">{label}</span>
+      {sub ? (
+        <span className="text-[11px] leading-tight text-[#787b86]">
+          {sub}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+/** Small stroke icons for the analysis-centre cells (TV-style). */
+function AnalysisIcon({ kind }: { kind: string }) {
+  const p = {
+    width: 20,
+    height: 20,
+    viewBox: '0 0 20 20',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.5,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+  };
+  switch (kind) {
+    case 'layout':
+      return (
+        <svg {...p}>
+          <rect x="3" y="4" width="14" height="12" rx="1.5" />
+          <line x1="8" y1="4" x2="8" y2="16" />
+        </svg>
+      );
+    case 'ict':
+      return (
+        <svg {...p}>
+          <path d="M3 3h7l7 7-7 7-7-7V3z" />
+          <circle cx="7.5" cy="7.5" r="1.2" />
+        </svg>
+      );
+    case 'new':
+      return (
+        <svg {...p}>
+          <rect x="3" y="4" width="14" height="12" rx="1.5" />
+          <path d="M10 8v4M8 10h4" />
+        </svg>
+      );
+    case 'save':
+      return (
+        <svg {...p}>
+          <path d="M10 12V4M6.5 7.5L10 4l3.5 3.5" />
+          <path d="M4 15.5h12" />
+        </svg>
+      );
+    case 'open':
+      return (
+        <svg {...p}>
+          <path d="M3 5.5A1.5 1.5 0 014.5 4h3l1.5 2h6.5A1.5 1.5 0 0117 7.5V15a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 013 15V5.5z" />
+        </svg>
+      );
+    case 'indicators':
+      return (
+        <svg {...p}>
+          <path d="M3 16.5h14" />
+          <path d="M6 16.5v-5M11 16.5V6M16 16.5v-8" />
+        </svg>
+      );
+    case 'compare':
+      return (
+        <svg {...p}>
+          <circle cx="10" cy="10" r="7" />
+          <path d="M10 7v6M7 10h6" />
+        </svg>
+      );
+    case 'alert':
+      return (
+        <svg {...p}>
+          <circle cx="10" cy="10" r="7" />
+          <path d="M10 6.5V10l3 2" />
+        </svg>
+      );
+    case 'replay':
+      return (
+        <svg {...p}>
+          <path d="M10 5L4 10l6 5V5z" />
+          <path d="M16 5l-6 5 6 5V5z" />
+        </svg>
+      );
+    case 'chartType':
+      return (
+        <svg {...p}>
+          <path d="M7 3.5V5M7 15v1.5M13 2v2M13 16v2" />
+          <rect x="5" y="5" width="4" height="10" rx="0.5" />
+          <rect x="11" y="4" width="4" height="12" rx="0.5" />
+        </svg>
+      );
+    case 'objects':
+      return (
+        <svg {...p}>
+          <path d="M8 6h9M8 10h9M8 14h9" />
+          <circle cx="4" cy="6" r="1.2" />
+          <circle cx="4" cy="10" r="1.2" />
+          <circle cx="4" cy="14" r="1.2" />
+        </svg>
+      );
+    case 'reset':
+      return (
+        <svg {...p}>
+          <path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" />
+        </svg>
+      );
+    case 'undo':
+      return (
+        <svg {...p}>
+          <path d="M8 5L3 10l5 5" />
+          <path d="M3 10h10a5 5 0 015 5" />
+        </svg>
+      );
+    case 'redo':
+      return (
+        <svg {...p}>
+          <path d="M12 5l5 5-5 5" />
+          <path d="M17 10H7a5 5 0 00-5 5" />
+        </svg>
+      );
+    default:
+      return null;
+  }
 }
 
 /**
@@ -507,24 +845,28 @@ const CAPSULE_BG = 'border border-[#2a2e39] bg-[#131722]/90 shadow-lg backdrop-b
 
 /**
  * Animate a capsule's text when its value changes. Swipe up slides
- * the new value in from below, swipe down from above (~200ms,
- * ease-out); a change with no swipe direction (tap, bottom sheet)
- * fades in (~150ms). Web Animations API, applied imperatively:
- * the swipe handler records the direction in a ref before the
- * parent state update lands, and the effect consumes it — no
- * remount/class juggling, so a later re-render can never replay
- * the animation. The element needs `inline-block` for the
- * translate to apply.
+ * the new value in from below, swipe down from above (~250ms,
+ * easeOutQuint-ish easing — the old 200ms plain ease-out felt
+ * abrupt/janky, Ryan 2026-11-27); a change with no swipe direction
+ * (tap, bottom sheet) fades in (~180ms). Web Animations API,
+ * applied imperatively: the swipe handler records the direction in
+ * a ref before the parent state update lands, and the effect
+ * consumes it — no remount/class juggling, so a later re-render can
+ * never replay the animation. Any running animation (e.g. a
+ * snap-back glide from the previous drag) is cancelled first so
+ * the new one starts clean. The element needs `inline-block` for
+ * the translate to apply.
  */
 function animateCapsuleText(
   el: HTMLElement | null,
   dir: 'up' | 'down' | null,
 ) {
   if (!el) return;
+  el.getAnimations().forEach((a) => a.cancel());
   if (dir === null) {
     el.animate([{ opacity: 0 }, { opacity: 1 }], {
-      duration: 150,
-      easing: 'ease-out',
+      duration: 180,
+      easing: SMOOTH_EASING,
     });
     return;
   }
@@ -534,7 +876,7 @@ function animateCapsuleText(
       { transform: `translateY(${from})`, opacity: 0 },
       { transform: 'translateY(0)', opacity: 1 },
     ],
-    { duration: 200, easing: 'ease-out' },
+    { duration: 250, easing: SMOOTH_EASING },
   );
 }
 
@@ -544,44 +886,120 @@ function animateCapsuleText(
  * tap the interval to open the interval sheet. Rendered inside the
  * chart container by page.tsx; unchanged position.
  */
-export function MobileTopPill({
+/** Top-bar collapse persistence (mount-sync: read in an effect so
+ *  SSR never touches window). */
+const TOPBAR_COLLAPSED_KEY = 'ptt:topbar-collapsed';
+
+/**
+ * Mobile top bar (TV-style, f_001): a full-width bar over the
+ * chart's top — left [icon symbol | green dot interval badge],
+ * right circular chevron that collapses / expands the bar. No TV
+ * logo. Tapping the symbol opens the centre symbol list; tapping
+ * the interval opens the centre interval list. Collapsed state
+ * persists in localStorage.
+ */
+export function MobileTopBar({
   symbol,
   interval,
-  onOpenWatchlist,
+  onOpenSymbolList,
   onOpenIntervalSheet,
 }: {
   symbol: string;
   interval: Interval;
-  onOpenWatchlist: () => void;
+  onOpenSymbolList: () => void;
   onOpenIntervalSheet: () => void;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  /* eslint-disable react-hooks/set-state-in-effect -- one-time mount
+     sync from localStorage (an external system); a lazy initializer
+     would read window during SSR and mismatch hydration. */
+  useEffect(() => {
+    try {
+      setCollapsed(
+        window.localStorage.getItem(TOPBAR_COLLAPSED_KEY) === '1',
+      );
+    } catch {
+      // Non-fatal.
+    }
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(
+          TOPBAR_COLLAPSED_KEY,
+          next ? '1' : '0',
+        );
+      } catch {
+        // Non-fatal.
+      }
+      return next;
+    });
+  };
   return (
     <div
-      className={`absolute left-2 top-2 z-20 flex items-center gap-2 rounded-full px-2.5 py-1.5 md:hidden ${CAPSULE_BG}`}
-      data-testid="mobile-top-pill"
+      className="absolute left-0 right-0 top-0 z-20 flex items-start justify-between px-2 pt-2 md:hidden"
+      data-testid="mobile-top-bar"
     >
-      <button
-        onClick={onOpenWatchlist}
-        aria-label={`切換標的，目前 ${symbol}`}
-        data-testid="mobile-top-symbol"
-        className="flex items-center gap-1.5"
-      >
-        <span
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-[11px] font-bold text-white"
-          aria-hidden="true"
+      {!collapsed && (
+        <div
+          className={`flex items-center gap-2 rounded-full px-2.5 py-1.5 ${CAPSULE_BG}`}
+          data-testid="mobile-top-pill"
         >
-          {symbol.charAt(0)}
-        </span>
-        <span className="text-sm font-semibold text-white">{symbol}</span>
-      </button>
-      <span className="h-4 w-px bg-[#2a2e39]" aria-hidden="true" />
+          <button
+            onClick={onOpenSymbolList}
+            aria-label={`切換標的，目前 ${symbol}`}
+            data-testid="mobile-top-symbol"
+            className="flex items-center gap-1.5"
+          >
+            <span
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-[11px] font-bold text-white"
+              aria-hidden="true"
+            >
+              {symbol.charAt(0)}
+            </span>
+            <span className="text-sm font-semibold text-white">
+              {symbol}
+            </span>
+          </button>
+          <span className="h-4 w-px bg-[#2a2e39]" aria-hidden="true" />
+          <button
+            onClick={onOpenIntervalSheet}
+            aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}`}
+            data-testid="mobile-top-interval"
+            className="flex items-center gap-1.5 text-sm font-medium text-white"
+          >
+            <span
+              className="h-2 w-2 shrink-0 rounded-full bg-[#26a69a]"
+              aria-hidden="true"
+            />
+            {INTERVAL_LABELS[interval]}
+          </button>
+        </div>
+      )}
       <button
-        onClick={onOpenIntervalSheet}
-        aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}`}
-        data-testid="mobile-top-interval"
-        className="text-sm font-medium text-[#2962ff]"
+        onClick={toggleCollapsed}
+        aria-label={collapsed ? '展開頂欄' : '收起頂欄'}
+        data-testid="mobile-top-collapse"
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#131722]/90 text-[#b2b5be] shadow-lg backdrop-blur hover:text-white ${
+          collapsed ? 'ml-auto' : ''
+        }`}
       >
-        {INTERVAL_LABELS[interval]}
+        <svg
+          width={16}
+          height={16}
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.8}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className={collapsed ? 'rotate-180' : ''}
+        >
+          <path d="M3 6l5 5 5-5" />
+        </svg>
       </button>
     </div>
   );
@@ -600,9 +1018,11 @@ export default function MobileBottomBar({
   symbol,
   interval,
   watchlist,
+  stockWatchlist,
   onSelectSymbol,
   onIntervalChange,
   onOpenWatchlist,
+  onOpenDrawingSheet,
   indicators,
   onToggleIndicator,
   onOpenAppearanceSettings,
@@ -614,6 +1034,10 @@ export default function MobileBottomBar({
   onRedo,
   canRedo,
   onResetView,
+  layouts,
+  onSaveLayout,
+  onOpenLayout,
+  onDeleteLayout,
   sheet,
   onSheetChange,
 }: MobileCapsulesProps) {
@@ -642,13 +1066,42 @@ export default function MobileBottomBar({
       onSelectSymbol(next);
     }
   };
+  // Favourite intervals (Ryan 2026-11-27): swiping the interval
+  // zone — and the magnifier preview — only walks these. Defaults
+  // 15分/1h/4h/1d; an explicitly emptied list falls back to all 14
+  // so swiping never dead-ends. Managed in the centre interval
+  // list (管理收藏週期 → star per row). State inits to the
+  // defaults (the list opens on tap, after the mount load below
+  // has corrected it); the localStorage read is effect-only so SSR
+  // never touches window.
+  const [favoriteIntervals, setFavoriteIntervals] =
+    useState<Interval[]>(DEFAULT_FAVORITE_INTERVALS);
+  /* eslint-disable react-hooks/set-state-in-effect -- one-time mount
+     sync from localStorage (an external system); a lazy initializer
+     would read window during SSR and mismatch hydration. */
+  useEffect(() => {
+    const stored = loadFavoriteIntervals();
+    if (stored !== null) setFavoriteIntervals(stored);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  const toggleFavoriteInterval = (iv: Interval) => {
+    setFavoriteIntervals((prev) => {
+      const next = prev.includes(iv)
+        ? prev.filter((x) => x !== iv)
+        : [...prev, iv];
+      saveFavoriteIntervals(next);
+      return next;
+    });
+  };
+  const swipeIntervals =
+    favoriteIntervals.length > 0 ? favoriteIntervals : SWIPE_INTERVALS;
   const cycleInterval = (dir: 1 | -1) => {
-    const i = SWIPE_INTERVALS.indexOf(interval);
+    const i = swipeIntervals.indexOf(interval);
     const next =
-      SWIPE_INTERVALS[
-        (((i < 0 ? 0 : i) + dir) % SWIPE_INTERVALS.length +
-          SWIPE_INTERVALS.length) %
-        SWIPE_INTERVALS.length
+      swipeIntervals[
+        (((i < 0 ? 0 : i) + dir) % swipeIntervals.length +
+          swipeIntervals.length) %
+        swipeIntervals.length
       ];
     if (next !== interval) {
       intervalDirRef.current = dir === 1 ? 'up' : 'down';
@@ -675,6 +1128,29 @@ export default function MobileBottomBar({
     step: number;
   } | null>(null);
 
+  /** Minimal toast (no toast system in the app): a dark pill above
+   *  the bottom bar, auto-dismissed. Used for 尚未支援 / 儲存確認 /
+   *  stock rows tapped in the symbol list. */
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = (msg: string) => {
+    if (toastTimerRef.current !== null) {
+      clearTimeout(toastTimerRef.current);
+    }
+    setToast(msg);
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 1600);
+  };
+  /** Interval centre list: manage mode lists all 14 intervals with
+   *  a star per row. Resets whenever the list closes. */
+  const [intervalManage, setIntervalManage] = useState(false);
+  /** Analysis centre inner view: main grid or the saved-layout list. */
+  const [analysisView, setAnalysisView] = useState<'main' | 'layouts'>(
+    'main',
+  );
+
   /** Preview value for a drag offset: no step until the swipe
    *  threshold, then one step per 30px of drag. Null while the
    *  drag is still a tap (<= 10px). */
@@ -692,7 +1168,7 @@ export default function MobileBottomBar({
     const previewId =
       zone === 'symbol'
         ? cycleValue(watchlist, symbol, step)
-        : cycleValue(SWIPE_INTERVALS, interval, step);
+        : cycleValue(swipeIntervals, interval, step);
     return { previewId, step };
   };
 
@@ -706,12 +1182,30 @@ export default function MobileBottomBar({
     (zone: 'symbol' | 'interval') => (dy: number) => {
       const next = previewFor(zone, dy);
       const prev = magRef.current;
+      // Finger-follow (Ryan 2026-11-27): while swiping, the capsule
+      // text translates 1:1 with the finger (clamped) instead of
+      // sitting still until release. The first swipe move cancels
+      // any running text animation (slide-in / glide-back) so the
+      // follow starts from the live position.
+      const textEl =
+        zone === 'symbol' ? symbolTextRef.current : intervalTextRef.current;
       if (next === null) {
+        if (textEl) textEl.style.transform = '';
         if (prev !== null) {
           magRef.current = null;
           setMagnifier(null);
         }
         return;
+      }
+      if (prev === null) {
+        textEl?.getAnimations().forEach((a) => a.cancel());
+      }
+      if (textEl) {
+        const clamped = Math.max(
+          -FOLLOW_MAX_PX,
+          Math.min(FOLLOW_MAX_PX, dy),
+        );
+        textEl.style.transform = `translateY(${clamped}px)`;
       }
       if (
         prev === null ||
@@ -725,10 +1219,37 @@ export default function MobileBottomBar({
     };
   /* eslint-enable react-hooks/refs */
   const onZoneEnd = () => {
-    if (magRef.current !== null) {
-      magRef.current = null;
-      setMagnifier(null);
+    const m = magRef.current;
+    // Did this gesture commit a new value? (Checked before the
+    // magnifier is cleared; the values are still the pre-commit
+    // ones — the commit's state update has not rendered yet.)
+    const committed =
+      m !== null &&
+      ((m.zone === 'symbol' && m.previewId !== symbol) ||
+        (m.zone === 'interval' && m.previewId !== interval));
+    magRef.current = null;
+    setMagnifier(null);
+    if (m === null) return;
+    const textEl =
+      m.zone === 'symbol' ? symbolTextRef.current : intervalTextRef.current;
+    if (!textEl) return;
+    if (committed) {
+      // The value-change slide-in takes over: clear the follow
+      // offset so it starts clean.
+      textEl.style.transform = '';
+      return;
     }
+    // No commit (tap-range drag or a same-step release): glide the
+    // text back to rest instead of snapping. The animation runs
+    // from the current inline offset, so clear the inline style
+    // first — the running animation overrides it until it ends.
+    const current = textEl.style.transform;
+    if (!current) return;
+    textEl.style.transform = '';
+    textEl.animate(
+      [{ transform: current }, { transform: 'translateY(0px)' }],
+      { duration: 180, easing: SMOOTH_EASING },
+    );
   };
 
   /** Commit the magnifier preview on swipe release (true when it
@@ -768,7 +1289,7 @@ export default function MobileBottomBar({
             label: '週期',
             prev: INTERVAL_LABELS[
               cycleValue(
-                SWIPE_INTERVALS,
+                swipeIntervals,
                 magnifier.previewId as Interval,
                 -1,
               )
@@ -777,7 +1298,7 @@ export default function MobileBottomBar({
               INTERVAL_LABELS[magnifier.previewId as Interval],
             next: INTERVAL_LABELS[
               cycleValue(
-                SWIPE_INTERVALS,
+                swipeIntervals,
                 magnifier.previewId as Interval,
                 1,
               )
@@ -805,7 +1326,11 @@ export default function MobileBottomBar({
     animateCapsuleText(intervalTextRef.current, dir);
   }, [interval]);
 
-  const closeSheet = () => onSheetChange(null);
+  const closeSheet = () => {
+    setIntervalManage(false);
+    setAnalysisView('main');
+    onSheetChange(null);
+  };
 
   const symbolZoneRef = useRef<HTMLDivElement | null>(null);
   const intervalZoneRef = useRef<HTMLDivElement | null>(null);
@@ -935,159 +1460,287 @@ export default function MobileBottomBar({
 
   return (
     <>
-      {/* The fixed left rail is gone on mobile (Ryan 2026-11-26 —
-          the drawing tools float instead), so the bar spans the full
-          width. Bottom padding is the safe area PLUS a margin: with
-          viewport-fit=cover the env() is real (34px on Face ID
-          iPhones). Ryan 2026-11-27: raise the bar a bit higher
-          (extra 1.25rem, was 0.75rem) and make the two capsules
-          even — the bar is a 2-column grid so each pill is exactly
-          half the row (flex-1 measured 177/189 in Chrome: the two
-          pills' content sizes skewed the split), with the right
-          capsule's three buttons centred. pt-2.5 keeps
-          them off the chart above. Both capsules are h-12 (48px) so
+      {/* TV-style bottom bar (Ryan 2026-11-27): one [symbol |
+          interval] capsule + three separate circular buttons
+          (brush / indicators / ⋯). The capsule is TV-proportioned
+          — symbol wider, interval in its own centred zone, divider
+          between, no dead space (the hard 50/50 split from the
+          morning is gone). The gear left the bar — 圖表設定 lives
+          in the analysis centre now. Bottom padding is the safe
+          area PLUS a margin (Ryan 2026-11-27: raised higher,
+          safe-area + 1.25rem). pt-2.5 keeps the bar off the chart
+          above. The capsule and the buttons are h-12 (48px) so
           their tops and bottoms align. */}
       <div
-        className="relative grid shrink-0 grid-cols-2 items-center gap-2 pl-2 pr-2 pt-2.5 md:hidden"
+        className="relative flex shrink-0 items-center gap-2 pl-2 pr-2 pt-2.5 md:hidden"
         style={{
           paddingBottom:
             'max(1.5rem, calc(env(safe-area-inset-bottom) + 1.25rem))',
         }}
         data-testid="mobile-bottom-bar"
       >
-        {/* Magnifier: floats above the bar while a capsule zone is
-            being dragged (the finger covers the capsule itself).
-            pointer-events-none so it can never eat a touch. */}
-        {magView && (
-          <div
-            className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-3 -translate-x-1/2 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 px-4 py-2 text-center shadow-2xl backdrop-blur"
-            data-testid="capsule-magnifier"
-          >
-            <div className="text-[10px] font-medium tracking-wide text-[#787b86]">
-              {magView.label}
-            </div>
-            <div className="text-xs leading-5 text-[#787b86]">
-              {magView.prev}
-            </div>
-            <div className="text-xl font-bold leading-7 text-white">
-              {magView.current}
-            </div>
-            <div className="text-xs leading-5 text-[#787b86]">
-              {magView.next}
-            </div>
-          </div>
-        )}
-        {/* Bottom-left capsule: symbol | interval, both swipeable. */}
-        <div
-          className={`flex h-12 min-w-0 flex-1 items-stretch overflow-hidden rounded-full ${CAPSULE_BG}`}
-          data-testid="mobile-bottom-capsule"
-        >
-          <div
-            ref={symbolZoneRef}
-            style={{ touchAction: 'none' }}
-            className="flex h-full min-w-0 flex-1 items-center"
-            data-testid="mobile-symbol-zone"
-          >
-            <button
-              onClick={onOpenWatchlist}
-              aria-label={`切換標的，目前 ${symbol}（上下滑動切換）`}
-              style={{ touchAction: 'none' }}
-              className="flex h-full w-full items-center px-3 text-sm font-semibold text-white"
+        {toast !== null &&
+          createPortal(
+            <div
+              className="pointer-events-none fixed bottom-24 left-1/2 z-[60] -translate-x-1/2 whitespace-nowrap rounded-full border border-[#2a2e39] bg-[#1e222d] px-4 py-2 text-sm text-white shadow-2xl md:hidden"
+              data-testid="mobile-toast"
+              role="status"
             >
-              <span
-                ref={symbolTextRef}
-                className="inline-block truncate"
+              {toast}
+            </div>,
+            document.body,
+          )}
+        {/* Capsule wrapper is relative so the magnifier centres
+            over the capsule (the capsule itself is overflow-hidden
+            for the rounded pill, which would clip it). */}
+        <div className="relative min-w-0 flex-1">
+          {/* Magnifier: floats above the capsule while a zone is
+              being dragged (the finger covers the capsule itself).
+              pointer-events-none so it can never eat a touch. */}
+          {magView && (
+            <div
+              className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-3 -translate-x-1/2 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 px-4 py-2 text-center shadow-2xl backdrop-blur"
+              data-testid="capsule-magnifier"
+            >
+              <div className="text-[10px] font-medium tracking-wide text-[#787b86]">
+                {magView.label}
+              </div>
+              <div className="text-xs leading-5 text-[#787b86]">
+                {magView.prev}
+              </div>
+              <div className="text-xl font-bold leading-7 text-white">
+                {magView.current}
+              </div>
+              <div className="text-xs leading-5 text-[#787b86]">
+                {magView.next}
+              </div>
+            </div>
+          )}
+          {/* Bottom capsule: symbol | interval, both swipeable.
+              Symbol flexes (left-aligned), interval is a fixed
+              76px centred zone. */}
+          <div
+            className={`flex h-12 min-w-0 flex-1 items-center overflow-hidden rounded-full ${CAPSULE_BG}`}
+            data-testid="mobile-bottom-capsule"
+          >
+            <div
+              ref={symbolZoneRef}
+              style={{ touchAction: 'none' }}
+              onClick={() => onSheetChange('symbol')}
+              className="flex h-full min-w-0 flex-1 items-center"
+              data-testid="mobile-symbol-zone"
+            >
+              <button
+                onClick={() => onSheetChange('symbol')}
+                aria-label={`切換標的，目前 ${symbol}（上下滑動切換）`}
+                style={{ touchAction: 'none' }}
+                className="flex h-full w-full items-center px-4 text-sm font-semibold text-white"
               >
-                {symbol}
-              </span>
-            </button>
-          </div>
-          <span className="w-px shrink-0 bg-[#2a2e39]" aria-hidden="true" />
-          <div
-            ref={intervalZoneRef}
-            style={{ touchAction: 'none' }}
-            className="flex h-full shrink-0 items-center"
-            data-testid="mobile-interval-zone"
-          >
-            <button
-              onClick={() => onSheetChange('interval')}
-              aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}（上下滑動切換）`}
+                <span
+                  ref={symbolTextRef}
+                  className="inline-block truncate"
+                >
+                  {symbol}
+                </span>
+              </button>
+            </div>
+            <span className="h-6 w-px shrink-0 bg-[#2a2e39]" aria-hidden="true" />
+            <div
+              ref={intervalZoneRef}
               style={{ touchAction: 'none' }}
-              className="flex h-full items-center px-3 text-sm font-medium text-white"
+              onClick={() => onSheetChange('interval')}
+              className="flex h-full w-[76px] shrink-0 items-center justify-center"
+              data-testid="mobile-interval-zone"
             >
-              <span ref={intervalTextRef} className="inline-block">
-                {INTERVAL_LABELS[interval]}
-              </span>
-            </button>
+              <button
+                onClick={() => onSheetChange('interval')}
+                aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}（上下滑動切換）`}
+                style={{ touchAction: 'none' }}
+                className="flex h-full w-full items-center justify-center text-sm font-medium text-white"
+              >
+                <span ref={intervalTextRef} className="inline-block text-center">
+                  {INTERVAL_LABELS[interval]}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Bottom-right capsule: indicators + chart settings + more.
-            flex-1 like the left capsule so the two pills split the
-            row evenly (Ryan 2026-11-27: look balanced); buttons
-            centred inside. */}
-        <div
-          className={`flex h-12 min-w-0 flex-1 items-center justify-center gap-0.5 rounded-full px-1.5 ${CAPSULE_BG}`}
-          data-testid="mobile-actions-capsule"
+        {/* TV-style action buttons: three separate circles. */}
+        <button
+          onClick={onOpenDrawingSheet}
+          title="繪圖"
+          aria-label="繪圖"
+          data-testid="mobile-draw-btn"
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-[#b2b5be] hover:text-white ${CAPSULE_BG}`}
         >
-          <button
-            onClick={() => onSheetChange('indicators')}
-            title="指標"
-            aria-label="指標"
-            data-testid="mobile-indicators-btn"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[15px] font-semibold italic text-[#b2b5be] hover:bg-[#1e222d] hover:text-white"
-          >
-            ƒx
-          </button>
-          <button
-            onClick={onOpenAppearanceSettings}
-            title="圖表設定"
-            aria-label="圖表設定"
-            data-testid="mobile-appearance-btn"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#b2b5be] hover:bg-[#1e222d] hover:text-white"
-          >
-            <GearIcon />
-          </button>
-          <button
-            onClick={() => onSheetChange('more')}
-            title="更多"
-            aria-label="更多"
-            data-testid="mobile-more-btn"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#b2b5be] hover:bg-[#1e222d] hover:text-white"
-          >
-            <DotsIcon />
-          </button>
-        </div>
+          <BrushIcon />
+        </button>
+        <button
+          onClick={() => onSheetChange('indicators')}
+          title="指標"
+          aria-label="指標"
+          data-testid="mobile-indicators-btn"
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-[15px] font-semibold italic text-[#b2b5be] hover:text-white ${CAPSULE_BG}`}
+        >
+          ƒx
+        </button>
+        <button
+          onClick={() => onSheetChange('analysis')}
+          title="分析中心"
+          aria-label="分析中心"
+          data-testid="mobile-more-btn"
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-[#b2b5be] hover:text-white ${CAPSULE_BG}`}
+        >
+          <DotsIcon />
+        </button>
       </div>
 
       {debugTouch && <TouchDebugOverlay />}
 
-      {sheet === 'interval' && (
-        <MobileSheet
-          title="週期"
-          testId="mobile-interval-sheet"
+      {sheet === 'symbol' && (
+        <CenterList
+          testId="mobile-symbol-list"
+          label="選擇標的"
           onClose={closeSheet}
         >
-          <div className="grid grid-cols-5 gap-1.5">
-            {SWIPE_INTERVALS.map((iv) => (
-              <button
-                key={iv}
-                onClick={() => {
-                  onIntervalChange(iv);
-                  closeSheet();
-                }}
-                data-testid={`interval-option-${iv}`}
-                className={`rounded-md border py-2.5 text-sm ${
-                  iv === interval
-                    ? 'border-[#2962ff]/50 bg-[#2962ff]/20 font-semibold text-[#2962ff]'
-                    : 'border-[#2a2e39] bg-[#1e222d] text-[#d1d4dc]'
-                }`}
+          {watchlist.map((s) => (
+            <CenterListRow
+              key={s}
+              selected={s === symbol}
+              onClick={() => {
+                onSelectSymbol(s);
+                closeSheet();
+              }}
+              testId={`symbol-option-${s}`}
+            >
+              <span
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
+                aria-hidden="true"
               >
-                {INTERVAL_LABELS[iv]}
+                {s.charAt(0)}
+              </span>
+              <span className="truncate">{s}</span>
+            </CenterListRow>
+          ))}
+          {stockWatchlist.map((t) => (
+            <CenterListRow
+              key={`stock-${t}`}
+              selected={false}
+              onClick={() => showToast('尚未支援報價')}
+              testId={`symbol-option-stock-${t}`}
+            >
+              <span
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
+                aria-hidden="true"
+              >
+                {t.charAt(0)}
+              </span>
+              <span className="truncate">{t}</span>
+              <span className="ml-auto shrink-0 text-xs text-[#787b86]">
+                尚未支援報價
+              </span>
+            </CenterListRow>
+          ))}
+          {watchlist.length === 0 && stockWatchlist.length === 0 && (
+            <div className="px-3 py-4 text-center text-sm text-[#787b86]">
+              自選清單是空的
+            </div>
+          )}
+          <button
+            onClick={() => {
+              onOpenWatchlist();
+              closeSheet();
+            }}
+            data-testid="symbol-list-open-watchlist"
+            className="mt-1 flex w-full items-center justify-center rounded-2xl border border-[#2a2e39] px-3 py-2.5 text-sm text-[#b2b5be]"
+          >
+            開啟完整自選清單
+          </button>
+        </CenterList>
+      )}
+
+      {sheet === 'interval' && (
+        <CenterList
+          testId="mobile-interval-list"
+          label="選擇週期"
+          onClose={closeSheet}
+        >
+          {!intervalManage ? (
+            <>
+              {swipeIntervals.map((iv) => (
+                <CenterListRow
+                  key={iv}
+                  selected={iv === interval}
+                  onClick={() => {
+                    onIntervalChange(iv);
+                    closeSheet();
+                  }}
+                  testId={`interval-option-${iv}`}
+                >
+                  {INTERVAL_LABELS[iv]}
+                </CenterListRow>
+              ))}
+              <button
+                onClick={() => setIntervalManage(true)}
+                data-testid="interval-manage-btn"
+                className="mt-1 flex w-full items-center justify-center gap-2 rounded-2xl border border-[#2a2e39] px-3 py-2.5 text-sm text-[#b2b5be]"
+              >
+                <StarIcon filled={false} />
+                管理收藏週期
               </button>
-            ))}
-          </div>
-        </MobileSheet>
+            </>
+          ) : (
+            <>
+              <div className="px-3 pb-1 pt-1 text-xs text-[#787b86]">
+                點星號收藏／取消收藏；滑動與放大鏡只走收藏的週期
+              </div>
+              {SWIPE_INTERVALS.map((iv) => {
+                const fav = favoriteIntervals.includes(iv);
+                return (
+                  <div
+                    key={iv}
+                    className="flex w-full items-center gap-3 rounded-2xl px-3 py-1.5"
+                  >
+                    <button
+                      onClick={() => {
+                        onIntervalChange(iv);
+                        closeSheet();
+                      }}
+                      data-testid={`interval-option-${iv}`}
+                      className={`flex-1 py-1 text-left text-[15px] ${
+                        iv === interval
+                          ? 'font-semibold text-white'
+                          : 'text-[#d1d4dc]'
+                      }`}
+                    >
+                      {INTERVAL_LABELS[iv]}
+                    </button>
+                    <button
+                      onClick={() => toggleFavoriteInterval(iv)}
+                      aria-label={
+                        fav
+                          ? `取消收藏 ${INTERVAL_LABELS[iv]}`
+                          : `收藏 ${INTERVAL_LABELS[iv]}`
+                      }
+                      data-testid={`interval-star-${iv}`}
+                      className="flex h-8 w-8 items-center justify-center rounded-full"
+                    >
+                      <StarIcon filled={fav} />
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                onClick={() => setIntervalManage(false)}
+                data-testid="interval-manage-done"
+                className="mt-1 flex w-full items-center justify-center rounded-2xl border border-[#2a2e39] px-3 py-2.5 text-sm text-[#b2b5be]"
+              >
+                完成
+              </button>
+            </>
+          )}
+        </CenterList>
       )}
 
       {sheet === 'indicators' && (
@@ -1115,87 +1768,199 @@ export default function MobileBottomBar({
         </MobileSheet>
       )}
 
-      {sheet === 'more' && (
-        <MobileSheet title="更多" testId="mobile-more-sheet" onClose={closeSheet}>
-          <div className="mb-1 text-[11px] font-medium text-[#787b86]">
-            圖表類型
-          </div>
-          <div className="mb-3 flex gap-1.5">
-            {CHART_TYPES.map((t) => (
+      {sheet === 'analysis' && (
+        <MobileSheet
+          title="分析中心"
+          testId="mobile-analysis-sheet"
+          onClose={closeSheet}
+        >
+          {analysisView === 'layouts' ? (
+            <>
               <button
-                key={t.id}
-                onClick={() => {
-                  onChartTypeChange(t.id);
-                  closeSheet();
-                }}
-                data-testid={`chart-type-option-${t.id}`}
-                className={`flex-1 rounded-md border py-2.5 text-sm ${
-                  t.id === chartType
-                    ? 'border-[#2962ff]/50 bg-[#2962ff]/20 font-semibold text-[#2962ff]'
-                    : 'border-[#2a2e39] bg-[#1e222d] text-[#d1d4dc]'
-                }`}
+                onClick={() => setAnalysisView('main')}
+                data-testid="layouts-back"
+                className="mb-1 text-sm font-medium text-[#2962ff]"
               >
-                {t.label}
+                ‹ 返回分析中心
               </button>
-            ))}
-          </div>
-          {[
-            {
-              id: 'object-list',
-              label: '物件清單',
-              disabled: false,
-              action: () => {
-                onOpenObjectList();
-                closeSheet();
-              },
-            },
-            {
-              id: 'undo',
-              label: '復原',
-              disabled: !canUndo,
-              action: () => {
-                onUndo();
-                closeSheet();
-              },
-            },
-            {
-              id: 'redo',
-              label: '重做',
-              disabled: !canRedo,
-              action: () => {
-                onRedo();
-                closeSheet();
-              },
-            },
-            {
-              id: 'reset-view',
-              label: '重設檢視',
-              disabled: false,
-              action: () => {
-                onResetView();
-                closeSheet();
-              },
-            },
-            {
-              id: 'watchlist',
-              label: '自選清單',
-              disabled: false,
-              action: () => {
-                onOpenWatchlist();
-                closeSheet();
-              },
-            },
-          ].map((row) => (
-            <button
-              key={row.id}
-              onClick={row.action}
-              disabled={row.disabled}
-              data-testid={`more-${row.id}`}
-              className="flex w-full items-center border-b border-[#2a2e39] px-1 py-3 text-left text-sm text-[#d1d4dc] last:border-b-0 disabled:opacity-30"
-            >
-              {row.label}
-            </button>
-          ))}
+              {layouts.length === 0 ? (
+                <div className="px-1 py-4 text-center text-sm text-[#787b86]">
+                  尚未儲存版面，點「儲存」把目前的畫面存起來
+                </div>
+              ) : (
+                layouts.map((l) => (
+                  <div
+                    key={l.id}
+                    className="flex items-center gap-2 border-b border-[#2a2e39] py-2 last:border-b-0"
+                  >
+                    <button
+                      onClick={() => {
+                        onOpenLayout(l.id);
+                        closeSheet();
+                      }}
+                      data-testid={`layout-open-${l.id}`}
+                      className="flex-1 text-left"
+                    >
+                      <div className="text-sm font-medium text-white">
+                        {l.name}
+                      </div>
+                      <div className="text-xs text-[#787b86]">
+                        {l.symbol} · {INTERVAL_LABELS[l.interval]} ·{' '}
+                        {l.chartType === 'area' ? '線形圖' : 'K線'}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => onDeleteLayout(l.id)}
+                      aria-label={`刪除 ${l.name}`}
+                      data-testid={`layout-delete-${l.id}`}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-[#787b86]"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))
+              )}
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-2">
+                <AnalysisCell
+                  label="版面設定"
+                  testId="analysis-layout-settings"
+                  icon={<AnalysisIcon kind="layout" />}
+                  onClick={() => showToast('尚未支援')}
+                />
+                <AnalysisCell
+                  label="管理 ICT"
+                  testId="analysis-ict"
+                  icon={<AnalysisIcon kind="ict" />}
+                  onClick={() => showToast('尚未支援')}
+                />
+                <AnalysisCell
+                  label="圖表設定"
+                  testId="analysis-chart-settings"
+                  icon={<GearIcon />}
+                  onClick={() => {
+                    onOpenAppearanceSettings();
+                    closeSheet();
+                  }}
+                />
+                <AnalysisCell
+                  label="新"
+                  testId="analysis-new"
+                  icon={<AnalysisIcon kind="new" />}
+                  onClick={() => showToast('尚未支援')}
+                />
+                <AnalysisCell
+                  label="儲存"
+                  testId="analysis-save"
+                  icon={<AnalysisIcon kind="save" />}
+                  onClick={() => {
+                    const name = onSaveLayout();
+                    showToast(`已儲存「${name}」`);
+                  }}
+                />
+                <AnalysisCell
+                  label="開啟"
+                  sub={
+                    layouts.length > 0
+                      ? `${layouts.length} 個版面`
+                      : undefined
+                  }
+                  testId="analysis-open"
+                  icon={<AnalysisIcon kind="open" />}
+                  onClick={() => setAnalysisView('layouts')}
+                />
+              </div>
+              <div className="mb-2 mt-4 text-xs font-medium text-[#787b86]">
+                工具
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <AnalysisCell
+                  label="指標"
+                  testId="analysis-indicators"
+                  icon={<AnalysisIcon kind="indicators" />}
+                  onClick={() => onSheetChange('indicators')}
+                />
+                <AnalysisCell
+                  label="比較"
+                  testId="analysis-compare"
+                  icon={<AnalysisIcon kind="compare" />}
+                  onClick={() => showToast('尚未支援')}
+                />
+                <AnalysisCell
+                  label="快訊"
+                  testId="analysis-alerts"
+                  icon={<AnalysisIcon kind="alert" />}
+                  onClick={() => showToast('尚未支援')}
+                />
+                <AnalysisCell
+                  label="K線重播"
+                  testId="analysis-replay"
+                  icon={<AnalysisIcon kind="replay" />}
+                  onClick={() => showToast('尚未支援')}
+                />
+                <AnalysisCell
+                  label="圖表類型"
+                  sub={chartType === 'area' ? '線形圖' : 'K線'}
+                  testId="analysis-chart-type"
+                  icon={<AnalysisIcon kind="chartType" />}
+                  onClick={() =>
+                    onChartTypeChange(
+                      chartType === 'area' ? 'candle_solid' : 'area',
+                    )
+                  }
+                />
+                <AnalysisCell
+                  label="物件樹"
+                  testId="analysis-objects"
+                  icon={<AnalysisIcon kind="objects" />}
+                  onClick={() => {
+                    onOpenObjectList();
+                    closeSheet();
+                  }}
+                />
+                <AnalysisCell
+                  label="自選清單"
+                  testId="analysis-watchlist"
+                  icon={<StarIcon filled={false} />}
+                  onClick={() => {
+                    onOpenWatchlist();
+                    closeSheet();
+                  }}
+                />
+                <AnalysisCell
+                  label="重設檢視"
+                  testId="analysis-reset"
+                  icon={<AnalysisIcon kind="reset" />}
+                  onClick={() => {
+                    onResetView();
+                    closeSheet();
+                  }}
+                />
+                <AnalysisCell
+                  label="復原"
+                  testId="analysis-undo"
+                  icon={<AnalysisIcon kind="undo" />}
+                  disabled={!canUndo}
+                  onClick={() => {
+                    onUndo();
+                    closeSheet();
+                  }}
+                />
+                <AnalysisCell
+                  label="重做"
+                  testId="analysis-redo"
+                  icon={<AnalysisIcon kind="redo" />}
+                  disabled={!canRedo}
+                  onClick={() => {
+                    onRedo();
+                    closeSheet();
+                  }}
+                />
+              </div>
+            </>
+          )}
         </MobileSheet>
       )}
     </>

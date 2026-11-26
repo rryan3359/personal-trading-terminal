@@ -721,11 +721,15 @@ export function createDrawingController(
    * short's above. The 3rd point (target), when present, is mirrored
    * to the profit side (mirrorPositionTarget) and kept on the stop's
    * timestamp — the target is a price level on the box's right edge.
-   * Returns the points unchanged when everything is already correct.
-   * Used at every entry point so a stored position is never
-   * wrong-sided: the draw-end normaliser (the interactive draw
-   * commits the raw clicked point) and programmatic creation
-   * (restore / preset points).
+   * The entry point is likewise kept on the stop's timestamp, so all
+   * three control dots sit on the right edge (Ryan 2026-11-27); the
+   * box's left edge is stored separately in extendData.posBoxLeft
+   * by the callers, from the pre-snap entry timestamp. Returns the
+   * points unchanged when everything is already correct. Used at
+   * every entry point so a stored position is never wrong-sided:
+   * the draw-end normaliser (the interactive draw commits the raw
+   * clicked point) and programmatic creation (restore / preset
+   * points).
    */
   const normalizePositionPoints = (
     tool: DrawingTool,
@@ -742,8 +746,13 @@ export function createDrawingController(
     const p1 = stopChanged
       ? { timestamp: points[1].timestamp, value: fixedStop }
       : points[1];
+    const p0 =
+      points[0].timestamp !== p1.timestamp
+        ? { timestamp: p1.timestamp, value: points[0].value }
+        : points[0];
+    const entryChanged = p0 !== points[0];
     if (points.length < 3) {
-      return stopChanged ? [points[0], p1] : points;
+      return stopChanged || entryChanged ? [p0, p1] : points;
     }
     const fixedTarget = mirrorPositionTarget(
       isLong,
@@ -753,9 +762,9 @@ export function createDrawingController(
     const targetChanged =
       fixedTarget !== points[2].value ||
       points[2].timestamp !== p1.timestamp;
-    if (!stopChanged && !targetChanged) return points;
+    if (!stopChanged && !targetChanged && !entryChanged) return points;
     return [
-      points[0],
+      p0,
       p1,
       { timestamp: p1.timestamp, value: fixedTarget },
     ];
@@ -777,6 +786,20 @@ export function createDrawingController(
       ext.text = saved.text;
     } else {
       delete ext.text;
+    }
+    if (isPositionTool(saved.name)) {
+      // Backfill the box's left edge for saves that predate
+      // posBoxLeft: their entry point still sits on the left edge.
+      // Saves written after the right-edge change already carry
+      // posBoxLeft (draw end / preset path set it), and the
+      // interactive arm draft has no points yet, so neither is
+      // touched here.
+      if (
+        typeof ext.posBoxLeft !== 'number' &&
+        typeof saved.points[0]?.timestamp === 'number'
+      ) {
+        ext.posBoxLeft = saved.points[0].timestamp;
+      }
     }
     const isRect = saved.name === 'rectangle';
     const isFib = isFibTool(saved.name);
@@ -927,14 +950,22 @@ export function createDrawingController(
               e.overlay.name as DrawingTool,
               pts as Array<{ timestamp: number; value: number }>,
             );
+            // The entry click's timestamp is the box's left edge:
+            // normalize snaps p0 onto the stop's timestamp (all
+            // control dots on the right edge), so store it before
+            // it is lost. Set even for a zero-risk draw (no target
+            // appended below): the stop may be dragged away later.
+            const ext = (e.overlay.extendData ?? {}) as Record<
+              string,
+              unknown
+            >;
+            if (typeof pts[0].timestamp === 'number') {
+              ext.posBoxLeft = pts[0].timestamp;
+            }
             const entry = fixed[0].value;
             const risk = Math.abs(entry - fixed[1].value);
             let next = fixed;
             if (risk > 0) {
-              const ext = (e.overlay.extendData ?? {}) as Record<
-                string,
-                unknown
-              >;
               const posRR =
                 typeof ext.posRR === 'number' && ext.posRR > 0
                   ? ext.posRR
@@ -1195,7 +1226,13 @@ export function createDrawingController(
         tool === 'rectangle'
           ? { fillOpacity: style.fillOpacity }
           : isPositionTool(tool)
-            ? { posRR: 2, ...deps.getLastPositionInputs() }
+            ? {
+                posRR: 2,
+                ...deps.getLastPositionInputs(),
+                ...(presetPoints && presetPoints.length > 0
+                  ? { posBoxLeft: presetPoints[0].timestamp }
+                  : {}),
+              }
             : undefined,
     };
     const id = chart.createOverlay(overlayCreate(draft));

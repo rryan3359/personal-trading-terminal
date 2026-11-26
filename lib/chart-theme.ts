@@ -364,8 +364,16 @@ export function mirrorPositionTarget(
  * at draw end at posRR (default 2 — i.e. 1:2R) from the entry, then
  * drags freely as the third point. Legacy 2-point saves have no p2
  * and keep deriving the target from extendData.posRR. The risk zone
- * spans entry → stop; the profit zone entry → target. The box's
- * horizontal extent is p0.x → p1.x (p2 shares p1's timestamp).
+ * spans entry → stop; the profit zone entry → target. All three
+ * control dots sit on the box's RIGHT edge (Ryan 2026-11-27): p0's
+ * timestamp is kept on the stop's, so the box's horizontal extent
+ * is NOT the points' min-x any more — its left edge is
+ * extendData.posBoxLeft (the entry click's timestamp, set at draw
+ * end / preset creation / restore backfill), converted back to
+ * pixels in the figures callback. Without posBoxLeft (mid-draw, or
+ * a legacy save that never went through the backfill) p0 still
+ * sits on the left edge and nothing is snapped, so the box keeps
+ * its width.
  * The stop may never cross the entry line (long: below, short:
  * above) and the target may never cross to the loss side; a point
  * placed or dragged onto the wrong side is mirrored to the correct
@@ -447,9 +455,38 @@ export function registerPositionOverlays(): void {
       const yFor = (price: number) =>
         entryY + ((entry - price) / (entry - stop)) * (stopY - entryY);
       const tpY = yFor(target);
+      // Box horizontal extent. All three points share the stop's
+      // timestamp (right edge), so min/max of the point pixels is
+      // one x: the left edge comes from extendData.posBoxLeft
+      // (entry click's timestamp) converted back to pixels. The
+      // snap below also keeps a horizontal drag of the entry point
+      // on the right edge — it snaps back on the next render, the
+      // same pattern as the target's timestamp sync above.
+      const boxLeftTs =
+        typeof ext.posBoxLeft === 'number' ? ext.posBoxLeft : undefined;
+      if (boxLeftTs !== undefined) {
+        if (p0.timestamp !== undefined && p0.timestamp !== p1.timestamp) {
+          p0.timestamp = p1.timestamp;
+        }
+      }
       const xs = coordinates.map((c) => c.x);
-      const x0 = Math.min(...xs);
       const x1 = Math.max(...xs);
+      let x0 = Math.min(...xs);
+      if (boxLeftTs !== undefined) {
+        try {
+          const conv = chart.convertToPixel({
+            timestamp: boxLeftTs,
+            value: entry,
+          });
+          const lx = (Array.isArray(conv) ? conv[0] : conv)?.x;
+          if (typeof lx === 'number' && Number.isFinite(lx)) {
+            x0 = Math.min(lx, x1);
+          }
+        } catch {
+          // Conversion failed: keep min(xs) — the box collapses to
+          // 1px wide for one render rather than throwing the draw.
+        }
+      }
       const w = Math.max(1, x1 - x0);
       const profitTop = Math.min(entryY, tpY);
       const profitH = Math.max(1, Math.abs(tpY - entryY));

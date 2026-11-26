@@ -54,6 +54,52 @@ const MAX_SUGGESTIONS = 8;
 /** 24h ticker refresh interval for the price / change columns. */
 const TICKER_POLL_MS = 5000;
 
+/**
+ * TV-style row icon: a fixed background colour hashed from the code
+ * (no external logos), with the code's first letter on top.
+ */
+const ICON_COLORS = [
+  '#2962ff',
+  '#089981',
+  '#f23645',
+  '#ff9800',
+  '#7e57c2',
+  '#00acc1',
+  '#8d6e63',
+  '#5c6bc0',
+];
+
+function iconColorFor(code: string): string {
+  let h = 0;
+  for (const ch of code) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return ICON_COLORS[h % ICON_COLORS.length];
+}
+
+/** Quote assets a Binance spot symbol can end in (fallback when the
+ *  symbol list has not loaded yet — derived from the symbol itself). */
+const QUOTE_SUFFIXES = ['USDT', 'USDC', 'FDUSD', 'TUSD', 'BTC', 'ETH', 'BNB'];
+
+function quoteFor(symbol: string, info?: SymbolInfo): string | null {
+  if (info) return info.quoteAsset;
+  for (const q of QUOTE_SUFFIXES) {
+    if (symbol.endsWith(q) && symbol.length > q.length) return q;
+  }
+  return null;
+}
+
+/**
+ * Stock market badge, by ticker shape. There is no existing helper for
+ * this in the codebase (only the NVDA / 2330 examples in placeholders),
+ * so this local rule is the first such distinction: 4 digits = 台股,
+ * letters only = 美股, anything else gets no badge rather than a guess.
+ */
+function stockMarket(ticker: string): '台股' | '美股' | null {
+  const base = ticker.split('.')[0];
+  if (/^\d{4}$/.test(base)) return '台股';
+  if (/^[A-Z]+$/.test(base)) return '美股';
+  return null;
+}
+
 interface TickerPrice {
   price: number;
   change: number;
@@ -211,7 +257,7 @@ export default function Watchlist({
           mobileOpen
             ? 'max-md:translate-x-0'
             : 'max-md:translate-x-full'
-        } max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-50 max-md:w-72 max-md:shadow-2xl`}
+        } max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-50 max-md:w-80 max-md:shadow-2xl`}
       >
       <div className="flex shrink-0 border-b border-[#2a2e39]">
         <button
@@ -320,13 +366,6 @@ export default function Watchlist({
         )}
       </div>
 
-      <div className="flex shrink-0 items-center border-b border-[#2a2e39] px-3 py-1.5 text-[11px] text-[#787b86]">
-        <span className="min-w-0 flex-1">商品</span>
-        <span className="w-20 shrink-0 text-right">最新價</span>
-        <span className="w-14 shrink-0 text-right">漲跌%</span>
-        <span className="w-4 shrink-0" />
-      </div>
-
       <div className="flex-1 overflow-y-auto">
         {symbols.length === 0 && (
           <p className="p-3 text-xs text-[#787b86]">自選清單是空的</p>
@@ -340,35 +379,63 @@ export default function Watchlist({
               ? 'text-[#26a69a]'
               : 'text-[#ef5350]'
             : 'text-[#787b86]';
+          // Absolute 24h change, derived from the real last price and
+          // the real 24h percent change (the tickers API returns no
+          // absolute-change field): prevClose = price / (1 + pct/100).
+          const absChange = tick
+            ? tick.price - tick.price / (1 + tick.change / 100)
+            : 0;
+          const info = symbolList?.find((i) => i.symbol === symbol);
+          const quote = quoteFor(symbol, info);
+          const letter = info?.baseAsset?.[0] ?? symbol[0] ?? '?';
           return (
             <div
               key={symbol}
+              data-testid={`watchlist-row-${symbol}`}
               onClick={() => onSelect(symbol)}
-              className={`group flex cursor-pointer items-center px-3 py-2 text-sm ${
+              className={`group flex cursor-pointer items-center gap-3 px-3 py-2.5 ${
                 active
-                  ? 'bg-[#1e222d] font-medium text-white'
-                  : 'text-[#b2b5be] hover:bg-[#1a1e29]'
+                  ? 'bg-[#1e222d]'
+                  : 'hover:bg-[#1a1e29]'
               }`}
             >
-              <span className="flex min-w-0 flex-1 items-center gap-2 truncate">
+              <span
+                aria-hidden
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white"
+                style={{ backgroundColor: iconColorFor(symbol) }}
+              >
+                {letter}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5">
+                  <span className="truncate text-sm font-bold text-white">
+                    {symbol}
+                  </span>
+                  {quote && (
+                    <span className="shrink-0 rounded bg-[#2a2e39] px-1 py-px text-[10px] font-medium text-[#b2b5be]">
+                      {quote}
+                    </span>
+                  )}
+                </span>
+                <span className="block truncate text-xs text-[#787b86]">
+                  Binance 現貨
+                </span>
+              </span>
+              <span className="shrink-0 text-right">
                 <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    active ? 'bg-[#2962ff]' : 'bg-transparent group-hover:bg-[#3a3f4d]'
+                  className={`block text-[15px] font-medium tabular-nums ${
+                    tick ? 'text-white' : 'text-[#787b86]'
                   }`}
-                />
-                <span className="truncate">{symbol}</span>
-              </span>
-              <span
-                className={`w-20 shrink-0 text-right tabular-nums ${changeColor}`}
-              >
-                {tick ? formatPrice(tick.price) : '—'}
-              </span>
-              <span
-                className={`w-14 shrink-0 text-right tabular-nums ${changeColor}`}
-              >
-                {tick
-                  ? `${up ? '+' : ''}${tick.change.toFixed(2)}%`
-                  : '—'}
+                >
+                  {tick ? formatPrice(tick.price) : '—'}
+                </span>
+                <span
+                  className={`block text-xs tabular-nums ${changeColor}`}
+                >
+                  {tick
+                    ? `${up ? '+' : '-'}${formatPrice(Math.abs(absChange))} ${up ? '+' : ''}${tick.change.toFixed(2)}%`
+                    : '—'}
+                </span>
               </span>
               <button
                 aria-label={`移除 ${symbol}`}
@@ -376,7 +443,7 @@ export default function Watchlist({
                   e.stopPropagation();
                   onRemove(symbol);
                 }}
-                className="w-4 shrink-0 rounded px-1 text-[#5d606b] opacity-0 hover:bg-[#2a2e39] hover:text-white group-hover:opacity-100"
+                className="w-4 shrink-0 rounded px-1 text-[#5d606b] opacity-0 hover:bg-[#2a2e39] hover:text-white group-hover:opacity-100 max-md:opacity-70"
               >
                 ×
               </button>
@@ -426,24 +493,49 @@ export default function Watchlist({
             股票觀察清單是空的。輸入代號加入，例如 NVDA、AAPL、2330。
           </p>
         )}
-        {stockSymbols.map((ticker) => (
-          <div
-            key={ticker}
-            className="group flex items-center px-3 py-2 text-sm text-[#b2b5be] hover:bg-[#1a1e29]"
-          >
-            <span className="min-w-0 flex-1 truncate">{ticker}</span>
-            <span className="shrink-0 text-[11px] text-[#5d606b]">
-              尚未支援報價
-            </span>
-            <button
-              aria-label={`移除 ${ticker}`}
-              onClick={() => onRemoveStock(ticker)}
-              className="ml-2 w-4 shrink-0 rounded px-1 text-[#5d606b] opacity-0 hover:bg-[#2a2e39] hover:text-white group-hover:opacity-100"
+        {stockSymbols.map((ticker) => {
+          const market = stockMarket(ticker);
+          return (
+            <div
+              key={ticker}
+              data-testid={`watchlist-row-${ticker}`}
+              className="group flex items-center gap-3 px-3 py-2.5 hover:bg-[#1a1e29]"
             >
-              ×
-            </button>
-          </div>
-        ))}
+              <span
+                aria-hidden
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white"
+                style={{ backgroundColor: iconColorFor(ticker) }}
+              >
+                {ticker[0] ?? '?'}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5">
+                  <span className="truncate text-sm font-bold text-white">
+                    {ticker}
+                  </span>
+                  {market && (
+                    <span className="shrink-0 rounded bg-[#2a2e39] px-1 py-px text-[10px] font-medium text-[#b2b5be]">
+                      {market}
+                    </span>
+                  )}
+                </span>
+                <span className="block truncate text-xs text-[#787b86]">
+                  尚未支援報價
+                </span>
+              </span>
+              <span className="shrink-0 text-right text-[15px] font-medium tabular-nums text-[#787b86]">
+                —
+              </span>
+              <button
+                aria-label={`移除 ${ticker}`}
+                onClick={() => onRemoveStock(ticker)}
+                className="ml-2 w-4 shrink-0 rounded px-1 text-[#5d606b] opacity-0 hover:bg-[#2a2e39] hover:text-white group-hover:opacity-100 max-md:opacity-70"
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
       </div>
       <p className="border-t border-[#2a2e39] px-3 py-2 text-[11px] leading-relaxed text-[#5d606b]">
         台股美股報價尚未接入

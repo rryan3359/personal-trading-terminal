@@ -1195,8 +1195,11 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           free on desktop and mobile. The gear is the always-visible
           appearance entry — the toolbar gear sits at the far right of
           a horizontally scrolling bar, so it needs a scroll to reach
-          on phones. */}
-      <div className="absolute right-2 top-2 z-20 flex items-center gap-1.5">
+          on phones. Desktop-only since 2026-11-27: on mobile the
+          entries live in the 分析中心, and this row would collide
+          with the MobileTopBar's collapse chevron at the same
+          corner. */}
+      <div className="absolute right-2 top-2 z-20 hidden items-center gap-1.5 md:flex">
         <button
           data-testid="chart-appearance-settings"
           title="圖表設定"

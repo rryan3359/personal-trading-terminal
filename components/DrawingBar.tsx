@@ -178,6 +178,21 @@ export interface DrawingBarProps {
   onToolChange: (tool: DrawingTool | null, continuous: boolean) => void;
   /** Remove all drawings on the current symbol. */
   onClear: () => void;
+  /** Mobile full-tools sheet, controlled mode: when given, the sheet
+   *  opens/closes from this value (page.tsx wires the bottom-bar
+   *  pen button to it); when omitted, the internal state below is
+   *  used (floating bar's ⋯ button still opens it). */
+  sheetOpen?: boolean;
+  /** Notified whenever the sheet opens/closes (internal button, X,
+   *  backdrop, Esc, or a tool pick). Always called, controlled or not. */
+  onSheetOpenChange?: (open: boolean) => void;
+  /** Mobile floating bar's round undo button (TV f_001, below the
+   *  bar). Wired by page.tsx to chart undo; when omitted the button
+   *  renders disabled and does nothing. */
+  onUndo?: () => void;
+  /** Whether undo has anything to undo; drives the round undo
+   *  button's disabled state. */
+  canUndo?: boolean;
 }
 
 const MAGNET_ORDER: MagnetMode[] = ['off', 'weak', 'strong'];
@@ -609,6 +624,16 @@ function ClearIcon() {
   );
 }
 
+/** Curved undo arrow (mobile floating bar's round button, TV f_001). */
+function UndoIcon() {
+  return (
+    <svg {...ICON_PROPS} width={18} height={18}>
+      <path d="M7.5 4.5 L3.5 8.5 L7.5 12.5" />
+      <path d="M3.5 8.5 H12 a4.5 4.5 0 0 1 0 9 H9" />
+    </svg>
+  );
+}
+
 /** Horizontal "⋯" (opens the full tool list on mobile). */
 function DotsIcon() {
   return (
@@ -657,7 +682,7 @@ const DEFAULT_COMPACT_TOOLS: DrawingTool[] = [
 const FLOATING_TOOLS_POS_KEY = 'ptt:mobile-tools-pos';
 /** Bar width (px) and the bottom clearance (px) the drag clamp keeps
  *  free so the bar can never cover the bottom capsules. */
-const FLOAT_W = 48;
+const FLOAT_W = 40;
 const FLOAT_BOTTOM_CLEAR = 140;
 
 function loadFloatingToolsPos(): { x: number; y: number } | null {
@@ -714,6 +739,34 @@ function sortToolsByGroup(ids: DrawingTool[]): DrawingTool[] {
  * tool with its favorite star — same state and toggles as the desktop
  * flyouts. Picking a tool arms it and closes the sheet.
  */
+/** TV-style sheet tabs (f_003 / f_004): 7 tabs, ids derived from
+ *  TOOL_GROUPS by title so the mapping can never drift from the
+ *  toolbar groups. TOOL_GROUPS itself is untouched. */
+const SHEET_TAB_DEFS: Array<{ id: string; label: string; titles: string[] }> = [
+  { id: 'favorites', label: '收藏', titles: [] },
+  { id: 'trend', label: '趨勢線工具', titles: ['趨勢線', '水平線', '通道', 'Pitchfork'] },
+  { id: 'fib-gann', label: '江恩和斐波那契', titles: ['斐波那契', 'Gann'] },
+  { id: 'patterns', label: '形態', titles: ['形態'] },
+  { id: 'forecast', label: '預測和測量', titles: ['日期範圍', '部位'] },
+  { id: 'geometry', label: '幾何圖形', titles: ['幾何圖形'] },
+  { id: 'annotation', label: '註解', titles: ['文字與註解'] },
+];
+
+function sheetTabToolIds(tabId: string, favorites: DrawingTool[]): DrawingTool[] {
+  if (tabId === 'favorites') return favorites;
+  const def = SHEET_TAB_DEFS.find((t) => t.id === tabId);
+  if (!def) return [];
+  return TOOL_GROUPS.filter((g) => def.titles.includes(g.title)).flatMap((g) => g.ids);
+}
+
+/**
+ * Mobile bottom sheet with the full tool list, TV-style (f_003):
+ * centered 「繪圖」 title + round X, search bar, horizontally
+ * scrollable category tabs, 3-column grid of dark cards (icon +
+ * label, orange star top-right when starred). Picking a card arms
+ * the tool and closes the sheet; the star only toggles favorite
+ * (writes ptt:favorite-tools, never arms a tool).
+ */
 function FullToolsSheet({
   favorites,
   activeTool,
@@ -727,6 +780,10 @@ function FullToolsSheet({
   onToggleFavorite: (tool: DrawingTool) => void;
   onClose: () => void;
 }) {
+  const [tabId, setTabId] = useState<string>(() =>
+    favorites.length > 0 ? 'favorites' : 'trend',
+  );
+  const [query, setQuery] = useState('');
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -734,39 +791,104 @@ function FullToolsSheet({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+  const q = query.trim().toLowerCase();
+  // Searching overrides the active tab: match label or tool id.
+  const visibleIds: DrawingTool[] =
+    q === ''
+      ? sheetTabToolIds(tabId, favorites)
+      : DRAWING_TOOLS.filter(
+          (t) =>
+            !TOOLBAR_HIDDEN_TOOLS.has(t.id) &&
+            (t.label.toLowerCase().includes(q) || t.id.toLowerCase().includes(q)),
+        ).map((t) => t.id);
   return createPortal(
     <div
       className="fixed inset-0 z-50 md:hidden"
       role="dialog"
-      aria-label="全部畫線工具"
+      aria-label="繪圖"
+      data-testid="drawing-sheet"
     >
       <div
         className="absolute inset-0 bg-black/60"
         onClick={onClose}
         aria-hidden="true"
       />
-      <div className="absolute bottom-0 left-0 right-0 max-h-[70vh] overflow-y-auto rounded-t-2xl border-t border-[#2a2e39] bg-[#131722] px-4 pb-6 pt-2">
-        <div
-          className="mx-auto mb-1 h-1 w-10 rounded-full bg-[#2a2e39]"
-          aria-hidden="true"
-        />
-        <div className="mb-2 flex items-center justify-between">
-          <span className="text-sm font-semibold text-white">畫線工具</span>
+      <div className="absolute bottom-0 left-0 right-0 flex max-h-[85vh] flex-col rounded-t-2xl border-t border-[#2a2e39] bg-[#131722] px-4 pb-6 pt-2">
+        <div className="relative flex shrink-0 items-center justify-center py-2">
+          <span className="text-[15px] font-semibold text-white">繪圖</span>
           <button
             onClick={onClose}
             aria-label="關閉"
-            className="flex h-8 w-8 items-center justify-center rounded text-[#b2b5be] hover:bg-[#2a2e39] hover:text-white"
+            data-testid="drawing-sheet-close"
+            className="absolute right-0 flex h-8 w-8 items-center justify-center rounded-full bg-[#2a2e39] text-[#b2b5be] hover:text-white"
           >
             ✕
           </button>
         </div>
-        {TOOL_GROUPS.map((group) => (
-          <div key={group.title} className="mb-3">
-            <div className="mb-1 text-[11px] font-medium text-[#787b86]">
-              {group.title}
+        <div className="relative mb-2 shrink-0">
+          <span
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#787b86]"
+            aria-hidden="true"
+          >
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <circle cx="9" cy="9" r="5.5" />
+              <line x1="13.5" y1="13.5" x2="17" y2="17" />
+            </svg>
+          </span>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜尋"
+            aria-label="搜尋繪圖工具"
+            data-testid="drawing-sheet-search"
+            className="h-10 w-full rounded-full border border-[#2a2e39] bg-[#1e222d] pl-9 pr-3 text-[14px] text-white placeholder-[#787b86] outline-none focus:border-[#2962ff]"
+          />
+        </div>
+        <div
+          role="tablist"
+          aria-label="繪圖工具分類"
+          className="mb-3 flex shrink-0 gap-1 overflow-x-auto"
+          style={{ scrollbarWidth: 'none' }}
+        >
+          {SHEET_TAB_DEFS.map((tab) => {
+            const active = q === '' && tabId === tab.id;
+            return (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={active}
+                data-testid={`drawing-sheet-tab-${tab.id}`}
+                onClick={() => {
+                  setTabId(tab.id);
+                  setQuery('');
+                }}
+                className={`shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] ${
+                  active
+                    ? 'bg-[#2a2e39] font-medium text-white'
+                    : 'text-[#787b86] hover:text-[#d1d4dc]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {visibleIds.length === 0 ? (
+            <div className="py-8 text-center text-[13px] text-[#787b86]">
+              {q !== ''
+                ? `找不到符合「${query.trim()}」的工具`
+                : tabId === 'favorites'
+                  ? '尚未收藏，點卡片右上角的星號收藏'
+                  : '此分類沒有工具'}
             </div>
-            <div className="flex flex-wrap gap-1">
-              {group.ids.map((id) => {
+          ) : (
+            <div
+              className="grid grid-cols-3 gap-2"
+              data-testid="drawing-sheet-grid"
+            >
+              {visibleIds.map((id) => {
                 const tool = TOOL_BY_ID.get(id);
                 if (!tool) return null;
                 const active = activeTool === id;
@@ -774,7 +896,7 @@ function FullToolsSheet({
                 return (
                   <div
                     key={id}
-                    className={`flex items-center rounded-md border ${
+                    className={`relative rounded-lg border ${
                       active
                         ? 'border-[#2962ff] bg-[#2a2e39]'
                         : 'border-[#2a2e39] bg-[#1e222d]'
@@ -782,12 +904,16 @@ function FullToolsSheet({
                   >
                     <button
                       onClick={() => onSelect(id, false)}
-                      className="flex items-center gap-1.5 px-2.5 py-2 text-[13px] text-[#d1d4dc]"
+                      data-testid={`drawing-sheet-card-${id}`}
+                      aria-label={tool.label}
+                      className="flex w-full flex-col items-center gap-1.5 px-1 py-3 text-[#d1d4dc]"
                     >
-                      <span className="flex h-5 w-5 items-center justify-center">
+                      <span className="flex h-6 w-6 items-center justify-center">
                         <ToolIcon tool={id} />
                       </span>
-                      {tool.label}
+                      <span className="text-center text-[12px] leading-tight">
+                        {tool.label}
+                      </span>
                     </button>
                     <button
                       type="button"
@@ -802,21 +928,25 @@ function FullToolsSheet({
                           ? `取消收藏 ${tool.label}`
                           : `收藏 ${tool.label}`
                       }
-                      onClick={() => onToggleFavorite(id)}
-                      className={`flex h-8 w-7 shrink-0 items-center justify-center rounded hover:bg-[#2a2e39] ${
+                      data-testid={`drawing-sheet-star-${id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleFavorite(id);
+                      }}
+                      className={`absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded hover:bg-[#2a2e39] ${
                         isFavorite
                           ? 'text-[#ff9800]'
                           : 'text-[#787b86] hover:text-white'
                       }`}
                     >
-                      <StarIcon filled={isFavorite} />
+                      <StarIcon filled={isFavorite} size={13} />
                     </button>
                   </div>
                 );
               })}
             </div>
-          </div>
-        ))}
+          )}
+        </div>
       </div>
     </div>,
     document.body,
@@ -857,6 +987,10 @@ function FlyoutChevron() {
 
 const BUTTON_BASE =
   'relative flex h-9 w-9 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
+
+/** Narrow (40px) variant for the mobile floating bar (TV f_001). */
+const FLOAT_BUTTON_BASE =
+  'relative flex h-8 w-8 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#2a2e39] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
 
 /** Magnet button: taller, icon + current strength label underneath. */
 const MAGNET_BUTTON_BASE =
@@ -989,6 +1123,10 @@ export default function DrawingBar({
   activeTool,
   onToolChange,
   onClear,
+  sheetOpen: sheetOpenProp,
+  onSheetOpenChange,
+  onUndo,
+  canUndo,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
   /** Title of the group whose flyout is open, or null. '收藏' is the
@@ -1000,8 +1138,14 @@ export default function DrawingBar({
    *  Persisted (ptt:last-used-tools); was session-only useState. */
   const [lastUsed, setLastUsed] = useState<Record<string, DrawingTool>>(() => loadLastUsedTools());
   const [anchor, setAnchor] = useState<FlyoutAnchor | null>(null);
-  /** Mobile: full tool list bottom sheet open. */
-  const [fullSheetOpen, setFullSheetOpen] = useState(false);
+  /** Mobile: full tool list bottom sheet open. Controlled when
+   *  sheetOpen is passed (page.tsx), uncontrolled otherwise. */
+  const [internalSheetOpen, setInternalSheetOpen] = useState(false);
+  const fullSheetOpen = sheetOpenProp ?? internalSheetOpen;
+  const setFullSheetOpen = (open: boolean) => {
+    if (sheetOpenProp === undefined) setInternalSheetOpen(open);
+    onSheetOpenChange?.(open);
+  };
   /** Mobile floating tools bar position (viewport px). Null until
    *  mounted: the default (right edge, ~35% down) needs the
    *  viewport size, and the page is prerendered — a window read
@@ -1024,8 +1168,11 @@ export default function DrawingBar({
   const floatBarRef = useRef<HTMLDivElement | null>(null);
 
   // Position the floating bar on mount (saved position, else the
-  // right-edge default), clamped into the viewport; keep it inside
-  // on resize / rotation.
+  // LEFT-edge default), clamped into the viewport; keep it inside
+  // on resize / rotation. Left edge by default because the price
+  // axis occupies the right edge — a bar parked over the axis
+  // intercepts axis drags (item 7 cause 1: the bar covered the
+  // middle of the axis). A stored position is still honoured.
   /* eslint-disable react-hooks/set-state-in-effect -- one-time mount
      sync from localStorage + viewport size (external systems); a
      lazy initializer would read window during SSR and mismatch
@@ -1033,7 +1180,7 @@ export default function DrawingBar({
   useEffect(() => {
     const initial = clampFloatPos(
       loadFloatingToolsPos() ?? {
-        x: window.innerWidth - FLOAT_W - 8,
+        x: 8,
         y: Math.round(window.innerHeight * 0.35),
       },
     );
@@ -1439,75 +1586,95 @@ export default function DrawingBar({
 
     {/* Mobile (<md): floating draggable favorites bar (Ryan
         2026-11-26 — replaces the fixed left rail, like the
-        TradingView mobile toolbar in his screenshot). Only the
-        starred tools show (defaults when nothing is starred yet);
-        drag by the grip handle, position persists in localStorage.
-        The cursor button exits drawing mode; ⋯ opens the full tool
-        sheet. Undo moved to the bottom bar's ⋯ sheet. */}
+        TradingView mobile toolbar in his screenshot). Narrow 40px,
+        dark, icon-only, grip on top; only the starred tools show
+        (defaults when nothing is starred yet); drag by the grip
+        handle, position persists in localStorage. The cursor button
+        exits drawing mode; ⋯ opens the full tool sheet. A round
+        undo button sits below the bar (TV f_001); it is wired by
+        page.tsx via onUndo/canUndo and disabled until then. The
+        ⋯ sheet's existing undo is untouched. */}
     {/* Rendered only after mount (floatPos null on the server). */}
     {floatPos !== null && (
     <div
-      ref={floatBarRef}
       data-drawing-bar
       data-testid="mobile-floating-tools"
-      className="fixed z-30 flex w-12 flex-col items-center gap-0.5 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 py-1 shadow-2xl backdrop-blur md:hidden"
+      className="fixed z-30 flex w-10 flex-col items-center md:hidden"
       style={{ left: floatPos.x, top: floatPos.y, touchAction: 'none' }}
-      onPointerMove={onFloatHandlePointerMove}
-      onPointerUp={onFloatHandlePointerUp}
-      onPointerCancel={onFloatHandlePointerUp}
     >
       <div
-        data-testid="mobile-floating-handle"
-        role="button"
-        aria-label="拖動工具列"
-        title="拖動工具列"
-        className="flex h-6 w-full cursor-grab touch-none items-center justify-center text-[#787b86] active:cursor-grabbing"
-        onPointerDown={onFloatHandlePointerDown}
+        ref={floatBarRef}
+        className="flex w-10 flex-col items-center gap-0.5 rounded-xl border border-[#2a2e39] bg-[#1e222d]/95 py-1 shadow-2xl backdrop-blur"
+        onPointerMove={onFloatHandlePointerMove}
+        onPointerUp={onFloatHandlePointerUp}
+        onPointerCancel={onFloatHandlePointerUp}
       >
-        <GripIcon />
+        <div
+          data-testid="mobile-floating-handle"
+          role="button"
+          aria-label="拖動工具列"
+          title="拖動工具列"
+          className="flex h-5 w-full cursor-grab touch-none items-center justify-center text-[#787b86] active:cursor-grabbing"
+          onPointerDown={onFloatHandlePointerDown}
+        >
+          <GripIcon />
+        </div>
+        <button
+          title="游標／選取（退出繪製模式）"
+          aria-label="游標／選取"
+          onClick={() => onToolChange(null, false)}
+          className={`${FLOAT_BUTTON_BASE} ${
+            activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          }`}
+        >
+          {activeTool === null && <ActiveBar />}
+          <CursorIcon />
+        </button>
+        <span className="my-0.5 h-px w-6 shrink-0 bg-[#2a2e39]" />
+        {compactTools.map((id) => {
+          const tool = TOOL_BY_ID.get(id);
+          if (!tool) return null;
+          const active = activeTool === id;
+          return (
+            <button
+              key={id}
+              title={tool.label}
+              aria-label={tool.label}
+              aria-pressed={active}
+              data-testid={`floating-tool-${id}`}
+              onClick={() => handleSelect(id, false)}
+              className={`${FLOAT_BUTTON_BASE} ${
+                active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+              }`}
+            >
+              {active && <ActiveBar />}
+              <ToolIcon tool={id} />
+            </button>
+          );
+        })}
+        <span className="my-0.5 h-px w-6 shrink-0 bg-[#2a2e39]" />
+        <button
+          onClick={() => setFullSheetOpen(true)}
+          title="全部畫線工具"
+          aria-label="全部畫線工具"
+          data-testid="floating-all-tools"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#262b38] text-[#b2b5be] hover:text-white"
+        >
+          <DotsIcon />
+        </button>
       </div>
+      {/* Round undo button below the bar (TV f_001, bottom-left
+          circle). Disabled until page.tsx wires onUndo + canUndo;
+          the ⋯ sheet's existing undo is untouched. */}
       <button
-        title="游標／選取（退出繪製模式）"
-        aria-label="游標／選取"
-        onClick={() => onToolChange(null, false)}
-        className={`${BUTTON_BASE} ${
-          activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
-        }`}
+        onClick={() => onUndo?.()}
+        disabled={!canUndo}
+        title="復原"
+        aria-label="復原"
+        data-testid="floating-undo"
+        className="mt-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d]/95 text-[#b2b5be] shadow-2xl backdrop-blur hover:text-white disabled:opacity-30 disabled:hover:text-[#b2b5be]"
       >
-        {activeTool === null && <ActiveBar />}
-        <CursorIcon />
-      </button>
-      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
-      {compactTools.map((id) => {
-        const tool = TOOL_BY_ID.get(id);
-        if (!tool) return null;
-        const active = activeTool === id;
-        return (
-          <button
-            key={id}
-            title={tool.label}
-            aria-label={tool.label}
-            aria-pressed={active}
-            data-testid={`floating-tool-${id}`}
-            onClick={() => handleSelect(id, false)}
-            className={`${BUTTON_BASE} ${
-              active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
-            }`}
-          >
-            {active && <ActiveBar />}
-            <ToolIcon tool={id} />
-          </button>
-        );
-      })}
-      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
-      <button
-        onClick={() => setFullSheetOpen(true)}
-        title="全部畫線工具"
-        aria-label="全部畫線工具"
-        data-testid="floating-all-tools"
-        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d] text-[#b2b5be] hover:text-white"
-      >
-        <DotsIcon />
+        <UndoIcon />
       </button>
     </div>
     )}

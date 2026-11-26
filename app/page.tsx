@@ -49,7 +49,7 @@ import RangeBar from '@/components/RangeBar';
 import StatusBar from '@/components/StatusBar';
 import ChartAppearanceDialog from '@/components/ChartAppearanceDialog';
 import MobileBottomBar, {
-  MobileTopPill,
+  MobileTopBar,
   type MobileSheetKind,
 } from '@/components/MobileCapsules';
 import type { ChartHandle } from '@/components/Chart';
@@ -69,7 +69,7 @@ import {
 // load in the browser. The page itself still prerenders (toolbar +
 // watchlist); the chart mounts on hydration.
 const Chart = dynamic(() => import('@/components/Chart'), { ssr: false });
-import { STORAGE_KEYS, getChartAppearance, loadJSON, loadString, saveChartAppearance, saveJSON, saveString } from '@/lib/store';
+import { STORAGE_KEYS, getChartAppearance, loadJSON, loadLayouts, loadString, newOverlayId, saveChartAppearance, saveJSON, saveLayouts, saveString, type SavedLayout } from '@/lib/store';
 import { fetchSymbolList, isKnownSymbol, type SymbolInfo } from '@/lib/symbols';
 import type { Interval } from '@/lib/types';
 import { isInterval } from '@/lib/types';
@@ -103,10 +103,17 @@ export default function Home() {
   const [lastTickAt, setLastTickAt] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [mobileWatchlistOpen, setMobileWatchlistOpen] = useState(false);
-  /** Mobile bottom sheet open from the pill / bottom bar (shared
-   *  state: the pill and the bar live in different subtrees). */
+  /** Mobile bottom sheet / centre list open from the top bar /
+   *  bottom bar (shared state: the bar and the pill live in
+   *  different subtrees). */
   const [mobileSheet, setMobileSheet] =
     useState<MobileSheetKind | null>(null);
+  /** Saved chart layouts (analysis centre 儲存／開啟). */
+  const [layouts, setLayouts] = useState<SavedLayout[]>([]);
+  /** Drawing sheet open (mobile, TV-style; DrawingBar owns the
+   *  sheet content, page owns the open state so the bottom bar's
+   *  brush button can open it). */
+  const [drawingSheetOpen, setDrawingSheetOpen] = useState(false);
   /** Binance spot symbols, or null while still loading. */
   const [symbolList, setSymbolList] = useState<SymbolInfo[] | null>(null);
   const chartRef = useRef<ChartHandle | null>(null);
@@ -141,6 +148,7 @@ export default function Home() {
       savedChartType === 'area' ? 'area' : DEFAULT_CHART_TYPE,
     );
     setAppearance(getChartAppearance());
+    setLayouts(loadLayouts());
     setHydrated(true);
     // Validate the restored list against the real Binance universe once
     // it loads. A failed fetch leaves the stored list untouched.
@@ -253,6 +261,55 @@ export default function Home() {
     );
   }, []);
 
+  /** Save the current chart as a named layout (analysis centre
+   *  儲存). Auto-names 版面 1 / 版面 2 / …, returns the name for
+   *  the toast. Drawings are NOT in the snapshot — they already
+   *  persist per symbol in `ptt:drawings`. */
+  const saveLayout = useCallback((): string => {
+    const existing = loadLayouts();
+    let n = 1;
+    while (existing.some((l) => l.name === `版面 ${n}`)) n += 1;
+    const name = `版面 ${n}`;
+    const layout: SavedLayout = {
+      id: newOverlayId(),
+      name,
+      createdAt: Date.now(),
+      symbol,
+      interval,
+      indicators,
+      chartType,
+      appearance,
+    };
+    const next = [...existing, layout];
+    saveLayouts(next);
+    setLayouts(next);
+    return name;
+  }, [symbol, interval, indicators, chartType, appearance]);
+
+  /** Open a saved layout: applies symbol / interval / indicators /
+   *  chart type / appearance. Drawings follow the symbol (they
+   *  persist per symbol in `ptt:drawings`). */
+  const openLayout = useCallback(
+    (id: string) => {
+      const layout = layouts.find((l) => l.id === id);
+      if (!layout) return;
+      setSymbol(layout.symbol);
+      setInterval(layout.interval);
+      setIndicators(layout.indicators);
+      setChartType(layout.chartType);
+      setAppearance(layout.appearance);
+      setActiveTool(null);
+      setActiveRange(null);
+    },
+    [layouts],
+  );
+
+  const deleteLayout = useCallback((id: string) => {
+    const next = loadLayouts().filter((l) => l.id !== id);
+    saveLayouts(next);
+    setLayouts(next);
+  }, []);
+
   const handleToolChange = useCallback(
     (tool: DrawingTool | null, continuous: boolean) => {
       setActiveTool(tool);
@@ -299,6 +356,10 @@ export default function Home() {
           activeTool={activeTool}
           onToolChange={handleToolChange}
           onClear={() => chartRef.current?.clearDrawings()}
+          sheetOpen={drawingSheetOpen}
+          onSheetOpenChange={setDrawingSheetOpen}
+          onUndo={() => chartRef.current?.undo()}
+          canUndo={canUndo}
         />
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1">
@@ -317,13 +378,15 @@ export default function Home() {
               continuousDraw={drawContinuous}
               onHistoryChange={handleHistoryChange}
             />
-            {/* Mobile (<md): top-left pill over the chart. The
-                bottom capsules live in MobileBottomBar below the
-                chart row — they no longer overlay the chart. */}
-            <MobileTopPill
+            {/* Mobile (<md): TV-style top bar over the chart —
+                left [icon symbol | green dot interval badge],
+                right circular chevron to collapse / expand it.
+                The bottom bar lives in MobileBottomBar below the
+                chart row — it no longer overlays the chart. */}
+            <MobileTopBar
               symbol={symbol}
               interval={interval}
-              onOpenWatchlist={() => setMobileWatchlistOpen(true)}
+              onOpenSymbolList={() => setMobileSheet('symbol')}
               onOpenIntervalSheet={() => setMobileSheet('interval')}
             />
           </div>
@@ -376,6 +439,7 @@ export default function Home() {
         symbol={symbol}
         interval={interval}
         watchlist={watchlist}
+        stockWatchlist={stockWatchlist}
         onSelectSymbol={selectSymbol}
         onIntervalChange={(tf) => {
           setInterval(tf);
@@ -383,6 +447,11 @@ export default function Home() {
           setActiveRange(null);
         }}
         onOpenWatchlist={() => setMobileWatchlistOpen(true)}
+        onOpenDrawingSheet={() => setDrawingSheetOpen(true)}
+        layouts={layouts}
+        onSaveLayout={saveLayout}
+        onOpenLayout={openLayout}
+        onDeleteLayout={deleteLayout}
         indicators={indicators}
         onToggleIndicator={toggleIndicator}
         onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}

@@ -53,10 +53,12 @@ import {
   dispose,
   init,
   type AxisCreateRangeCallback,
+  type AxisRange,
   type Chart,
   type DataLoader,
   type KLineData,
   type Period,
+  type YAxis,
 } from 'klinecharts';
 import type { Interval, Kline } from '@/lib/types';
 import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
@@ -213,6 +215,58 @@ const volAxisCreateRange: AxisCreateRangeCallback = ({
 };
 
 /**
+ * Anchored price-axis drag zoom (Ryan 2026-11-27, item 7: "拉右邊價格
+ * 軸的地方縮放 K 線會跑掉、怪怪的"). Two causes, both verified by CDP
+ * probe (probe-axis-clean.mjs, 390px):
+ *
+ * 1. Hit area: the mobile floating drawing bar sits at the right edge
+ *    (rect x∈[342,382], y∈[295,553]) over the price-axis widget
+ *    (x∈[326,390], 64px wide), so a finger on the axis usually grabs
+ *    the bar instead — the bar drags, the axis never sees the gesture.
+ *    Fixed separately by moving the bar's default position to the
+ *    left edge (TV-style, DrawingBar.tsx).
+ *
+ * 2. Zoom math: klinecharts' built-in axis drag
+ *    (_processYAxisScalingEvent, index.esm.js) computes
+ *    `scaleFactor = event.pageY / startPageY` — an absolute-coordinate
+ *    ratio, not a drag distance — and `_zoomYAxis` scales the range
+ *    symmetrically around the visible range CENTRE. Measured: the
+ *    same 100px drag shrank the range to 68.75% at y=320→220 but only
+ *    83.33% at y=600→500, and the price under the finger moved
+ *    (60583.29 → 60555.40). The candle under the finger jumps away:
+ *    that is the "runs away".
+ *
+ * Fix (public API only, no klinecharts internals): the engine turns
+ * off the built-in axis scaling for the price axis
+ * (`scrollZoomEnabled: false`) and installs its own `createRange`
+ * callback, which returns a held manual range when one exists and
+ * the auto-fit defaultRange otherwise. Axis drags (mouse + touch)
+ * and wheel events starting on the axis widget are intercepted on
+ * `window` in the capture phase — before klinecharts' own container
+ * listeners — and drive an ANCHORED zoom: the price under the
+ * finger stays at the same pixel, and the scale factor depends only
+ * on the drag distance (`exp(dy / 300)`), never on the absolute
+ * screen position. Double-clicking the axis clears the manual range
+ * (auto-fit resumes, TV behaviour); so do symbol/interval switches
+ * and 重設檢視. Main-pane pinch (time zoom) is untouched — only
+ * gestures starting on the axis are intercepted, and only when the
+ * event target is a canvas inside the chart container (overlay
+ * buttons / sheets are siblings, never intercepted).
+ *
+ * The price axis id is generated per chart creation
+ * (`yAxis_<ts>_1`, verified by probe-axis-id.mjs), so it is
+ * discovered at runtime via getYAxes (the axis that is not the VOL
+ * axis), never hardcoded. `overrideYAxis` without a `name` change
+ * does not recreate the axis widget (createOrOverrideYAxis only
+ * recreates when the name changes), it just merges + lays out —
+ * safe to call once per animation frame during a drag.
+ */
+const AXIS_DRAG_SCALE_PX = 300; // e-fold drag distance: 300px = ~2.72x
+const AXIS_WHEEL_SCALE_PX = 600; // one 120-deltaY wheel notch = ~1.22x
+const AXIS_SCALE_MIN = 0.05;
+const AXIS_SCALE_MAX = 20;
+
+/**
  * Range the context menu's 重設圖表檢視 restores. No default-range
  * constant exists in the codebase (page starts with activeRange null
  * and never calls setRange on mount); 1M is the middle preset —
@@ -256,6 +310,24 @@ export function createChartEngine(
   let prevSymbolInterval: { symbol: string; interval: Interval } | null = null;
   let disposed = false;
   let resizeObserver: ResizeObserver | null = null;
+  /**
+   * Anchored price-axis zoom (item 7): manual price range held by the
+   * price axis' createRange callback (null = auto-fit). Written by
+   * axis drags / wheel, cleared by symbol/interval switches,
+   * double-click on the axis and resetView.
+   */
+  let manualPriceRange: AxisRange | null = null;
+  /** In-flight anchored axis drag, or null. */
+  let axisDrag: {
+    startY: number;
+    anchorPrice: number;
+    baseRange: AxisRange;
+    paneHeight: number;
+    containerTop: number;
+    moved: boolean;
+  } | null = null;
+  /** Pending rAF for the per-frame price-axis layout during a drag. */
+  let axisDragApplyRaf = 0;
 
   registerRectangleOverlay();
   registerFibonacciRetracementOverlay();
@@ -315,6 +387,296 @@ export function createChartEngine(
 
   chart.setZoomEnabled(true);
   chart.setScrollEnabled(true);
+
+  // ---- Anchored price-axis drag zoom (item 7) ----
+  /** The price axis: every y-axis in the candle pane except VOL. */
+  const getPriceAxis = (): YAxis | null => {
+    if (!chart) return null;
+    return (
+      chart
+        .getYAxes({ paneId: CANDLE_PANE_ID })
+        .find((a) => a.id !== VOL_AXIS_ID) ?? null
+    );
+  };
+  /** Price-axis range override: manual range when one is held, else auto-fit.
+   *  NOTE: createRangeImp expands whatever this returns by the axis
+   *  gap (default top 20% / bottom 10% of the range, index.esm.js),
+   *  so a held manual range is deflated by (1 + top + bottom) here —
+   *  otherwise the gap would re-expand it on every layout and the
+   *  anchor price would drift (verified by probe-axis-install.mjs:
+   *  a 1145.9 range came back as 1489.69 = ×1.3). Auto-fit
+   *  (manualPriceRange null) returns defaultRange untouched, so the
+   *  default view keeps its gap exactly as before. */
+  const priceAxisCreateRange: AxisCreateRangeCallback = ({
+    defaultRange,
+  }) => {
+    if (manualPriceRange === null) return defaultRange;
+    const axis = getPriceAxis();
+    // The public YAxis type does not declare `gap`; the runtime
+    // axis carries it (YAxisImp.override merges it). Fall back to
+    // the measured defaults (top 0.2 / bottom 0.1) if unreadable.
+    const gap = (
+      axis as unknown as {
+        gap?: { top?: number; bottom?: number };
+      } | null
+    )?.gap;
+    const H = chart?.getSize(CANDLE_PANE_ID)?.height ?? 0;
+    let topRate = gap?.top ?? 0.2;
+    let bottomRate = gap?.bottom ?? 0.1;
+    if (topRate >= 1 && H > 0) topRate /= H;
+    if (bottomRate >= 1 && H > 0) bottomRate /= H;
+    const R = manualPriceRange.realTo - manualPriceRange.realFrom;
+    const Rret = R / (1 + topRate + bottomRate);
+    const realToRet = manualPriceRange.realTo - topRate * Rret;
+    const realFromRet = realToRet - Rret;
+    const from = axis
+      ? axis.realValueToValue(realFromRet, { range: manualPriceRange })
+      : realFromRet;
+    const to = axis
+      ? axis.realValueToValue(realToRet, { range: manualPriceRange })
+      : realToRet;
+    const displayFrom = axis
+      ? axis.realValueToDisplayValue(realFromRet, {
+          range: manualPriceRange,
+        })
+      : realFromRet;
+    const displayTo = axis
+      ? axis.realValueToDisplayValue(realToRet, { range: manualPriceRange })
+      : realToRet;
+    return {
+      from,
+      to,
+      range: to - from,
+      realFrom: realFromRet,
+      realTo: realToRet,
+      realRange: Rret,
+      displayFrom,
+      displayTo,
+      displayRange: displayTo - displayFrom,
+    };
+  };
+  /** Push the held (or cleared) manual range through a layout. */
+  const applyPriceAxisRange = () => {
+    if (!chart) return;
+    const axis = getPriceAxis();
+    if (!axis || !axis.id) return;
+    chart.overrideYAxis({
+      id: axis.id,
+      paneId: CANDLE_PANE_ID,
+      createRange: priceAxisCreateRange,
+    });
+  };
+  /** rAF-throttled apply: a 60-120 Hz pointer must not re-layout per event. */
+  const schedulePriceAxisApply = () => {
+    if (axisDragApplyRaf !== 0) return;
+    axisDragApplyRaf = requestAnimationFrame(() => {
+      axisDragApplyRaf = 0;
+      applyPriceAxisRange();
+    });
+  };
+  /**
+   * Anchored range: same total range as klinecharts' zoom (base.range
+   * × scale) but centred so `anchor` stays at pixel `anchorY`
+   * (pane-relative) instead of around the range centre. Built the
+   * same way `_zoomYAxis` builds its range (value → real → display
+   * conversions with the base range as params).
+   */
+  const anchoredRangeFrom = (
+    axis: YAxis,
+    base: AxisRange,
+    anchor: number,
+    anchorY: number,
+    paneHeight: number,
+    scale: number,
+  ): AxisRange | null => {
+    const s = Math.min(
+      AXIS_SCALE_MAX,
+      Math.max(AXIS_SCALE_MIN, scale),
+    );
+    const R = base.range * s;
+    if (!Number.isFinite(R) || R <= 0 || paneHeight <= 0) return null;
+    const toPrime = anchor + (anchorY / paneHeight) * R;
+    const fromPrime = toPrime - R;
+    const realFrom = axis.valueToRealValue(fromPrime, { range: base });
+    const realTo = axis.valueToRealValue(toPrime, { range: base });
+    const displayFrom = axis.realValueToDisplayValue(realFrom, {
+      range: base,
+    });
+    const displayTo = axis.realValueToDisplayValue(realTo, {
+      range: base,
+    });
+    return {
+      from: fromPrime,
+      to: toPrime,
+      range: R,
+      realFrom,
+      realTo,
+      realRange: realTo - realFrom,
+      displayFrom,
+      displayTo,
+      displayRange: displayTo - displayFrom,
+    };
+  };
+  /** Left edge (CSS px, viewport) of the price-axis widget. */
+  const axisStartX = (): number => {
+    const rect = container.getBoundingClientRect();
+    const w = getPriceAxis()?.getAutoSize() || 64;
+    return rect.left + rect.width - w;
+  };
+  /** Only gestures whose target is a canvas inside the chart container
+   *  are axis gestures: overlay buttons / sheets live outside it. */
+  const isAxisEventTarget = (e: Event): boolean => {
+    const t = e.target;
+    return t instanceof HTMLCanvasElement && container.contains(t);
+  };
+  const pointerClient = (
+    e: MouseEvent | TouchEvent,
+  ): { x: number; y: number } | null => {
+    if (e instanceof MouseEvent) return { x: e.clientX, y: e.clientY };
+    const t = e.touches[0] ?? e.changedTouches[0];
+    return t ? { x: t.clientX, y: t.clientY } : null;
+  };
+  /** Price at a pane-relative y (any x inside the main pane works). */
+  const priceAtY = (y: number): number => {
+    if (!chart) return NaN;
+    const conv = chart.convertFromPixel([{ x: 100, y }]);
+    const pt = Array.isArray(conv) ? conv[0] : conv;
+    return typeof pt?.value === 'number' ? pt.value : NaN;
+  };
+  const onAxisPointerDown = (e: MouseEvent | TouchEvent) => {
+    if (disposed || !chart) return;
+    const p = pointerClient(e);
+    if (!p || !isAxisEventTarget(e) || p.x < axisStartX()) return;
+    // Axis region: take over from klinecharts before its container
+    // listeners run (window capture beats them). Its drag would scale
+    // around the range centre with scaleFactor = pageY/startPageY.
+    e.stopPropagation();
+    e.preventDefault();
+    const axis = getPriceAxis();
+    if (!axis) return;
+    const rect = container.getBoundingClientRect();
+    const y = p.y - rect.top;
+    const H = chart.getSize(CANDLE_PANE_ID)?.height ?? rect.height;
+    if (y < 0 || y > H) return; // below the candle pane (x-axis strip)
+    const anchorPrice = priceAtY(y);
+    if (!Number.isFinite(anchorPrice)) return;
+    axisDrag = {
+      startY: y,
+      anchorPrice,
+      baseRange: { ...axis.getRange() },
+      paneHeight: H,
+      containerTop: rect.top,
+      moved: false,
+    };
+    if (e instanceof MouseEvent) {
+      window.addEventListener('mousemove', onAxisPointerMove);
+      window.addEventListener('mouseup', onAxisPointerUp, { once: true });
+    } else {
+      window.addEventListener('touchmove', onAxisPointerMove, {
+        passive: false,
+      });
+      window.addEventListener('touchend', onAxisPointerUp, { once: true });
+      window.addEventListener('touchcancel', onAxisPointerUp, {
+        once: true,
+      });
+    }
+  };
+  const onAxisPointerMove = (e: MouseEvent | TouchEvent) => {
+    if (!axisDrag || disposed || !chart) return;
+    const p = pointerClient(e);
+    if (!p) return;
+    e.preventDefault();
+    const axis = getPriceAxis();
+    if (!axis) return;
+    axisDrag.moved = true;
+    const y = p.y - axisDrag.containerTop;
+    const next = anchoredRangeFrom(
+      axis,
+      axisDrag.baseRange,
+      axisDrag.anchorPrice,
+      axisDrag.startY,
+      axisDrag.paneHeight,
+      Math.exp((y - axisDrag.startY) / AXIS_DRAG_SCALE_PX),
+    );
+    if (!next) return;
+    manualPriceRange = next;
+    schedulePriceAxisApply();
+  };
+  const onAxisPointerUp = () => {
+    if (axisDragApplyRaf !== 0) {
+      cancelAnimationFrame(axisDragApplyRaf);
+      axisDragApplyRaf = 0;
+    }
+    window.removeEventListener('mousemove', onAxisPointerMove);
+    window.removeEventListener('touchmove', onAxisPointerMove);
+    // The mouseup/touchend/touchcancel listeners were { once: true }.
+    if (axisDrag?.moved) applyPriceAxisRange();
+    axisDrag = null;
+  };
+  const onAxisWheel = (e: WheelEvent) => {
+    if (disposed || !chart) return;
+    if (!isAxisEventTarget(e) || e.clientX < axisStartX()) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const axis = getPriceAxis();
+    if (!axis) return;
+    const rect = container.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const H = chart.getSize(CANDLE_PANE_ID)?.height ?? rect.height;
+    if (y < 0 || y > H) return;
+    const anchorPrice = priceAtY(y);
+    if (!Number.isFinite(anchorPrice)) return;
+    const next = anchoredRangeFrom(
+      axis,
+      { ...axis.getRange() },
+      anchorPrice,
+      y,
+      H,
+      Math.exp(e.deltaY / AXIS_WHEEL_SCALE_PX),
+    );
+    if (!next) return;
+    manualPriceRange = next;
+    applyPriceAxisRange();
+  };
+  const onAxisDblClick = (e: MouseEvent) => {
+    if (disposed || !chart) return;
+    if (manualPriceRange === null) return;
+    if (!isAxisEventTarget(e) || e.clientX < axisStartX()) return;
+    // Double-click the axis resets the price scale to auto-fit.
+    // klinecharts' own reset only fires when an axis is manual
+    // (autoCalc false); ours rides on createRange with autoCalc
+    // still true, so the reset is taken here.
+    e.stopPropagation();
+    e.preventDefault();
+    manualPriceRange = null;
+    applyPriceAxisRange();
+  };
+  // Install: turn off klinecharts' built-in axis scaling (drag /
+  // wheel / pinch on the price axis) and hand the range to the
+  // createRange callback above; window capture listeners take the
+  // gestures over. Listeners are removed in disposeEngine.
+  {
+    const axis = getPriceAxis();
+    if (axis?.id) {
+      chart.overrideYAxis({
+        id: axis.id,
+        paneId: CANDLE_PANE_ID,
+        scrollZoomEnabled: false,
+        createRange: priceAxisCreateRange,
+      });
+    }
+  }
+  window.addEventListener('mousedown', onAxisPointerDown, true);
+  window.addEventListener('touchstart', onAxisPointerDown, {
+    capture: true,
+    passive: false,
+  });
+  window.addEventListener('wheel', onAxisWheel, {
+    capture: true,
+    passive: false,
+  });
+  window.addEventListener('dblclick', onAxisDblClick, true);
+
   // First load generation (see loadEpoch).
   loadEpoch += 1;
   chart.setSymbol({ ticker: opts.getSymbol(), pricePrecision: 2, volumePrecision: 0 });
@@ -459,6 +821,9 @@ export function createChartEngine(
       return;
     }
     if (prev.symbol !== symbol || prev.interval !== interval) {
+      // New symbol/interval = new price scale: drop any manual
+      // axis-zoom range so the next load auto-fits (item 7).
+      manualPriceRange = null;
       // The old view's drawings / history / selection / draw state
       // belong to Chart (DrawingController / HistoryManager / mode
       // machine): Chart persists the old view and resets them before
@@ -601,11 +966,27 @@ export function createChartEngine(
   };
 
   /** Restore the default view (DEFAULT_RESET_RANGE, see above). */
-  const resetView = () => applyRange(DEFAULT_RESET_RANGE);
+  const resetView = () => {
+    // 重設檢視 also restores the auto-fit price scale (item 7).
+    manualPriceRange = null;
+    applyPriceAxisRange();
+    applyRange(DEFAULT_RESET_RANGE);
+  };
 
   const disposeEngine = () => {
     if (disposed) return;
     disposed = true;
+    window.removeEventListener('mousedown', onAxisPointerDown, true);
+    window.removeEventListener('touchstart', onAxisPointerDown, true);
+    window.removeEventListener('wheel', onAxisWheel, true);
+    window.removeEventListener('dblclick', onAxisDblClick, true);
+    window.removeEventListener('mousemove', onAxisPointerMove);
+    window.removeEventListener('touchmove', onAxisPointerMove);
+    if (axisDragApplyRaf !== 0) {
+      cancelAnimationFrame(axisDragApplyRaf);
+      axisDragApplyRaf = 0;
+    }
+    axisDrag = null;
     resizeObserver?.disconnect();
     opts.crosshair.dispose();
     chart?.unsubscribeAction(

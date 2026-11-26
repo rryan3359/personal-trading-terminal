@@ -16,6 +16,8 @@ import {
   readPositionSettings,
   type PositionSettings,
 } from '@/lib/position-calc';
+import type { ChartType } from '@/lib/chart-config';
+import { isInterval, type Interval } from '@/lib/types';
 
 export const STORAGE_KEYS = {
   watchlist: 'ptt:watchlist',
@@ -35,6 +37,8 @@ export const STORAGE_KEYS = {
   chartType: 'ptt:chart-type',
   /** Chart appearance (colors, grid, axis font size) — see lib/chart-appearance.ts. */
   chartAppearance: 'ptt:chart-appearance',
+  /** Saved chart layouts (analysis centre 儲存／開啟, TV-style). */
+  layouts: 'ptt:layouts',
 } as const;
 
 /** Current drawings-store format version. v1 was keyed `${symbol}:${interval}`. v2 keyed bare symbols with scope/interval. v3 replaces scope/interval with visibleIntervals + text. */
@@ -85,6 +89,66 @@ export function getChartAppearance(): AppearanceSettings {
 
 export function saveChartAppearance(s: AppearanceSettings): void {
   saveJSON(STORAGE_KEYS.chartAppearance, s);
+}
+
+/**
+ * Saved chart layouts (analysis centre 儲存／開啟). A layout is a
+ * snapshot of the current view — symbol, interval, indicators, chart
+ * type, appearance — stored under `ptt:layouts`. Drawings are NOT in
+ * the snapshot: they already persist per symbol in `ptt:drawings`
+ * and come back with the symbol. Validation is defensive: a corrupt
+ * entry is dropped, never trusted.
+ */
+export interface SavedLayout {
+  id: string;
+  name: string;
+  createdAt: number;
+  symbol: string;
+  interval: Interval;
+  indicators: string[];
+  chartType: ChartType;
+  appearance: AppearanceSettings;
+}
+
+export function loadLayouts(): SavedLayout[] {
+  const raw = loadJSON<unknown[]>(STORAGE_KEYS.layouts, []);
+  if (!Array.isArray(raw)) return [];
+  const out: SavedLayout[] = [];
+  for (const v of raw) {
+    if (typeof v !== 'object' || v === null) continue;
+    const o = v as Record<string, unknown>;
+    if (
+      typeof o.id !== 'string' ||
+      typeof o.name !== 'string' ||
+      typeof o.symbol !== 'string' ||
+      typeof o.interval !== 'string' ||
+      !isInterval(o.interval) ||
+      !Array.isArray(o.indicators) ||
+      !o.indicators.every((i) => typeof i === 'string') ||
+      (o.chartType !== 'candle_solid' && o.chartType !== 'area') ||
+      typeof o.appearance !== 'object' ||
+      o.appearance === null
+    ) {
+      continue;
+    }
+    out.push({
+      id: o.id,
+      name: o.name,
+      createdAt: typeof o.createdAt === 'number' ? o.createdAt : 0,
+      symbol: o.symbol,
+      interval: o.interval,
+      indicators: o.indicators as string[],
+      chartType: o.chartType === 'area' ? 'area' : 'candle_solid',
+      appearance: normalizeAppearance(
+        o.appearance as Partial<AppearanceSettings>,
+      ),
+    });
+  }
+  return out;
+}
+
+export function saveLayouts(layouts: SavedLayout[]): void {
+  saveJSON(STORAGE_KEYS.layouts, layouts);
 }
 
 export function newOverlayId(): string {
