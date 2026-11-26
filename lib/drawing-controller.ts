@@ -74,6 +74,7 @@ import {
   isGannTool,
   isPatternTool,
   isPitchforkTool,
+  isPositionTool,
   pitchExtendOf,
   pitchOptionsOf,
   patternOptionsOf,
@@ -196,6 +197,7 @@ function defaultPriceLabel(name: string): boolean {
   return (
     isHorizontalTool(name) ||
     name === 'rectangle' ||
+    isPositionTool(name) ||
     isFibTool(name)
   );
 }
@@ -1058,7 +1060,11 @@ export function createDrawingController(
         opacity: style.opacity,
       },
       extendData:
-        tool === 'rectangle' ? { fillOpacity: style.fillOpacity } : undefined,
+        tool === 'rectangle'
+          ? { fillOpacity: style.fillOpacity }
+          : isPositionTool(tool)
+            ? { posRR: 2 }
+            : undefined,
     };
     const id = chart.createOverlay(overlayCreate(draft));
     if (typeof id !== 'string') {

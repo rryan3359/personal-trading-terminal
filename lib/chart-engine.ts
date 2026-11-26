@@ -69,6 +69,7 @@ import {
   registerMeasureOverlay,
   registerPatternOverlays,
   registerPitchforkOverlays,
+  registerPositionOverlays,
   registerRectangleOverlay,
   registerSimpleTagOverlay,
   registerTextAnnotationOverlay,
@@ -266,6 +267,7 @@ export function createChartEngine(
   registerTextAnnotationOverlay();
   registerSimpleTagOverlay();
   registerGeometryOverlays();
+  registerPositionOverlays();
 
   // Appearance styles layer on top of DARK_STYLES: the overlay
   // styles (point/line/rect) still come from DARK_STYLES, the rest

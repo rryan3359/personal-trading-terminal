@@ -79,8 +79,8 @@ import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
 
 /** Logical groups for the toolbar, in display order (MASTER TASK §4.2).
  *  Cursor & selection is the separate cursor button above, not a
- *  TOOL_GROUPS entry — so cursor + these 10 groups = 11 groups.
- *  41 of the 44 tools are in exactly one group; the 3 vertical-line
+ *  TOOL_GROUPS entry — so cursor + these 11 groups = 12 groups.
+ *  43 of the 46 tools are in exactly one group; the 3 vertical-line
  *  tools (see TOOLBAR_HIDDEN_TOOLS) are registered but hidden from
  *  the toolbar per Ryan's decision, so they are in no group. Tool
  *  ids and registration are untouched. */
@@ -95,6 +95,7 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '形態', ids: ['headShoulders', 'elliottImpulse', 'elliottCorrection', 'abcdPattern', 'xabcdPattern', 'threeDrives'] },
   { title: '文字與註解', ids: ['brush', 'textAnnotation', 'simpleTag'] },
   { title: '量測', ids: ['measure'] },
+  { title: '部位', ids: ['longPosition', 'shortPosition'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
 
@@ -177,10 +178,6 @@ export interface DrawingBarProps {
   onToolChange: (tool: DrawingTool | null, continuous: boolean) => void;
   /** Remove all drawings on the current symbol. */
   onClear: () => void;
-  /** Mobile compact bar only: undo the last drawing change. */
-  onUndo?: () => void;
-  /** Mobile compact bar only: whether undo is available. */
-  canUndo?: boolean;
 }
 
 const MAGNET_ORDER: MagnetMode[] = ['off', 'weak', 'strong'];
@@ -495,6 +492,22 @@ function ToolIcon({ tool }: { tool: DrawingTool }) {
           <rect x="4" y="5" width="12" height="10" />
         </svg>
       );
+    case 'longPosition':
+      return (
+        <svg {...ICON_PROPS}>
+          <rect x="4" y="4" width="12" height="12" rx="1" />
+          <line x1="10" y1="13.5" x2="10" y2="7" />
+          <path d="M10 7 L7.5 9.5 M10 7 L12.5 9.5" />
+        </svg>
+      );
+    case 'shortPosition':
+      return (
+        <svg {...ICON_PROPS}>
+          <rect x="4" y="4" width="12" height="12" rx="1" />
+          <line x1="10" y1="6.5" x2="10" y2="13" />
+          <path d="M10 13 L7.5 10.5 M10 13 L12.5 10.5" />
+        </svg>
+      );
     case 'measure':
       return (
         <svg {...ICON_PROPS}>
@@ -596,26 +609,6 @@ function ClearIcon() {
   );
 }
 
-/** Undo arrow (same path as the Toolbar's UndoIcon). */
-function UndoIcon({ size = 20 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M8 5L3 10l5 5" />
-      <path d="M3 10h10a4 4 0 0 1 0 8h-3" />
-    </svg>
-  );
-}
-
 /** Horizontal "⋯" (opens the full tool list on mobile). */
 function DotsIcon() {
   return (
@@ -633,12 +626,74 @@ function DotsIcon() {
   );
 }
 
+/** 6-dot grip handle (drags the floating tools bar on mobile). */
+function GripIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <circle cx="7" cy="5" r="1.5" />
+      <circle cx="13" cy="5" r="1.5" />
+      <circle cx="7" cy="10" r="1.5" />
+      <circle cx="13" cy="10" r="1.5" />
+      <circle cx="7" cy="15" r="1.5" />
+      <circle cx="13" cy="15" r="1.5" />
+    </svg>
+  );
+}
+
 /** Mobile compact bar: tools shown when nothing is starred yet. */
 const DEFAULT_COMPACT_TOOLS: DrawingTool[] = [
   'segment',
   'horizontalStraightLine',
   'rectangle',
 ];
+
+/** Floating tools bar position (mobile), persisted in localStorage. */
+const FLOATING_TOOLS_POS_KEY = 'ptt:mobile-tools-pos';
+/** Bar width (px) and the bottom clearance (px) the drag clamp keeps
+ *  free so the bar can never cover the bottom capsules. */
+const FLOAT_W = 48;
+const FLOAT_BOTTOM_CLEAR = 140;
+
+function loadFloatingToolsPos(): { x: number; y: number } | null {
+  try {
+    const raw = window.localStorage.getItem(FLOATING_TOOLS_POS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as { x?: unknown; y?: unknown };
+    if (typeof p.x !== 'number' || typeof p.y !== 'number') return null;
+    return { x: p.x, y: p.y };
+  } catch {
+    return null;
+  }
+}
+
+function saveFloatingToolsPos(p: { x: number; y: number }): void {
+  try {
+    window.localStorage.setItem(FLOATING_TOOLS_POS_KEY, JSON.stringify(p));
+  } catch {
+    // Storage full / unavailable — non-fatal.
+  }
+}
+
+/** Clamp a floating-bar position into the viewport (keeps the bar
+ *  fully visible and clear of the bottom capsules). */
+function clampFloatPos(p: { x: number; y: number }): {
+  x: number;
+  y: number;
+} {
+  return {
+    x: Math.min(Math.max(0, p.x), Math.max(0, window.innerWidth - FLOAT_W)),
+    y: Math.min(
+      Math.max(0, p.y),
+      Math.max(0, window.innerHeight - FLOAT_BOTTOM_CLEAR),
+    ),
+  };
+}
 
 /** Display order for compact-bar favorites: group order, then tool
  *  order within the group (not starred order). */
@@ -934,8 +989,6 @@ export default function DrawingBar({
   activeTool,
   onToolChange,
   onClear,
-  onUndo,
-  canUndo = false,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
   /** Title of the group whose flyout is open, or null. '收藏' is the
@@ -949,6 +1002,89 @@ export default function DrawingBar({
   const [anchor, setAnchor] = useState<FlyoutAnchor | null>(null);
   /** Mobile: full tool list bottom sheet open. */
   const [fullSheetOpen, setFullSheetOpen] = useState(false);
+  /** Mobile floating tools bar position (viewport px). Null until
+   *  mounted: the default (right edge, ~35% down) needs the
+   *  viewport size, and the page is prerendered — a window read
+   *  during render breaks the build and would hydrate-mismatch.
+   *  Same one-time mount-sync pattern as the debug-touch overlay. */
+  const [floatPos, setFloatPos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const floatPosRef = useRef<{ x: number; y: number }>({
+    x: 0,
+    y: 0,
+  });
+  const floatDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const floatBarRef = useRef<HTMLDivElement | null>(null);
+
+  // Position the floating bar on mount (saved position, else the
+  // right-edge default), clamped into the viewport; keep it inside
+  // on resize / rotation.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-time mount
+     sync from localStorage + viewport size (external systems); a
+     lazy initializer would read window during SSR and mismatch
+     hydration (same as the debug-touch overlay). */
+  useEffect(() => {
+    const initial = clampFloatPos(
+      loadFloatingToolsPos() ?? {
+        x: window.innerWidth - FLOAT_W - 8,
+        y: Math.round(window.innerHeight * 0.35),
+      },
+    );
+    floatPosRef.current = initial;
+    setFloatPos(initial);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Keep the floating bar inside the viewport on resize / rotation.
+  useEffect(() => {
+    const onResize = () =>
+      setFloatPos((prev) => (prev ? clampFloatPos(prev) : prev));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  /** Grip drag: Pointer Events + setPointerCapture, touch-action none
+   *  on the handle, so the drag never becomes a page scroll. Position
+   *  persists on release. */
+  const onFloatHandlePointerDown = (e: React.PointerEvent) => {
+    const el = floatBarRef.current;
+    if (!el) return;
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      // Pointer already gone; the drag still tracks by pointerId.
+    }
+    floatDragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: floatPosRef.current.x,
+      origY: floatPosRef.current.y,
+    };
+  };
+  const onFloatHandlePointerMove = (e: React.PointerEvent) => {
+    const d = floatDragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    const next = clampFloatPos({
+      x: d.origX + e.clientX - d.startX,
+      y: d.origY + e.clientY - d.startY,
+    });
+    floatPosRef.current = next;
+    setFloatPos(next);
+  };
+  const onFloatHandlePointerUp = (e: React.PointerEvent) => {
+    const d = floatDragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    floatDragRef.current = null;
+    saveFloatingToolsPos(floatPosRef.current);
+  };
   /** Mobile compact bar: starred tools in group order, or the 3
    *  defaults when nothing is starred yet. */
   const compactTools =
@@ -1100,13 +1236,15 @@ export default function DrawingBar({
     activeTool !== null && favorites.includes(activeTool);
 
   return (
+    <>
     <aside
       data-drawing-bar
-      className="flex w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1 md:w-11"
+      className="hidden w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1 md:flex md:w-11"
     >
-      {/* Desktop: full bar (cursor + favorites + 10 groups + magnet +
-          clear). Hidden below md; `contents` keeps the children as
-          direct flex items of the aside, exactly as before. */}
+      {/* Desktop only: the fixed rail is gone on mobile (Ryan
+          2026-11-26 — the tools float instead, see below). The
+          `contents` keeps the children as direct flex items of the
+          aside, exactly as before. */}
       <div className="hidden w-full flex-col items-center gap-0.5 md:contents">
       <button
         title="游標／選取（退出繪製模式）"
@@ -1273,66 +1411,6 @@ export default function DrawingBar({
       </button>
       </div>
 
-      {/* Mobile (<md): favorites only (defaults when none starred),
-          then undo + full-list buttons pinned to the bottom. The
-          cursor button stays so drawing mode can always be exited. */}
-      <div className="flex w-full flex-1 flex-col items-center gap-0.5 md:hidden">
-        <button
-          title="游標／選取（退出繪製模式）"
-          aria-label="游標／選取"
-          onClick={() => onToolChange(null, false)}
-          className={`${BUTTON_BASE} ${
-            activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
-          }`}
-        >
-          {activeTool === null && <ActiveBar />}
-          <CursorIcon />
-        </button>
-        <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
-        {compactTools.map((id) => {
-          const tool = TOOL_BY_ID.get(id);
-          if (!tool) return null;
-          const active = activeTool === id;
-          return (
-            <button
-              key={id}
-              title={tool.label}
-              aria-label={tool.label}
-              aria-pressed={active}
-              data-testid={`compact-tool-${id}`}
-              onClick={() => handleSelect(id, false)}
-              className={`${BUTTON_BASE} ${
-                active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
-              }`}
-            >
-              {active && <ActiveBar />}
-              <ToolIcon tool={id} />
-            </button>
-          );
-        })}
-        <div className="mt-auto flex flex-col items-center gap-2 pb-2 pt-2">
-          <button
-            onClick={onUndo}
-            disabled={!canUndo}
-            title="復原"
-            aria-label="復原"
-            data-testid="compact-undo"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d] text-[#b2b5be] hover:text-white disabled:opacity-30 disabled:hover:bg-[#1e222d] disabled:hover:text-[#b2b5be]"
-          >
-            <UndoIcon />
-          </button>
-          <button
-            onClick={() => setFullSheetOpen(true)}
-            title="全部畫線工具"
-            aria-label="全部畫線工具"
-            data-testid="compact-all-tools"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d] text-[#b2b5be] hover:text-white"
-          >
-            <DotsIcon />
-          </button>
-        </div>
-      </div>
-
       {openGroupDef && anchor &&
         createPortal(
           <GroupFlyout
@@ -1358,5 +1436,81 @@ export default function DrawingBar({
         />
       )}
     </aside>
+
+    {/* Mobile (<md): floating draggable favorites bar (Ryan
+        2026-11-26 — replaces the fixed left rail, like the
+        TradingView mobile toolbar in his screenshot). Only the
+        starred tools show (defaults when nothing is starred yet);
+        drag by the grip handle, position persists in localStorage.
+        The cursor button exits drawing mode; ⋯ opens the full tool
+        sheet. Undo moved to the bottom bar's ⋯ sheet. */}
+    {/* Rendered only after mount (floatPos null on the server). */}
+    {floatPos !== null && (
+    <div
+      ref={floatBarRef}
+      data-drawing-bar
+      data-testid="mobile-floating-tools"
+      className="fixed z-30 flex w-12 flex-col items-center gap-0.5 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 py-1 shadow-2xl backdrop-blur md:hidden"
+      style={{ left: floatPos.x, top: floatPos.y, touchAction: 'none' }}
+      onPointerMove={onFloatHandlePointerMove}
+      onPointerUp={onFloatHandlePointerUp}
+      onPointerCancel={onFloatHandlePointerUp}
+    >
+      <div
+        data-testid="mobile-floating-handle"
+        role="button"
+        aria-label="拖動工具列"
+        title="拖動工具列"
+        className="flex h-6 w-full cursor-grab touch-none items-center justify-center text-[#787b86] active:cursor-grabbing"
+        onPointerDown={onFloatHandlePointerDown}
+      >
+        <GripIcon />
+      </div>
+      <button
+        title="游標／選取（退出繪製模式）"
+        aria-label="游標／選取"
+        onClick={() => onToolChange(null, false)}
+        className={`${BUTTON_BASE} ${
+          activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+        }`}
+      >
+        {activeTool === null && <ActiveBar />}
+        <CursorIcon />
+      </button>
+      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+      {compactTools.map((id) => {
+        const tool = TOOL_BY_ID.get(id);
+        if (!tool) return null;
+        const active = activeTool === id;
+        return (
+          <button
+            key={id}
+            title={tool.label}
+            aria-label={tool.label}
+            aria-pressed={active}
+            data-testid={`floating-tool-${id}`}
+            onClick={() => handleSelect(id, false)}
+            className={`${BUTTON_BASE} ${
+              active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+            }`}
+          >
+            {active && <ActiveBar />}
+            <ToolIcon tool={id} />
+          </button>
+        );
+      })}
+      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+      <button
+        onClick={() => setFullSheetOpen(true)}
+        title="全部畫線工具"
+        aria-label="全部畫線工具"
+        data-testid="floating-all-tools"
+        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d] text-[#b2b5be] hover:text-white"
+      >
+        <DotsIcon />
+      </button>
+    </div>
+    )}
+    </>
   );
 }

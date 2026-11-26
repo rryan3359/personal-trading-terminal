@@ -15,9 +15,9 @@
  *   home-indicator safe area): a flexible [symbol | interval]
  *   capsule on the left and a compact [ƒx | gear | ⋯] capsule on
  *   the right. Because it is a normal flex child, not an overlay,
- *   the chart's volume pane and time axis are fully visible, and
- *   the left rail ends above it (its undo + "⋯" buttons can no
- *   longer be clipped by a capsule).
+ *   the chart's volume pane and time axis are fully visible. (The
+ *   fixed left rail is gone on mobile since 2026-11-26 — the
+ *   drawing tools float instead, see DrawingBar.)
  *
  * Swipe — round 1 (native non-passive touch + preventDefault +
  * touchcancel completes the swipe) passed CDP but STILL failed on
@@ -74,6 +74,17 @@ import {
  *  30px (round 1) could silently swallow real swipes. */
 const SWIPE_MIN_DY = 20;
 const TAP_MAX_MOVE = 10;
+/** Magnifier preview: the first step needs the swipe threshold
+ *  (20px), each further step 30px more of drag. */
+const MAG_STEP_PX = 30;
+/** Value `steps` away from `current` in a wrapping list (the
+ *  magnifier preview cycles the watchlist / interval list). */
+function cycleValue<T>(list: readonly T[], current: T, steps: number): T {
+  const n = list.length;
+  if (n === 0) return current;
+  const i = list.indexOf(current);
+  return list[(((i < 0 ? 0 : i) + steps) % n + n) % n];
+}
 /** A click arriving this soon after a swipe is the swipe's own
  *  synthetic click — swallow it so a swipe never also taps. */
 const SWIPE_CLICK_GUARD_MS = 400;
@@ -98,6 +109,10 @@ export interface MobileCapsulesProps {
   onChartTypeChange: (type: ChartType) => void;
   /** Open the chart's object list panel. */
   onOpenObjectList: () => void;
+  /** Undo the last drawing change (moved here from the removed
+   *  mobile rail, Ryan 2026-11-26). */
+  onUndo: () => void;
+  canUndo: boolean;
   onRedo: () => void;
   canRedo: boolean;
   /** Restore the default chart view. */
@@ -379,16 +394,24 @@ function usePointerSwipe(
   {
     onSwipeUp,
     onSwipeDown,
+    onDrag,
+    onEnd,
   }: {
     onSwipeUp: () => void;
     onSwipeDown: () => void;
+    /** Live drag offset (px, signed) while the finger is down —
+     *  drives the magnifier preview. */
+    onDrag?: (dy: number) => void;
+    /** Always fired when the gesture ends (release or cancel) —
+     *  hides the magnifier. */
+    onEnd?: () => void;
   },
 ) {
   const lastSwipeAt = useRef(0);
   // Latest callbacks for the once-attached native listeners.
-  const cbRef = useRef({ onSwipeUp, onSwipeDown });
+  const cbRef = useRef({ onSwipeUp, onSwipeDown, onDrag, onEnd });
   useEffect(() => {
-    cbRef.current = { onSwipeUp, onSwipeDown };
+    cbRef.current = { onSwipeUp, onSwipeDown, onDrag, onEnd };
   });
 
   useEffect(() => {
@@ -424,6 +447,7 @@ function usePointerSwipe(
         claimed = true;
       }
       dbg.claimed = claimed;
+      cbRef.current.onDrag?.(dy);
       touchDebugEmit();
     };
     const finish = (e: PointerEvent, cancelled: boolean) => {
@@ -437,6 +461,9 @@ function usePointerSwipe(
       }
       const dx = e.clientX - s.x;
       const dy = e.clientY - s.y;
+      // Final position first: the magnifier preview matches the
+      // release point, so what he sees is what the swipe commits.
+      cbRef.current.onDrag?.(dy);
       if (Math.abs(dy) >= SWIPE_MIN_DY && Math.abs(dy) > Math.abs(dx)) {
         lastSwipeAt.current = Date.now();
         dbg.swipes += 1;
@@ -445,6 +472,7 @@ function usePointerSwipe(
         else cbRef.current.onSwipeDown();
       }
       // < TAP_MAX_MOVE total movement = a tap: the click proceeds.
+      cbRef.current.onEnd?.();
       touchDebugEmit();
     };
     const onPointerUp = (e: PointerEvent) => finish(e, false);
@@ -581,6 +609,8 @@ export default function MobileBottomBar({
   chartType,
   onChartTypeChange,
   onOpenObjectList,
+  onUndo,
+  canUndo,
   onRedo,
   canRedo,
   onResetView,
@@ -626,6 +656,134 @@ export default function MobileBottomBar({
     }
   };
 
+  /** Magnifier preview while a capsule zone is being dragged (Ryan
+   *  2026-11-26: the finger covers the capsule, so the value is
+   *  invisible mid-swipe). The bubble floats above the bar with a
+   *  3-row mini wheel — previous / preview / next, preview large —
+   *  like TradingView's old vertical interval picker. The preview
+   *  is what a release commits, so what he sees is what he gets.
+   *  State drives the bubble; the ref is what the swipe commit
+   *  reads (it is set synchronously on every drag move). */
+  const [magnifier, setMagnifier] = useState<{
+    zone: 'symbol' | 'interval';
+    previewId: string;
+    step: number;
+  } | null>(null);
+  const magRef = useRef<{
+    zone: 'symbol' | 'interval';
+    previewId: string;
+    step: number;
+  } | null>(null);
+
+  /** Preview value for a drag offset: no step until the swipe
+   *  threshold, then one step per 30px of drag. Null while the
+   *  drag is still a tap (<= 10px). */
+  const previewFor = (
+    zone: 'symbol' | 'interval',
+    dy: number,
+  ): { previewId: string; step: number } | null => {
+    if (Math.abs(dy) <= TAP_MAX_MOVE) return null;
+    const step =
+      dy <= -SWIPE_MIN_DY
+        ? 1 + Math.floor((-dy - SWIPE_MIN_DY) / MAG_STEP_PX)
+        : dy >= SWIPE_MIN_DY
+          ? -(1 + Math.floor((dy - SWIPE_MIN_DY) / MAG_STEP_PX))
+          : 0;
+    const previewId =
+      zone === 'symbol'
+        ? cycleValue(watchlist, symbol, step)
+        : cycleValue(SWIPE_INTERVALS, interval, step);
+    return { previewId, step };
+  };
+
+  const onZoneDrag =
+    /* eslint-disable react-hooks/refs -- onZoneDrag is only ever
+       invoked from the native pointer handlers in usePointerSwipe
+       (via its cbRef), never during render. The ref is the
+       synchronous channel between the drag preview and the swipe
+       commit: the final onDrag and the swipe run inside one
+       pointerup handler, so state would still be stale there. */
+    (zone: 'symbol' | 'interval') => (dy: number) => {
+      const next = previewFor(zone, dy);
+      const prev = magRef.current;
+      if (next === null) {
+        if (prev !== null) {
+          magRef.current = null;
+          setMagnifier(null);
+        }
+        return;
+      }
+      if (
+        prev === null ||
+        prev.zone !== zone ||
+        prev.previewId !== next.previewId
+      ) {
+        const m = { zone, previewId: next.previewId, step: next.step };
+        magRef.current = m;
+        setMagnifier(m);
+      }
+    };
+  /* eslint-enable react-hooks/refs */
+  const onZoneEnd = () => {
+    if (magRef.current !== null) {
+      magRef.current = null;
+      setMagnifier(null);
+    }
+  };
+
+  /** Commit the magnifier preview on swipe release (true when it
+   *  committed — the caller then skips the single-step cycle). The
+   *  slide animation direction follows the preview's step sign. */
+  const commitSymbolPreview = (): boolean => {
+    const m = magRef.current;
+    if (m && m.zone === 'symbol' && m.previewId !== symbol) {
+      symbolDirRef.current = m.step >= 0 ? 'up' : 'down';
+      onSelectSymbol(m.previewId);
+      return true;
+    }
+    return false;
+  };
+  const commitIntervalPreview = (): boolean => {
+    const m = magRef.current;
+    if (m && m.zone === 'interval' && m.previewId !== interval) {
+      intervalDirRef.current = m.step >= 0 ? 'up' : 'down';
+      onIntervalChange(m.previewId as Interval);
+      return true;
+    }
+    return false;
+  };
+
+  // 3-row mini wheel for the bubble: neighbours of the preview.
+  const magView =
+    magnifier === null
+      ? null
+      : magnifier.zone === 'symbol'
+        ? {
+            label: '標的',
+            prev: cycleValue(watchlist, magnifier.previewId, -1),
+            current: magnifier.previewId,
+            next: cycleValue(watchlist, magnifier.previewId, 1),
+          }
+        : {
+            label: '週期',
+            prev: INTERVAL_LABELS[
+              cycleValue(
+                SWIPE_INTERVALS,
+                magnifier.previewId as Interval,
+                -1,
+              )
+            ],
+            current:
+              INTERVAL_LABELS[magnifier.previewId as Interval],
+            next: INTERVAL_LABELS[
+              cycleValue(
+                SWIPE_INTERVALS,
+                magnifier.previewId as Interval,
+                1,
+              )
+            ],
+          };
+
   // Animate the capsule text on value change (direction from the
   // swipe that caused it, fade when it came from a tap/sheet).
   useEffect(() => {
@@ -652,12 +810,24 @@ export default function MobileBottomBar({
   const symbolZoneRef = useRef<HTMLDivElement | null>(null);
   const intervalZoneRef = useRef<HTMLDivElement | null>(null);
   usePointerSwipe(symbolZoneRef, 'symbol', {
-    onSwipeUp: () => cycleSymbol(1),
-    onSwipeDown: () => cycleSymbol(-1),
+    onSwipeUp: () => {
+      if (!commitSymbolPreview()) cycleSymbol(1);
+    },
+    onSwipeDown: () => {
+      if (!commitSymbolPreview()) cycleSymbol(-1);
+    },
+    onDrag: onZoneDrag('symbol'),
+    onEnd: onZoneEnd,
   });
   usePointerSwipe(intervalZoneRef, 'interval', {
-    onSwipeUp: () => cycleInterval(1),
-    onSwipeDown: () => cycleInterval(-1),
+    onSwipeUp: () => {
+      if (!commitIntervalPreview()) cycleInterval(1);
+    },
+    onSwipeDown: () => {
+      if (!commitIntervalPreview()) cycleInterval(-1);
+    },
+    onDrag: onZoneDrag('interval'),
+    onEnd: onZoneEnd,
   });
 
   // Touch diagnostic overlay, gated by ?debug-touch=1 (read once on
@@ -765,23 +935,45 @@ export default function MobileBottomBar({
 
   return (
     <>
-      {/* pl-14 (56px) clears the 48px mobile rail + 8px gap, so the
-          left capsule starts where the chart starts. Bottom padding
-          is the safe area PLUS a margin: with viewport-fit=cover the
-          env() is real (34px on Face ID iPhones), and the extra
-          0.75rem keeps the capsules visibly inside the viewport —
-          round 1's 8px left them hugging the bottom edge, half under
-          the home indicator. pt-2.5 keeps them off the chart above.
-          Both capsules are h-12 (48px) so their tops and bottoms
-          align; round 1 had 42px vs 50px. */}
+      {/* The fixed left rail is gone on mobile (Ryan 2026-11-26 —
+          the drawing tools float instead), so the bar spans the full
+          width. Bottom padding is the safe area PLUS a margin: with
+          viewport-fit=cover the env() is real (34px on Face ID
+          iPhones), and the extra 0.75rem keeps the capsules visibly
+          inside the viewport — round 1's 8px left them hugging the
+          bottom edge, half under the home indicator. pt-2.5 keeps
+          them off the chart above. Both capsules are h-12 (48px) so
+          their tops and bottoms align; round 1 had 42px vs 50px. */}
       <div
-        className="flex shrink-0 items-center gap-2 pl-14 pr-2 pt-2.5 md:hidden"
+        className="relative flex shrink-0 items-center gap-2 pl-2 pr-2 pt-2.5 md:hidden"
         style={{
           paddingBottom:
             'max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))',
         }}
         data-testid="mobile-bottom-bar"
       >
+        {/* Magnifier: floats above the bar while a capsule zone is
+            being dragged (the finger covers the capsule itself).
+            pointer-events-none so it can never eat a touch. */}
+        {magView && (
+          <div
+            className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-3 -translate-x-1/2 rounded-2xl border border-[#2a2e39] bg-[#131722]/95 px-4 py-2 text-center shadow-2xl backdrop-blur"
+            data-testid="capsule-magnifier"
+          >
+            <div className="text-[10px] font-medium tracking-wide text-[#787b86]">
+              {magView.label}
+            </div>
+            <div className="text-xs leading-5 text-[#787b86]">
+              {magView.prev}
+            </div>
+            <div className="text-xl font-bold leading-7 text-white">
+              {magView.current}
+            </div>
+            <div className="text-xs leading-5 text-[#787b86]">
+              {magView.next}
+            </div>
+          </div>
+        )}
         {/* Bottom-left capsule: symbol | interval, both swipeable. */}
         <div
           className={`flex h-12 min-w-0 flex-1 items-stretch overflow-hidden rounded-full ${CAPSULE_BG}`}
@@ -948,6 +1140,15 @@ export default function MobileBottomBar({
               disabled: false,
               action: () => {
                 onOpenObjectList();
+                closeSheet();
+              },
+            },
+            {
+              id: 'undo',
+              label: '復原',
+              disabled: !canUndo,
+              action: () => {
+                onUndo();
                 closeSheet();
               },
             },

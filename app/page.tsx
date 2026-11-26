@@ -299,8 +299,6 @@ export default function Home() {
           activeTool={activeTool}
           onToolChange={handleToolChange}
           onClear={() => chartRef.current?.clearDrawings()}
-          onUndo={() => chartRef.current?.undo()}
-          canUndo={canUndo}
         />
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1">
@@ -372,8 +370,8 @@ export default function Home() {
       {/* Mobile (<md): bottom bar below the chart row — swipeable
           symbol/interval capsule (left, flexible) + actions capsule
           (right, compact). A real flex row, not an overlay, so the
-          chart's volume pane and time axis stay fully visible and
-          the rail's bottom buttons sit above it. Hidden on desktop. */}
+          chart's volume pane and time axis stay fully visible.
+          Hidden on desktop. */}
       <MobileBottomBar
         symbol={symbol}
         interval={interval}
@@ -391,6 +389,8 @@ export default function Home() {
         chartType={chartType}
         onChartTypeChange={setChartType}
         onOpenObjectList={() => chartRef.current?.openObjectList()}
+        onUndo={() => chartRef.current?.undo()}
+        canUndo={canUndo}
         onRedo={() => chartRef.current?.redo()}
         canRedo={canRedo}
         onResetView={() => chartRef.current?.resetView()}

@@ -112,6 +112,7 @@ import {
   type Chart,
   type DeepPartial,
   type Overlay,
+  type OverlayCreateFiguresCallback,
   type OverlayEvent,
   type Styles,
   type TextAttrs,
@@ -309,6 +310,147 @@ export function registerRectangleOverlay(): void {
       }
       return figures as never;
     },
+  });
+}
+
+/** Profit / risk zone colours for the position tools (TradingView-style). */
+const POS_PROFIT = '#26a69a';
+const POS_RISK = '#ef5350';
+
+let positionRegistered = false;
+
+/**
+ * Register the custom "longPosition" / "shortPosition" overlays once
+ * per page load. Two points: p0 = entry, p1 = stop. The take-profit
+ * is derived: TP = entry ± posRR × |entry − stop| (extendData.posRR,
+ * default 2 — i.e. 1:2R), on the profit side of the entry; the risk
+ * zone spans entry → stop. The box's horizontal extent is p0.x → p1.x.
+ * Zones are fixed green/red (the overlay line colour drives the entry
+ * line only); dragging either control point (entry or stop) updates
+ * the zones and labels live. Labels: TP + SL with prices and R
+ * multiples (right), entry price (left).
+ */
+export function registerPositionOverlays(): void {
+  if (positionRegistered) return;
+  positionRegistered = true;
+  registerTextNoHitFigure();
+
+  const makeFigures =
+    (
+      isLong: boolean,
+    ): OverlayCreateFiguresCallback<unknown> =>
+    ({ chart, coordinates, overlay }) => {
+      if (coordinates.length < 2) return [];
+      const p0 = overlay.points[0];
+      const p1 = overlay.points[1];
+      if (p0?.value === undefined || p1?.value === undefined) return [];
+      const precision = chart.getSymbol?.()?.pricePrecision ?? 2;
+      const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
+      const rr =
+        typeof ext.posRR === 'number' && ext.posRR > 0 ? ext.posRR : 2;
+      const entry = p0.value;
+      const stop = p1.value;
+      const risk = Math.abs(entry - stop);
+      if (risk <= 0) return [];
+      const tp = isLong ? entry + rr * risk : entry - rr * risk;
+      const entryY = coordinates[0].y;
+      const stopY = coordinates[1].y;
+      // Pixel y for a price, linearly interpolated/extrapolated from
+      // the entry→stop segment (works whichever side stop is on).
+      const yFor = (price: number) =>
+        entryY + ((entry - price) / (entry - stop)) * (stopY - entryY);
+      const tpY = yFor(tp);
+      const x0 = Math.min(coordinates[0].x, coordinates[1].x);
+      const x1 = Math.max(coordinates[0].x, coordinates[1].x);
+      const w = Math.max(1, x1 - x0);
+      const profitTop = Math.min(entryY, tpY);
+      const profitH = Math.max(1, Math.abs(tpY - entryY));
+      const riskTop = Math.min(entryY, stopY);
+      const riskH = Math.max(1, Math.abs(stopY - entryY));
+      const lineColor = overlay.styles?.line?.color ?? '#2962ff';
+      const fmt = (v: number) => v.toFixed(precision);
+      const figures: Array<Record<string, unknown>> = [
+        {
+          type: 'rect',
+          attrs: { x: x0, y: profitTop, width: w, height: profitH },
+          styles: {
+            style: 'stroke_fill',
+            color: hexToRgba(POS_PROFIT, 0.12),
+            borderColor: POS_PROFIT,
+            borderSize: 1,
+            borderStyle: 'solid',
+          },
+        },
+        {
+          type: 'rect',
+          attrs: { x: x0, y: riskTop, width: w, height: riskH },
+          styles: {
+            style: 'stroke_fill',
+            color: hexToRgba(POS_RISK, 0.12),
+            borderColor: POS_RISK,
+            borderSize: 1,
+            borderStyle: 'solid',
+          },
+        },
+        {
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x: x0, y: entryY },
+              { x: x1, y: entryY },
+            ],
+          },
+          styles: { color: lineColor, size: 1, style: 'dashed' },
+        },
+      ];
+      const tpText: OverlayTextLike = {
+        content: `TP ${fmt(tp)}\n+${rr.toFixed(2)}R`,
+        color: POS_PROFIT,
+        size: 11,
+        bold: true,
+        alignH: 'right',
+        alignV: 'middle',
+      };
+      const slText: OverlayTextLike = {
+        content: `SL ${fmt(stop)}\n-1.00R`,
+        color: POS_RISK,
+        size: 11,
+        bold: true,
+        alignH: 'right',
+        alignV: 'middle',
+      };
+      const entryText: OverlayTextLike = {
+        content: `入場 ${fmt(entry)}`,
+        color: '#d1d4dc',
+        size: 11,
+        alignH: 'left',
+        alignV: 'middle',
+      };
+      figures.push(
+        ...textFigures(tpText.content, x1 - 6, profitTop + profitH / 2, tpText),
+        ...textFigures(slText.content, x1 - 6, riskTop + riskH / 2, slText),
+        ...textFigures(entryText.content, x0 + 6, entryY, entryText),
+      );
+      return figures as never;
+    };
+
+  registerOverlay({
+    name: 'longPosition',
+    onRightClick: preventOverlayRightClickDelete,
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: makeFigures(true),
+  });
+  registerOverlay({
+    name: 'shortPosition',
+    onRightClick: preventOverlayRightClickDelete,
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: makeFigures(false),
   });
 }
 
@@ -1253,6 +1395,17 @@ export const FIB_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 export function isFibTool(name: string): boolean {
   return FIB_TOOL_NAMES.has(name);
+}
+
+/** Position tools (long/short): entry + stop points, TP derived at
+ *  extendData.posRR (default 2, i.e. 1:2R). */
+export const POSITION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'longPosition',
+  'shortPosition',
+]);
+
+export function isPositionTool(name: string): boolean {
+  return POSITION_TOOL_NAMES.has(name);
 }
 
 /** Whether the tool has editable levels (all fib tools except the

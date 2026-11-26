@@ -87,7 +87,9 @@ export type DrawingTool =
   | 'curve'
   | 'path'
   | 'pen'
-  | 'arrow';
+  | 'arrow'
+  | 'longPosition'
+  | 'shortPosition';
 
 /** Custom overlays (registered in lib/chart-theme.ts, not klinecharts built-ins). */
 export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
@@ -122,6 +124,8 @@ export const CUSTOM_OVERLAYS: ReadonlySet<string> = new Set([
   'path',
   'pen',
   'arrow',
+  'longPosition',
+  'shortPosition',
 ]);
 
 /**
@@ -177,6 +181,8 @@ export const DRAWING_TOOLS: Array<{ id: DrawingTool; label: string }> = [
   { id: 'arrow', label: '箭頭' },
   { id: 'path', label: '路徑' },
   { id: 'pen', label: '鋼筆' },
+  { id: 'longPosition', label: '多頭倉位' },
+  { id: 'shortPosition', label: '空頭倉位' },
 ];
 
 /** Line style ids. 'dotted' renders as dashed + dashedValue [1, 4]
@@ -332,6 +338,8 @@ export const TOOL_LABELS_BY_NAME: Record<string, string> = {
   arrow: '箭頭',
   path: '路徑',
   pen: '鋼筆',
+  longPosition: '多頭倉位',
+  shortPosition: '空頭倉位',
 };
 
 /** Indicators offered in the toolbar (all are klinecharts built-ins). */
