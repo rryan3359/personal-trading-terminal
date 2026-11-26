@@ -1,0 +1,629 @@
+/**
+ * lib/chart-engine.ts — ChartEngine (MASTER TASK Phase 3 Step 8).
+ *
+ * Owns the klinecharts instance and everything that drives it: init /
+ * dispose, overlay registration, styles, symbol / period, the
+ * DataLoader (getBars / subscribeBar / unsubscribeBar), the Binance
+ * live socket, crosshair subscription forwarding, ResizeObserver,
+ * symbol / interval switching, chart type, indicators (including the
+ * VOL overlay axis) and range fitting. Origin: inline in
+ * components/Chart.tsx, moved verbatim except for the mechanical
+ * identifier swaps listed below (Chart-owned state is reached only
+ * through opts).
+ *
+ * Chart stays the composition root: it creates one engine in a ref
+ * (init effect), forwards prop changes (setSymbolInterval /
+ * setChartType / setIndicators), and owns everything the engine
+ * reports back through opts callbacks — the load-error banner, the
+ * last candle, drawing restore on init load, the old view's persist
+ * + reset on symbol / interval change, and the legend indicator
+ * tick. The engine never touches React state, controllers or the
+ * store directly.
+ *
+ * Identifier swaps vs the inline original (mechanical, behaviour
+ * unchanged):
+ * - chartRef / socketRef / liveCallbackRef / initOkRef /
+ *   loadEpochRef / lastTickReportRef -> engine-local variables.
+ * - symbolRef / intervalRef -> opts.getSymbol() / opts.getInterval()
+ *   (read live, so DataLoader closures always see the current view).
+ * - chartType / indicators props -> opts.getChartType() /
+ *   opts.getIndicators() (read by the no-arg setters).
+ * - appearanceRef -> opts.initialAppearance (read once, at init).
+ * - setLoadError / setLastKline -> opts.onLoadError / opts.onLastKline.
+ * - drawingController.restoreDrawings() -> opts.onInitLoad().
+ * - persistDrawings + history clear + deselect + clearDrawingId +
+ *   mode exit + tool disarm -> opts.onSymbolIntervalChange(prev, next).
+ * - setIndicatorTick bump -> opts.onIndicatorTick().
+ * - suppressSaveRef -> opts.suppressSaveRef (the same ref object).
+ * - onLastTickRef / onConnectionStatusRef -> opts.onLastTick /
+ *   opts.onConnectionStatus.
+ *
+ * Deliberately NOT moved (stays in Chart, with its owner):
+ * - useImperativeHandle's clearDrawings / undo / redo /
+ *   openObjectList: drawing / history concerns owned by
+ *   DrawingController / DrawingHistoryManager; only setRange /
+ *   resetView delegate here (applyRange / resetView).
+ * - The appearance effect: appearance is owned by the page and
+ *   applied through engine.getChart().setStyles(...).
+ * - onHistoryChange: no engine path reports a history change (the
+ *   HistoryManager notifies Chart directly), so it is not an opt.
+ */
+
+import {
+  dispose,
+  init,
+  type AxisCreateRangeCallback,
+  type Chart,
+  type DataLoader,
+  type KLineData,
+  type Period,
+} from 'klinecharts';
+import type { Interval, Kline } from '@/lib/types';
+import { BinanceKlineSocket, type BinanceSocketStatus } from '@/lib/ws/binance';
+import {
+  DARK_STYLES,
+  registerFibonacciRetracementOverlay,
+  registerFibonacciToolsOverlays,
+  registerGannOverlays,
+  registerGeometryOverlays,
+  registerMeasureOverlay,
+  registerPatternOverlays,
+  registerPitchforkOverlays,
+  registerRectangleOverlay,
+  registerSimpleTagOverlay,
+  registerTextAnnotationOverlay,
+} from '@/lib/chart-theme';
+import {
+  INDICATOR_OPTIONS,
+  INTERVAL_MS,
+  RANGES,
+  type ChartType,
+  type RangeId,
+} from '@/lib/chart-config';
+import {
+  buildAppearanceStyles,
+  type AppearanceSettings,
+} from '@/lib/chart-appearance';
+import type { CrosshairController } from '@/lib/chart-crosshair';
+
+export interface ChartEngineOptions {
+  getSymbol: () => string;
+  getInterval: () => Interval;
+  getChartType: () => ChartType;
+  getIndicators: () => string[];
+  /** Appearance for the one-time init styles; later changes go through Chart's appearance effect. */
+  initialAppearance: AppearanceSettings;
+  crosshair: CrosshairController;
+  onLastTick?: (atMs: number) => void;
+  onConnectionStatus?: (status: BinanceSocketStatus) => void;
+  /** Report an init-load failure (null clears it). Chart owns the banner state. */
+  onLoadError: (message: string | null) => void;
+  /** Last loaded / live candle for the legend. */
+  onLastKline: (kline: KLineData | null) => void;
+  /** Called after a successful init load: restore the view's drawings. */
+  onInitLoad: () => void;
+  /**
+   * Called when symbol/interval actually changes, before the new load:
+   * persist the old view, clear per-view history, deselect, cancel any
+   * in-progress draw, leave Drawing mode and disarm the tool.
+   */
+  onSymbolIntervalChange: (
+    prev: { symbol: string; interval: Interval },
+    next: { symbol: string; interval: Interval },
+  ) => void;
+  /** Bumps after setIndicators (re)creates indicators (legend memo). */
+  onIndicatorTick: () => void;
+  /**
+   * Suppress-save guard owned by Chart (persist guards); the engine
+   * sets it around removeOverlay in the symbol/interval switch.
+   */
+  suppressSaveRef: { current: boolean };
+}
+
+export interface ChartEngine {
+  getChart: () => Chart | null;
+  /** Apply a symbol/interval switch (first call only records the view). */
+  setSymbolInterval: () => void;
+  setChartType: () => void;
+  setIndicators: () => void;
+  applyRange: (range: RangeId) => void;
+  resetView: () => void;
+  dispose: () => void;
+}
+
+const HISTORY_LIMIT = 500;
+
+function periodFor(interval: Interval): Period {
+  switch (interval) {
+    case '1m':
+      return { type: 'minute', span: 1 };
+    case '3m':
+      return { type: 'minute', span: 3 };
+    case '5m':
+      return { type: 'minute', span: 5 };
+    case '15m':
+      return { type: 'minute', span: 15 };
+    case '30m':
+      return { type: 'minute', span: 30 };
+    case '1h':
+      return { type: 'hour', span: 1 };
+    case '2h':
+      return { type: 'hour', span: 2 };
+    case '4h':
+      return { type: 'hour', span: 4 };
+    case '6h':
+      return { type: 'hour', span: 6 };
+    case '12h':
+      return { type: 'hour', span: 12 };
+    case '1d':
+      return { type: 'day', span: 1 };
+    case '3d':
+      return { type: 'day', span: 3 };
+    case '1w':
+      return { type: 'week', span: 1 };
+    case '1M':
+      return { type: 'month', span: 1 };
+  }
+}
+
+function isMainPaneIndicator(name: string): boolean {
+  return INDICATOR_OPTIONS.find((o) => o.id === name)?.mainPane ?? false;
+}
+
+// klinecharts 10.1.1 PaneIdConstants.CANDLE (index.esm.js:845).
+// Main-pane indicators must be created with this paneId: createIndicator
+// mints a fresh indicator_pane_* whenever paneId is absent
+// (index.esm.js:15702), so a bare name always opens a new sub-pane.
+const CANDLE_PANE_ID = 'candle_pane';
+
+/**
+ * VOL overlay axis. A bare `{ name: 'VOL', paneId: 'candle_pane' }`
+ * does NOT work: the indicator shares the pane's default y-axis,
+ * whose range is computed from the candles AND the indicator's
+ * values — VOL's minValue 0 drags the range to [0, maxPrice] and
+ * crushes the candles into a thin band at the top (verified by
+ * screenshot 2026-11-26). So VOL gets its own y-axis in the candle
+ * pane (no widget: no extra ticks on the right), with a stretched
+ * range: the default range is [0, maxVisibleVolume] and scaling `to`
+ * by VOL_AXIS_SCALE leaves bars + volume MAs in the bottom
+ * 1/VOL_AXIS_SCALE of the pane, TradingView-style. gap is 0 on this
+ * axis so the scale is exact (the default gap adds top 20% /
+ * bottom 10% on top of the range). The axis is created/removed
+ * together with the VOL indicator in the indicators effect below.
+ */
+const VOL_AXIS_ID = 'vol-axis';
+const VOL_AXIS_SCALE = 5;
+const volAxisCreateRange: AxisCreateRangeCallback = ({
+  defaultRange,
+}) => {
+  const from = defaultRange.from;
+  const to = defaultRange.to * VOL_AXIS_SCALE;
+  return {
+    from,
+    to,
+    range: to - from,
+    realFrom: from,
+    realTo: to,
+    realRange: to - from,
+    displayFrom: from,
+    displayTo: to,
+    displayRange: to - from,
+  };
+};
+
+/**
+ * Range the context menu's 重設圖表檢視 restores. No default-range
+ * constant exists in the codebase (page starts with activeRange null
+ * and never calls setRange on mount); 1M is the middle preset —
+ * change this one line to retarget the reset.
+ */
+const DEFAULT_RESET_RANGE: RangeId = '1M';
+
+/** Engine with no chart (init failed): every method is a no-op, exactly
+ *  as the old init effect's early return left Chart (chartRef null, no
+ *  cleanup registered, every later effect guarding on a null chart). */
+const NULL_ENGINE: ChartEngine = {
+  getChart: () => null,
+  setSymbolInterval: () => {},
+  setChartType: () => {},
+  setIndicators: () => {},
+  applyRange: () => {},
+  resetView: () => {},
+  dispose: () => {},
+};
+
+export function createChartEngine(
+  container: HTMLDivElement,
+  opts: ChartEngineOptions,
+): ChartEngine {
+  /** Live socket for the current view (null while unsubscribed). */
+  let socket: BinanceKlineSocket | null = null;
+  let liveCallback: ((data: KLineData) => void) | null = null;
+  /** Whether the last init load delivered data (gates the live socket). */
+  let initOk = true;
+  /**
+   * Data-load generation. Incremented once per symbol/interval switch
+   * (and once at first load); each getBars captures the epoch at fetch
+   * start and drops its response if a newer generation has begun, so a
+   * late response from the old symbol/interval can never overwrite the
+   * new one. F3 fix.
+   */
+  let loadEpoch = 0;
+  /** Last time onLastTick was reported (throttle: at most once a second). */
+  let lastTickReport = 0;
+  /** Last applied symbol/interval (first setSymbolInterval call only records it). */
+  let prevSymbolInterval: { symbol: string; interval: Interval } | null = null;
+  let disposed = false;
+  let resizeObserver: ResizeObserver | null = null;
+
+  registerRectangleOverlay();
+  registerFibonacciRetracementOverlay();
+  registerFibonacciToolsOverlays();
+  registerPitchforkOverlays();
+  registerGannOverlays();
+  registerPatternOverlays();
+  registerMeasureOverlay();
+  registerTextAnnotationOverlay();
+  registerSimpleTagOverlay();
+  registerGeometryOverlays();
+
+  // Appearance styles layer on top of DARK_STYLES: the overlay
+  // styles (point/line/rect) still come from DARK_STYLES, the rest
+  // from the user's appearance (defaults = the DARK_STYLES look).
+  let chart: Chart | null = init(container, {
+    styles: {
+      ...DARK_STYLES,
+      ...buildAppearanceStyles(opts.initialAppearance),
+    },
+  });
+  if (!chart) return NULL_ENGINE;
+
+  // The top-left legend is the only OHLC readout: the built-in
+  // tooltip draws its own line at the same spot and the two overlap
+  // (screenshot 2026-11-24). Hide it entirely; the legend follows
+  // the crosshair instead (subscribed below).
+  chart.setStyles({ candle: { tooltip: { showRule: 'none' } } });
+  // Same for indicator tooltips: the HTML legend already shows
+  // every indicator's values (read from the same computed results,
+  // following the crosshair), while the built-in tooltips duplicate
+  // them at each pane's top-left and overlap the legend — e.g. the
+  // MA60 value ghosting over the OHLC row (Ryan's screenshots
+  // 2026-11-26). This also covers the VOL tooltip, which would
+  // otherwise land in the candle pane now that VOL is overlaid
+  // there. Sub-pane (RSI/MACD) values stay visible via the legend.
+  chart.setStyles({ indicator: { tooltip: { showRule: 'none' } } });
+
+  // Legend follows the crosshair (TradingView behaviour): while the
+  // mouse hovers a candle the legend shows that candle; when the
+  // mouse leaves it falls back to the last candle. Note the action
+  // payload is only { x, y, paneId } (no kLineData despite the
+  // Crosshair type), so the hovered candle is resolved through
+  // convertFromPixel -> dataIndex into the loaded list. Publishing
+  // is rAF-throttled with same-target dedup (see CrosshairController
+  // in lib/chart-crosshair.ts): a 60-125 Hz mouse must not
+  // re-render Chart once per event.
+  chart.subscribeAction(
+    'onCrosshairChange',
+    opts.crosshair.handleCrosshairChange,
+  );
+
+  // Debug handle for browser-console inspection
+  // (e.g. __pttChart.getOverlays(), __pttChart.getVisibleRange()).
+  (window as unknown as { __pttChart?: Chart }).__pttChart = chart;
+
+  chart.setZoomEnabled(true);
+  chart.setScrollEnabled(true);
+  // First load generation (see loadEpoch).
+  loadEpoch += 1;
+  chart.setSymbol({ ticker: opts.getSymbol(), pricePrecision: 2, volumePrecision: 0 });
+  chart.setPeriod(periodFor(opts.getInterval()));
+
+  const dataLoader: DataLoader = {
+    getBars: async ({ type, timestamp, callback }) => {
+      // klinecharts v10 DataLoader semantics (verified against the
+      // installed bundle's StoreImp._processDataLoad/_addData):
+      // - 'init': replace all data. The chart passes timestamp=null.
+      // - 'backward': load bars NEWER than `timestamp` (which is the
+      //   NEWEST loaded bar); the chart appends the result. Triggered
+      //   when the view sits at the right edge and more.backward is true.
+      // - 'forward': load bars OLDER than `timestamp` (which is the
+      //   OLDEST loaded bar); the chart prepends the result. Triggered
+      //   when the view scrolls to the left edge and more.forward is true.
+      // Getting this backwards duplicates the whole dataset on every
+      // load (the chart concatenates, it does not dedupe).
+      // Capture this load's generation; a response that arrives after
+      // a newer generation began is dropped below (no callback — the
+      // library is safe: setSymbol/setPeriod/setDataLoader all go
+      // through resetData, which clears _loading and issues the new
+      // generation's init load synchronously; verified against the
+      // installed klinecharts 10.1.1 bundle, StoreImp.resetData).
+      const epoch = loadEpoch;
+      try {
+        const params = new URLSearchParams({
+          source: 'binance',
+          symbol: opts.getSymbol(),
+          interval: opts.getInterval(),
+          limit: String(HISTORY_LIMIT),
+        });
+        if (type === 'backward' && timestamp) {
+          // Newer than the newest loaded bar. Binance startTime is
+          // inclusive, so +1ms excludes the boundary bar itself.
+          params.set('startTime', String(timestamp + 1));
+        } else if (type === 'forward' && timestamp) {
+          // Older than the oldest loaded bar. Binance endTime is
+          // inclusive, so -1ms excludes the boundary bar itself.
+          params.set('endTime', String(timestamp - 1));
+        }
+        const res = await fetch(`/api/klines?${params.toString()}`);
+        if (!res.ok) throw new Error(`klines API ${res.status}`);
+        const json = (await res.json()) as { klines: Kline[] };
+        const klines = (json.klines ?? []) as KLineData[];
+        const hasMore = klines.length >= HISTORY_LIMIT;
+        // Stale generation: drop silently. No callback, no state
+        // writes, no restoreDrawings — the newer generation owns the chart.
+        if (epoch !== loadEpoch) return;
+        if (type === 'init') {
+          // No newer bars exist beyond the latest (live updates arrive
+          // via the WebSocket); older history does exist.
+          if (klines.length === 0) {
+            // Empty init: the chart callback clears the old candles,
+            // so say so instead of leaving a blank chart unexplained,
+            // and do not restore drawings onto a symbol with no data.
+            initOk = false;
+            opts.onLoadError(
+              `無法載入 ${opts.getSymbol()} 的 K 線資料，請檢查標的或稍後再試。`,
+            );
+            opts.onLastKline(null);
+            callback(klines, { backward: false, forward: false });
+            return;
+          }
+          initOk = true;
+          opts.onLoadError(null);
+          opts.onLastKline(klines[klines.length - 1]);
+          callback(klines, { backward: false, forward: hasMore });
+          opts.onInitLoad();
+        } else if (type === 'forward') {
+          callback(klines, { forward: hasMore });
+        } else {
+          // 'backward': more newer bars only exist if a full page came back.
+          callback(klines, { backward: hasMore });
+        }
+      } catch {
+        // Stale generation: same drop — not even an error state, the
+        // newer generation's own load reports its own outcome.
+        if (epoch !== loadEpoch) return;
+        if (type === 'init') {
+          initOk = false;
+          opts.onLoadError(
+            `無法載入 ${opts.getSymbol()} 的 K 線資料，請檢查標的或稍後再試。`,
+          );
+        }
+        callback([], { backward: false, forward: false });
+      }
+    },
+    subscribeBar: ({ callback }) => {
+      liveCallback = callback;
+      socket?.disconnect();
+      // The last init load delivered no data (unknown/delisted symbol):
+      // do not open a socket that can never receive candles.
+      if (!initOk) {
+        opts.onConnectionStatus?.('closed');
+        return;
+      }
+      const newSocket = new BinanceKlineSocket();
+      socket = newSocket;
+      newSocket.connect(
+        opts.getSymbol(),
+        opts.getInterval(),
+        (kline) => {
+          liveCallback?.(kline as KLineData);
+          opts.onLastKline(kline as KLineData);
+          // Last-tick time for the status bar, throttled to once a
+          // second (the display only has second precision).
+          const now = Date.now();
+          if (now - lastTickReport >= 1000) {
+            lastTickReport = now;
+            opts.onLastTick?.(now);
+          }
+        },
+        (status) => opts.onConnectionStatus?.(status),
+      );
+    },
+    unsubscribeBar: () => {
+      liveCallback = null;
+      socket?.disconnect();
+      socket = null;
+    },
+  };
+  chart.setDataLoader(dataLoader);
+
+  resizeObserver = new ResizeObserver(() => chart?.resize());
+  resizeObserver.observe(container);
+
+  const getChart = () => chart;
+
+  const setSymbolInterval = () => {
+    const symbol = opts.getSymbol();
+    const interval = opts.getInterval();
+    if (!chart) return;
+    // A new symbol/interval is about to load: drop any stale error
+    // and legend (including a hovered candle from the old symbol).
+    opts.onLoadError(null);
+    opts.onLastKline(null);
+    opts.crosshair.clear();
+    const prev = prevSymbolInterval;
+    if (prev === null) {
+      prevSymbolInterval = { symbol, interval };
+      return;
+    }
+    if (prev.symbol !== symbol || prev.interval !== interval) {
+      // The old view's drawings / history / selection / draw state
+      // belong to Chart (DrawingController / HistoryManager / mode
+      // machine): Chart persists the old view and resets them before
+      // the new load starts (see onSymbolIntervalChange in Chart.tsx).
+      opts.onSymbolIntervalChange(prev, { symbol, interval });
+      // New load generation: the setSymbol/setPeriod below (each firing
+      // its own getBars("init")) belong to this one generation. This must
+      // sit inside the change branch — setSymbolInterval also re-runs without a
+      // change (dev double-invoke), and incrementing there would orphan
+      // the in-flight load with no replacement load issued.
+      loadEpoch += 1;
+    }
+    prevSymbolInterval = { symbol, interval };
+    opts.suppressSaveRef.current = true;
+    try {
+      chart.removeOverlay();
+      // Call only the setter that actually changed: each one triggers
+      // its own getBars("init") load.
+      if (prev.symbol !== symbol) {
+        chart.setSymbol({ ticker: symbol, pricePrecision: 2, volumePrecision: 0 });
+      }
+      if (prev.interval !== interval) {
+        chart.setPeriod(periodFor(interval));
+      }
+    } finally {
+      opts.suppressSaveRef.current = false;
+    }
+    // getBars("init") fires from setSymbol/setPeriod and restores drawings.
+  };
+
+  const setChartType = () => {
+    if (!chart) return;
+    chart.setStyles({ candle: { type: opts.getChartType() } });
+  };
+
+  const setIndicators = () => {
+    if (!chart) return;
+    const indicators = opts.getIndicators();
+    const desired = new Set(indicators);
+    for (const ind of chart.getIndicators()) {
+      const shouldBeMain = isMainPaneIndicator(ind.name);
+      const isMain = ind.paneId === CANDLE_PANE_ID;
+      // Remove when undesired OR in the wrong pane: flipping an
+      // indicator's mainPane flag (e.g. VOL moving from its own pane
+      // into the candle pane) otherwise leaves the existing instance
+      // in its old pane forever — the creation loop below only adds
+      // names that are absent. Removing an indicator also drops its
+      // now-empty pane.
+      if (!desired.has(ind.name) || shouldBeMain !== isMain) {
+        chart.removeIndicator({ name: ind.name });
+      }
+    }
+    const current = new Set(chart.getIndicators().map((i) => i.name));
+    // VOL needs its own y-axis in the candle pane (see VOL_AXIS_ID
+    // above): create it before the VOL indicator, drop it when VOL
+    // is off. getYAxes filters by pane + id; createYAxis with an
+    // existing id would just re-override it, so the existence check
+    // keeps this a no-op on every other indicators change.
+    const wantVol = desired.has('VOL');
+    const volAxisExists = chart
+      .getYAxes({ paneId: CANDLE_PANE_ID })
+      .some((a) => a.id === VOL_AXIS_ID);
+    if (wantVol && !volAxisExists) {
+      chart.createYAxis({
+        id: VOL_AXIS_ID,
+        paneId: CANDLE_PANE_ID,
+        position: 'right',
+        inside: true,
+        needWidget: false,
+        gap: { top: 0, bottom: 0 },
+        createRange: volAxisCreateRange,
+      });
+    } else if (!wantVol && volAxisExists) {
+      chart.removeYAxis({ id: VOL_AXIS_ID });
+    }
+    for (const name of indicators) {
+      if (!current.has(name)) {
+        if (name === 'VOL') {
+          // Own y-axis (see above): without it VOL shares the price
+          // axis and crushes the candles.
+          chart.createIndicator(
+            { name, paneId: CANDLE_PANE_ID, yAxisId: VOL_AXIS_ID },
+            true,
+          );
+        } else {
+          // isStack=true is required for main-pane indicators: addIndicator
+          // clears the other indicators in the pane when isStack is false,
+          // so MA/EMA/BOLL sharing candle_pane would delete each other.
+          chart.createIndicator(
+            isMainPaneIndicator(name)
+              ? { name, paneId: CANDLE_PANE_ID }
+              : name,
+            isMainPaneIndicator(name),
+          );
+        }
+      }
+    }
+    // Re-render the legend after (re)creating indicators: their calc
+    // results only exist now, and the render carrying the new
+    // `indicators` prop ran before this effect (see indicatorTick).
+    // (the bump goes through onIndicatorTick; the Chart effect that
+    // calls setIndicators depends on [indicators] only, so this
+    // cannot loop.)
+    opts.onIndicatorTick();
+  };
+
+  /**
+   * Fit a calendar range into the chart width, pinned to the latest
+   * candle. The span is capped by the candles actually loaded (500 per
+   * init load, more on scroll), so wide ranges on short intervals show
+   * the widest available window.
+   */
+  const applyRange = (range: RangeId) => {
+    if (!chart) return;
+    const data = chart.getDataList();
+    if (data.length === 0) return;
+    const intervalMs = INTERVAL_MS[opts.getInterval()] ?? 0;
+    if (intervalMs <= 0) return;
+    const def = RANGES.find((r) => r.id === range);
+    let count: number;
+    if (range === 'all') {
+      count = data.length;
+    } else if (range === 'ytd') {
+      const yearStart = new Date(new Date().getFullYear(), 0, 1).getTime();
+      const inYear = data.filter((d) => d.timestamp >= yearStart).length;
+      count = inYear > 0 ? inYear : data.length;
+    } else if (def?.ms) {
+      count = Math.min(
+        data.length,
+        Math.max(1, Math.ceil(def.ms / intervalMs)),
+      );
+    } else {
+      count = data.length;
+    }
+    const width = container.clientWidth;
+    if (width <= 0) return;
+    const space = Math.min(50, Math.max(2, width / count));
+    chart.setBarSpace(space);
+    chart.scrollToRealTime();
+  };
+
+  /** Restore the default view (DEFAULT_RESET_RANGE, see above). */
+  const resetView = () => applyRange(DEFAULT_RESET_RANGE);
+
+  const disposeEngine = () => {
+    if (disposed) return;
+    disposed = true;
+    resizeObserver?.disconnect();
+    opts.crosshair.dispose();
+    chart?.unsubscribeAction(
+      'onCrosshairChange',
+      opts.crosshair.handleCrosshairChange,
+    );
+    socket?.disconnect();
+    socket = null;
+    liveCallback = null;
+    chart = null;
+    dispose(container);
+  };
+
+  return {
+    getChart,
+    setSymbolInterval,
+    setChartType,
+    setIndicators,
+    applyRange,
+    resetView,
+    dispose: disposeEngine,
+  };
+}

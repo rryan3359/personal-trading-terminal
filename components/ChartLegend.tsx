@@ -9,61 +9,19 @@
  * Chart. It re-renders only when its props change (symbol / interval /
  * indicators / lastKline / loadError) or the hover target changes.
  *
- * NOTE: CandleCountdown moved here from components/Chart.tsx in
- * Phase 3 Step 2 (pre-step, breaking the Chart <-> ChartLegend
- * circular import); Step 8 moves it to its own file.
+ * NOTE: CandleCountdown lives in components/CandleCountdown.tsx
+ * (Phase 3 Step 8; it moved here from Chart.tsx in Step 2 to break
+ * the Chart <-> ChartLegend circular import).
  */
 import { memo, useEffect, useState } from 'react';
 import type { Chart, KLineData } from 'klinecharts';
 import type { Interval } from '@/lib/types';
 import { INTERVAL_LABELS } from '@/lib/types';
 import { INTERVAL_MS } from '@/lib/chart-config';
-import { formatCountdown, formatPrice } from '@/lib/format';
+import { formatPrice } from '@/lib/format';
+import { CandleCountdown } from './CandleCountdown';
 import type { HoverTarget } from '@/lib/chart-crosshair';
 
-interface CandleCountdownProps {
-  /** Close time of the last candle (ms), or null when no data. */
-  lastCloseMs: number | null;
-  /** Open time of the last candle (ms), or null when no data. */
-  candleOpenMs: number | null;
-}
-
-/**
- * Candle-close countdown (Phase 1 step 2c). Owns its own 1-second
- * tick in local state: the tick re-renders only this tiny span, never
- * Chart or the legend. The countdown is always about the LAST candle
- * closing, never the hovered one.
- */
-export const CandleCountdown = memo(function CandleCountdown({
-  lastCloseMs,
-  candleOpenMs,
-}: CandleCountdownProps) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const countdownRemainingMs =
-    lastCloseMs !== null ? lastCloseMs - nowMs : null;
-  // Stale when the close already passed (socket down, no live tick) or
-  // the clock sits before the candle opened: show '—', never a bogus time.
-  const countdownText =
-    countdownRemainingMs !== null &&
-    lastCloseMs !== null &&
-    candleOpenMs !== null &&
-    countdownRemainingMs > 0 &&
-    countdownRemainingMs <= lastCloseMs - candleOpenMs
-      ? formatCountdown(countdownRemainingMs)
-      : '—';
-  return (
-    <span
-      className="ml-2 font-normal tabular-nums text-[#ffa726]"
-      data-testid="candle-countdown"
-    >
-      收線 {countdownText}
-    </span>
-  );
-});
 
 interface ChartLegendProps {
   symbol: string;
