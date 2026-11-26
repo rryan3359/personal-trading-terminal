@@ -47,6 +47,7 @@ import {
 import {
   dispose,
   init,
+  type AxisCreateRangeCallback,
   type Chart,
   type DataLoader,
   type DeepPartial,
@@ -88,11 +89,14 @@ import {
   registerSimpleTagOverlay,
   registerTextAnnotationOverlay,
 } from '@/lib/chart-theme';
-import ColorPicker from '@/components/ColorPicker';
 import ChartContextMenu, {
   type ContextMenuItem,
 } from '@/components/ChartContextMenu';
 import ChartLegend from '@/components/ChartLegend';
+import DrawingSelectionToolbar, {
+  BarGearIcon,
+  type DrawingSelectionToolbarHandle,
+} from '@/components/DrawingSelectionToolbar';
 import ObjectList, {
   type ObjectListBatchAction,
   type ObjectListItem,
@@ -105,7 +109,6 @@ import {
   DRAWING_TOOLS,
   INDICATOR_OPTIONS,
   INTERVAL_MS,
-  LINE_STYLE_OPTIONS,
   RANGES,
   extendForOverlay,
   lineFamilyOf,
@@ -128,6 +131,10 @@ import {
   type CrosshairController,
 } from '@/lib/chart-crosshair';
 import {
+  createInteractionModeController,
+  type InteractionModeController,
+} from '@/lib/chart-interaction-mode';
+import {
   buildAppearanceStyles,
   type AppearanceSettings,
 } from '@/lib/chart-appearance';
@@ -146,7 +153,6 @@ import {
 import {
   createDrawingPersistence,
   type DrawingPersistence,
-  type OverlayTemplate,
   type OverlayTemplates,
 } from '@/lib/drawing-persistence';
 import {
@@ -158,7 +164,6 @@ import {
   newOverlayId,
   saveDrawingsStore,
   saveLastOverlayStyle,
-  type LastOverlayStyle,
   type OverlayStylePatch,
   type OverlayText,
   type SavedOverlay,
@@ -261,6 +266,41 @@ function isMainPaneIndicator(name: string): boolean {
 const CANDLE_PANE_ID = 'candle_pane';
 
 /**
+ * VOL overlay axis. A bare `{ name: 'VOL', paneId: 'candle_pane' }`
+ * does NOT work: the indicator shares the pane's default y-axis,
+ * whose range is computed from the candles AND the indicator's
+ * values — VOL's minValue 0 drags the range to [0, maxPrice] and
+ * crushes the candles into a thin band at the top (verified by
+ * screenshot 2026-11-26). So VOL gets its own y-axis in the candle
+ * pane (no widget: no extra ticks on the right), with a stretched
+ * range: the default range is [0, maxVisibleVolume] and scaling `to`
+ * by VOL_AXIS_SCALE leaves bars + volume MAs in the bottom
+ * 1/VOL_AXIS_SCALE of the pane, TradingView-style. gap is 0 on this
+ * axis so the scale is exact (the default gap adds top 20% /
+ * bottom 10% on top of the range). The axis is created/removed
+ * together with the VOL indicator in the indicators effect below.
+ */
+const VOL_AXIS_ID = 'vol-axis';
+const VOL_AXIS_SCALE = 5;
+const volAxisCreateRange: AxisCreateRangeCallback = ({
+  defaultRange,
+}) => {
+  const from = defaultRange.from;
+  const to = defaultRange.to * VOL_AXIS_SCALE;
+  return {
+    from,
+    to,
+    range: to - from,
+    realFrom: from,
+    realTo: to,
+    realRange: to - from,
+    displayFrom: from,
+    displayTo: to,
+    displayRange: to - from,
+  };
+};
+
+/**
  * Range the context menu's 重設圖表檢視 restores. No default-range
  * constant exists in the codebase (page starts with activeRange null
  * and never calls setRange on mount); 1M is the middle preset —
@@ -268,21 +308,10 @@ const CANDLE_PANE_ID = 'candle_pane';
  */
 const DEFAULT_RESET_RANGE: RangeId = '1M';
 /**
- * Phase 1 step 3 — explicit interaction mode (Phase 0 §7.1). Only the
- * seven states that actually exist are listed. Crosshair is NOT a mode:
- * it is always-on display behaviour (legend follows the crosshair) and
- * never enters the state machine. Selecting (marquee / multi-select)
- * is not listed either: selection is a single `selected`, with no
- * marquee or Shift-add (Phase 0 §3.4).
+ * InteractionMode lives in lib/chart-interaction-mode.ts (Phase 3
+ * Step 6); re-exported here so existing importers keep working.
  */
-export type InteractionMode =
-  | 'Idle'
-  | 'Drawing'
-  | 'Selected'
-  | 'Moving'
-  | 'Resizing'
-  | 'ContextMenu'
-  | 'Editing';
+export type { InteractionMode } from '@/lib/chart-interaction-mode';
 /**
  * Wait for the library's own touch->click synthesis to select first
  * (B10, second timer). The library synthesises its tap handling after
@@ -303,124 +332,10 @@ const TOUCH_FALLBACK_WAIT_MS = 150;
  * set only there, cleared when mode leaves Selected.
  */
 const BAR_COMPAT_CLICK_SUPPRESS_MS = 300;
-/** Checkerboard behind translucent color swatches (shows opacity). */
-const CHECKER_BG = {
-  backgroundImage:
-    'linear-gradient(45deg, #9e9e9e 25%, transparent 25%), linear-gradient(-45deg, #9e9e9e 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #9e9e9e 75%), linear-gradient(-45deg, transparent 75%, #9e9e9e 75%)',
-  backgroundSize: '6px 6px',
-  backgroundPosition: '0 0, 0 3px, 3px -3px, -3px 0',
-  backgroundColor: '#f5f5f5',
-};
-
-/** Small 20px stroke icons for the floating bar (icon-only). */
-const BAR_ICON_PROPS = {
-  width: 20,
-  height: 20,
-  viewBox: '0 0 20 20',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.6,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
-};
-
-function BarLockIcon({ locked }: { locked: boolean }) {
-  return (
-    <svg {...BAR_ICON_PROPS} aria-hidden="true">
-      <rect x="4.5" y="9" width="11" height="8" rx="1.5" />
-      {locked ? (
-        <path d="M6.5 9V7a3.5 3.5 0 0 1 7 0v2" />
-      ) : (
-        <path d="M6.5 9V7a3.5 3.5 0 0 1 6.9-.8" />
-      )}
-    </svg>
-  );
-}
-
-function BarEyeIcon({ hidden }: { hidden: boolean }) {
-  return (
-    <svg {...BAR_ICON_PROPS} aria-hidden="true">
-      <path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z" />
-      <circle cx="10" cy="10" r="2.5" />
-      {hidden && <line x1="3.5" y1="3.5" x2="16.5" y2="16.5" />}
-    </svg>
-  );
-}
-
-/** Proper cog: toothed ring + centre hole. The old circle-and-spokes
- *  read as a sun on phones. */
-function BarGearIcon() {
-  return (
-    <svg {...BAR_ICON_PROPS} aria-hidden="true">
-      <circle cx="10" cy="10" r="6" />
-      <circle cx="10" cy="10" r="2.6" />
-      <g fill="currentColor" stroke="none">
-        <rect x="8.8" y="2" width="2.4" height="2.8" rx="0.6" />
-        <rect x="8.8" y="15.2" width="2.4" height="2.8" rx="0.6" />
-        <rect x="2" y="8.8" width="2.8" height="2.4" rx="0.6" />
-        <rect x="15.2" y="8.8" width="2.8" height="2.4" rx="0.6" />
-        <rect
-          x="13.4"
-          y="4.2"
-          width="2.4"
-          height="2.4"
-          rx="0.6"
-          transform="rotate(45 14.6 5.4)"
-        />
-        <rect
-          x="4.2"
-          y="4.2"
-          width="2.4"
-          height="2.4"
-          rx="0.6"
-          transform="rotate(45 5.4 5.4)"
-        />
-        <rect
-          x="4.2"
-          y="13.4"
-          width="2.4"
-          height="2.4"
-          rx="0.6"
-          transform="rotate(45 5.4 14.6)"
-        />
-        <rect
-          x="13.4"
-          y="13.4"
-          width="2.4"
-          height="2.4"
-          rx="0.6"
-          transform="rotate(45 14.6 14.6)"
-        />
-      </g>
-    </svg>
-  );
-}
-
-/** Template icon: 2×2 rounded grid (田), matching TV's template button. */
-function BarTemplateIcon() {
-  return (
-    <svg {...BAR_ICON_PROPS} aria-hidden="true">
-      <rect x="3.5" y="3.5" width="6" height="6" rx="1.5" />
-      <rect x="10.5" y="3.5" width="6" height="6" rx="1.5" />
-      <rect x="3.5" y="10.5" width="6" height="6" rx="1.5" />
-      <rect x="10.5" y="10.5" width="6" height="6" rx="1.5" />
-    </svg>
-  );
-}
-
-function BarTrashIcon() {
-  return (
-    <svg {...BAR_ICON_PROPS} aria-hidden="true">
-      <path d="M4 5.5h12M8 5.5V4h4v1.5M6.5 5.5l.8 10.5h5.4l.8-10.5M10 8.5v5" />
-    </svg>
-  );
-}
-
-
 /** Snapshot of one selected overlay for the floating edit bar and the
  *  settings dialog. Points/text/visibility/extend are read from the
  *  live overlay (extend is derived from the overlay name + point order). */
-interface SelectedOverlayState {
+export interface SelectedOverlayState {
   id: string;
   name: string;
   color: string;
@@ -719,176 +634,46 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   // ---- interaction mode state machine (Phase 1 step 3) ---------------
   // Single source of truth for the chart interaction mode (Phase 0
-  // §7.1). Refs only: a mode change must never re-render Chart
-  // (step 2 moved high-frequency updates out of React state; this
-  // must not move back). Every mode change goes through
-  // transitionMode / enterOverlayMode / exitOverlayMode below.
-  const modeRef = useRef<InteractionMode>('Idle');
-  /** True only between a measure draw ending and the click event that
-   *  follows it (set in onDrawEnd, consumed by handleContainerClick).
-   *  The library completes a draw on pointerup — the click event
-   *  arrives ~16ms later as a separate task — so the flag must survive
-   *  across tasks until that click; a microtask clear would erase it
-   *  too early (measured: probe-measure2.mjs, onDrawEnd ~1ms after
-   *  pointerup, click ~16ms after). It is cleared instead by the next
-   *  pointerdown on the container (see onContainerPointerDown): the
-   *  completing click's own pointerdown predates the draw end, so it
-   *  can never clear the flag early. A touch tap completes the draw
-   *  with no container click at all, so the flag simply waits for the
-   *  next real click — same as the old timestamp behaviour. */
-  const measureJustDrawnRef = useRef(false);
-  /** Mode before entering an overlay state (ContextMenu/Editing); the
-   *  overlay state restores it on close instead of assuming Idle. */
-  const previousModeRef = useRef<InteractionMode>('Idle');
-  /**
-   * Dev-only mode mirror for CDP verification (window.__pttMode /
-   * window.__pttModeLog, same pattern as __pttChartRenders in step 2).
-   * Production builds skip the window writes; the mode ref itself is
-   * real logic and always runs. Rejected transitions are logged too
-   * (ok: false) so a test run can assert the machine never refused a
-   * transition on the happy path.
-   */
-  const recordModeTransition = (
-    prev: InteractionMode,
-    next: InteractionMode,
-    reason: string,
-    ok: boolean,
-  ) => {
-    if (process.env.NODE_ENV === 'production') return;
-    const w = window as unknown as {
-      __pttMode?: InteractionMode;
-      __pttModeLog?: Array<{
-        from: InteractionMode;
-        to: InteractionMode;
-        reason: string;
-        t: number;
-        ok: boolean;
-      }>;
-    };
-    if (ok) w.__pttMode = next;
-    const log = w.__pttModeLog ?? [];
-    w.__pttModeLog = log;
-    log.push({ from: prev, to: next, reason, t: performance.now(), ok });
-    if (log.length > 200) log.splice(0, log.length - 200);
-  };
-  /**
-   * The single way the interaction mode changes (except overlay-state
-   * enter/exit, which have their own helpers for previousMode
-   * bookkeeping). Guards (Phase 0 §7.1):
-   * - Moving/Resizing only from Selected — or from Idle via the
-   *   implicit select at press-start: the library fires onSelected on
-   *   the click AFTER a drag, so a press that starts a drag is the
-   *   mode-level select — and only back to Selected.
-   * - Drawing <-> Selected never interconvert directly: the only
-   *   bridge is a draw end (Drawing -> Selected, via onDrawEnd ->
-   *   refreshSelected, fromDrawEnd) and an explicit tool arm
-   *   (Selected -> Drawing, via armOverlay, viaArm). fromDrawEnd
-   *   covers both draw completion and draw cancellation (Esc / disarm
-   *   returning to a selection that predates the draw).
-   * - Overlay states (ContextMenu/Editing) are entered/exited only
-   *   through enterOverlayMode/exitOverlayMode.
-   * A transition into Selected cancels a pending touch fallback timer:
-   * the chart's own synthesis selected something, so the fallback is
-   * moot. Leaving Selected clears the bar compat-click suppression.
-   * Returns false when the transition is rejected (caller keeps the
-   * old mode and must not proceed as if it had changed).
-   */
-  const transitionMode = (
-    next: InteractionMode,
-    reason: string,
-    opts?: { fromDrawEnd?: boolean; viaArm?: boolean },
-  ): boolean => {
-    const prev = modeRef.current;
-    if (prev === next) return true;
-    let ok = true;
-    if (next === 'ContextMenu' || next === 'Editing') ok = false;
-    else if (prev === 'ContextMenu' || prev === 'Editing') ok = false;
-    else if (
-      (next === 'Moving' || next === 'Resizing') &&
-      prev !== 'Selected' &&
-      prev !== 'Idle'
-    ) {
-      ok = false;
-    } else if (
-      (prev === 'Moving' || prev === 'Resizing') &&
-      next !== 'Selected'
-    ) {
-      ok = false;
-    } else if (
-      prev === 'Drawing' &&
-      next === 'Selected' &&
-      !opts?.fromDrawEnd
-    ) {
-      ok = false;
-    } else if (
-      prev === 'Selected' &&
-      next === 'Drawing' &&
-      !opts?.viaArm
-    ) {
-      ok = false;
-    }
-    recordModeTransition(prev, next, reason, ok);
-    if (!ok) return false;
-    if (next === 'Selected' && touchFallbackTimerRef.current) {
-      clearTimeout(touchFallbackTimerRef.current);
-      touchFallbackTimerRef.current = null;
-    }
-    if (prev === 'Selected' && next !== 'Selected') {
-      barIgnoreClicksUntilRef.current = 0;
-    }
-    modeRef.current = next;
-    return true;
-  };
-  /**
-   * Enter an overlay state (ContextMenu in step 4, Editing for the
-   * settings dialog). Records the mode we came from; exitOverlayMode
-   * restores it instead of assuming Idle. No nesting: entering an
-   * overlay state while already in one is rejected.
-   */
-  const enterOverlayMode = (
-    next: 'ContextMenu' | 'Editing',
-    reason: string,
-  ): boolean => {
-    const prev = modeRef.current;
-    if (prev === 'ContextMenu' || prev === 'Editing') {
-      recordModeTransition(prev, next, reason, false);
-      return false;
-    }
-    previousModeRef.current = prev;
-    modeRef.current = next;
-    recordModeTransition(prev, next, reason, true);
-    return true;
-  };
-  /**
-   * Exit an overlay state, restoring the mode from before it opened.
-   * The caller reconciles afterwards if the selection that mode
-   * assumed is gone (see closeDialog: a dialog can delete or hide
-   * its own selection).
-   */
-  const exitOverlayMode = (reason: string): boolean => {
-    const prev = modeRef.current;
-    if (prev !== 'ContextMenu' && prev !== 'Editing') {
-      recordModeTransition(prev, prev, reason, false);
-      return false;
-    }
-    const next = previousModeRef.current;
-    previousModeRef.current = 'Idle';
-    modeRef.current = next;
-    recordModeTransition(prev, next, reason, true);
-    return true;
-  };
-
+  // §7.1), owned by the InteractionModeController in
+  // lib/chart-interaction-mode.ts (Phase 3 Step 6). Refs only: a mode
+  // change must never re-render Chart (step 2 moved high-frequency
+  // updates out of React state; this must not move back). Every mode
+  // change goes through transitionMode / enterOverlayMode /
+  // exitOverlayMode below. Chart holds a single controller instance
+  // in a ref; the aliases keep every existing call site's name.
+  // The callbacks inject the two Selected side effects — the touch
+  // fallback timer and the floating-bar compat-click guard both stay
+  // refs in Chart (the guard is only read by the toolbar, Step 5).
+  const interactionModeRef = useRef<InteractionModeController | null>(null);
+  if (interactionModeRef.current === null) {
+    interactionModeRef.current = createInteractionModeController({
+      onEnterSelected: () => {
+        if (touchFallbackTimerRef.current) {
+          clearTimeout(touchFallbackTimerRef.current);
+          touchFallbackTimerRef.current = null;
+        }
+      },
+      onLeaveSelected: () => {
+        barIgnoreClicksUntilRef.current = 0;
+      },
+    });
+  }
+  const interactionMode = interactionModeRef.current;
+  const modeRef = interactionMode.modeRef;
+  const measureJustDrawnRef = interactionMode.measureJustDrawnRef;
+  const transitionMode = interactionMode.transitionMode;
+  const enterOverlayMode = interactionMode.enterOverlayMode;
+  const exitOverlayMode = interactionMode.exitOverlayMode;
   const [selected, setSelected] = useState<SelectedOverlayState | null>(null);
   const selectedRef = useRef<SelectedOverlayState | null>(null);
-  /** Which floating-bar popover is open, if any. */
-  const [openPanel, setOpenPanel] = useState<
-    'color' | 'lineStyle' | 'template' | null
-  >(null);
-  /** Overlay style templates, grouped by overlay name (tool type). */
+  /**
+   * Overlay style templates, grouped by overlay name (tool type).
+   * Mirror only: the DrawingSelectionToolbar owns the templates
+   * state (Step 5); Chart keeps this copy for the settings dialog,
+   * updated via onTemplatesChange.
+   */
   const [templates, setTemplates] =
     useState<OverlayTemplates>(() => persistence.loadTemplates());
-  /** Name typed for "save current style as template". */
-  const [templateName, setTemplateName] = useState('');
   /**
    * Object list (Phase 2 Step 5, G-07/G-08): panel open state, the
    * current projection (refreshed from readMergedList after every
@@ -904,6 +689,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   /** Floating bar element (used for click-outside popover detection). */
   const barRef = useRef<HTMLDivElement | null>(null);
+  /** Imperative handle of the floating bar (template apply for the dialog). */
+  const toolbarRef = useRef<DrawingSelectionToolbarHandle | null>(null);
   /** Object-list panel element (outside-click close). */
   const objectListPanelRef = useRef<HTMLDivElement | null>(null);
   /** Object-list toggle button (outside-click close excludes it). */
@@ -992,8 +779,8 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     selectedRef.current = s;
     setSelected(s);
     if (s === null) {
-      // Deselected: the bar goes away.
-      setOpenPanel(null);
+      // Deselected: the bar goes away (its open popover closes
+      // with it — the toolbar clears openPanel on selected=null).
       // Mode follows the selection, but only out of Selected: a drag
       // or an overlay state owns the mode until it exits (their exit
       // restores it themselves), and a draw in progress is unaffected
@@ -2883,6 +2670,15 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // (screenshot 2026-11-24). Hide it entirely; the legend follows
     // the crosshair instead (subscribed below).
     chart.setStyles({ candle: { tooltip: { showRule: 'none' } } });
+    // Same for indicator tooltips: the HTML legend already shows
+    // every indicator's values (read from the same computed results,
+    // following the crosshair), while the built-in tooltips duplicate
+    // them at each pane's top-left and overlap the legend — e.g. the
+    // MA60 value ghosting over the OHLC row (Ryan's screenshots
+    // 2026-11-26). This also covers the VOL tooltip, which would
+    // otherwise land in the candle pane now that VOL is overlaid
+    // there. Sub-pane (RSI/MACD) values stay visible via the legend.
+    chart.setStyles({ indicator: { tooltip: { showRule: 'none' } } });
 
     // Legend follows the crosshair (TradingView behaviour): while the
     // mouse hovers a candle the legend shows that candle; when the
@@ -3264,25 +3060,79 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
 
   // ---- indicators -------------------------------------------------------
 
+  /** Bumps after the indicators effect (re)creates indicators, so the
+   *  legend re-renders with the new calc results (see indicatorTick
+   *  on ChartLegend). The effect itself depends on [indicators] only,
+   *  so this bump cannot loop. */
+  const [indicatorTick, setIndicatorTick] = useState(0);
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     const desired = new Set(indicators);
     for (const ind of chart.getIndicators()) {
-      if (!desired.has(ind.name)) chart.removeIndicator({ name: ind.name });
-    }
-    const current = new Set(chart.getIndicators().map((i) => i.name));
-    for (const name of indicators) {
-      if (!current.has(name)) {
-        // isStack=true is required for main-pane indicators: addIndicator
-        // clears the other indicators in the pane when isStack is false,
-        // so MA/EMA/BOLL sharing candle_pane would delete each other.
-        chart.createIndicator(
-          isMainPaneIndicator(name) ? { name, paneId: CANDLE_PANE_ID } : name,
-          isMainPaneIndicator(name),
-        );
+      const shouldBeMain = isMainPaneIndicator(ind.name);
+      const isMain = ind.paneId === CANDLE_PANE_ID;
+      // Remove when undesired OR in the wrong pane: flipping an
+      // indicator's mainPane flag (e.g. VOL moving from its own pane
+      // into the candle pane) otherwise leaves the existing instance
+      // in its old pane forever — the creation loop below only adds
+      // names that are absent. Removing an indicator also drops its
+      // now-empty pane.
+      if (!desired.has(ind.name) || shouldBeMain !== isMain) {
+        chart.removeIndicator({ name: ind.name });
       }
     }
+    const current = new Set(chart.getIndicators().map((i) => i.name));
+    // VOL needs its own y-axis in the candle pane (see VOL_AXIS_ID
+    // above): create it before the VOL indicator, drop it when VOL
+    // is off. getYAxes filters by pane + id; createYAxis with an
+    // existing id would just re-override it, so the existence check
+    // keeps this a no-op on every other indicators change.
+    const wantVol = desired.has('VOL');
+    const volAxisExists = chart
+      .getYAxes({ paneId: CANDLE_PANE_ID })
+      .some((a) => a.id === VOL_AXIS_ID);
+    if (wantVol && !volAxisExists) {
+      chart.createYAxis({
+        id: VOL_AXIS_ID,
+        paneId: CANDLE_PANE_ID,
+        position: 'right',
+        inside: true,
+        needWidget: false,
+        gap: { top: 0, bottom: 0 },
+        createRange: volAxisCreateRange,
+      });
+    } else if (!wantVol && volAxisExists) {
+      chart.removeYAxis({ id: VOL_AXIS_ID });
+    }
+    for (const name of indicators) {
+      if (!current.has(name)) {
+        if (name === 'VOL') {
+          // Own y-axis (see above): without it VOL shares the price
+          // axis and crushes the candles.
+          chart.createIndicator(
+            { name, paneId: CANDLE_PANE_ID, yAxisId: VOL_AXIS_ID },
+            true,
+          );
+        } else {
+          // isStack=true is required for main-pane indicators: addIndicator
+          // clears the other indicators in the pane when isStack is false,
+          // so MA/EMA/BOLL sharing candle_pane would delete each other.
+          chart.createIndicator(
+            isMainPaneIndicator(name)
+              ? { name, paneId: CANDLE_PANE_ID }
+              : name,
+            isMainPaneIndicator(name),
+          );
+        }
+      }
+    }
+    // Re-render the legend after (re)creating indicators: their calc
+    // results only exist now, and the render carrying the new
+    // `indicators` prop ran before this effect (see indicatorTick).
+    // (setState-in-effect is fine here: the effect deps are
+    // [indicators] only, so this cannot loop.)
+    setIndicatorTick((t) => t + 1);
   }, [indicators]);
 
   // Clicking empty chart space dismisses a finished measure overlay.
@@ -3474,18 +3324,6 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     }, TOUCH_FALLBACK_WAIT_MS);
   };
 
-  // ---- floating edit bar: popovers --------------------------------
-
-  /** Close any open floating-bar popover when clicking outside the bar. */
-  useEffect(() => {
-    if (openPanel === null) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (!barRef.current?.contains(e.target as Node)) setOpenPanel(null);
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [openPanel]);
-
   /** Close the object-list panel on a pointer press outside it
    *  (the toggle button itself is excluded: its click toggles).
    *  The floating bar is excluded too: it edits the selection the
@@ -3503,75 +3341,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [objectListOpen]);
 
-  const togglePanel = (
-    panel: 'color' | 'lineStyle' | 'template',
-  ) => {
-    setOpenPanel((cur) => (cur === panel ? null : panel));
-  };
-
-  /** Apply a saved template's style to the selected overlay. */
-  const applyTemplate = (tpl: OverlayTemplate) => {
-    applyEdit({
-      color: tpl.style.color,
-      opacity: tpl.style.opacity,
-      size: tpl.style.size,
-      style: tpl.style.style,
-      fillOpacity: tpl.style.fillOpacity,
-    });
-    setOpenPanel(null);
-  };
-
-  /** Save the selected overlay's current style as a template. A
-   *  duplicate name overwrites the existing template in place. */
-  const saveTemplate = () => {
-    const cur = selectedRef.current;
-    if (!cur) return;
-    const name = templateName.trim();
-    if (!name) return;
-    const style: LastOverlayStyle = {
-      color: cur.color,
-      opacity: cur.opacity,
-      size: cur.size,
-      style: cur.style,
-      fillOpacity: cur.fillOpacity,
-    };
-    setTemplates((prev) => {
-      const group = prev[cur.name] ?? [];
-      const idx = group.findIndex((t) => t.name === name);
-      const nextGroup =
-        idx >= 0
-          ? group.map((t, i) => (i === idx ? { name, style } : t))
-          : [...group, { name, style }];
-      const next = { ...prev, [cur.name]: nextGroup };
-      persistence.saveTemplates(next);
-      return next;
-    });
-    setTemplateName('');
-  };
-
-  /** Delete a saved template from the selected overlay's group. */
-  const deleteTemplate = (name: string) => {
-    const cur = selectedRef.current;
-    if (!cur) return;
-    setTemplates((prev) => {
-      const group = (prev[cur.name] ?? []).filter((t) => t.name !== name);
-      const next = { ...prev };
-      if (group.length > 0) next[cur.name] = group;
-      else delete next[cur.name];
-      persistence.saveTemplates(next);
-      return next;
-    });
-  };
-
   // Legend (OHLC + indicators + countdown) lives in the memoized
   // ChartLegend component (components/ChartLegend.tsx): hover updates
   // re-render only that subtree, never this whole component
   // (Phase 1 step 2b).
-
-  // Floating-bar position: one compact icon bar, docked at the
-  // bottom centre of the chart on every screen width (desktop now
-  // matches mobile). It covers the bottom ~50px of the chart while
-  // open; popovers open upward from it.
 
   return (
     <div ref={wrapperRef} className="relative h-full w-full">
@@ -3601,6 +3374,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         upColor={appearance.candleUpColor}
         downColor={appearance.candleDownColor}
         labelColor={appearance.axisTextColor}
+        indicatorTick={indicatorTick}
       />
       {/* Top-right corner: chart settings gear + object list toggle
           (Phase 2 Step 5, G-07/G-08). The legend owns the top-left
@@ -3692,261 +3466,28 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           )}
         </div>
       )}
-      {selected !== null && (
-        <div
-          ref={barRef}
-          data-testid="floating-bar"
-          onClickCapture={(e) => {
-            // Swallow the compatibility click from the tap that ended
-            // the draw (see barIgnoreClicksUntilRef, owned by the
-            // Drawing -> Selected transition): the bar renders under
-            // the finger before that click lands.
-            if (Date.now() < barIgnoreClicksUntilRef.current) {
-              e.stopPropagation();
-              e.preventDefault();
-            }
-          }}
-          className="absolute z-20 flex max-w-full flex-nowrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg"
-          style={{ left: '50%', bottom: 8, transform: 'translateX(-50%)' }}
-        >
-          {/* A standalone text annotation has no line to style: hide
-              the colour / line-style controls for it. */}
-          {selected.name !== TEXT_ANNOTATION_NAME && (
-            <>
-              {/* Template button (first, icon-only). A text
-                  annotation has no line to style, so it gets no
-                  template button either (same as the colour /
-                  line-style controls). */}
-              <button
-                title="範本"
-                aria-label="範本"
-                onClick={() => togglePanel('template')}
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 ${
-                  openPanel === 'template' ? 'bg-white/10' : ''
-                }`}
-              >
-                <BarTemplateIcon />
-              </button>
-              <button
-                title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
-                aria-label="顏色"
-                onClick={() => togglePanel('color')}
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border hover:border-white/50 ${
-                  openPanel === 'color'
-                    ? 'border-white ring-1 ring-white'
-                    : 'border-white/20'
-                }`}
-              >
-                <span
-                  className="block h-4 w-6 rounded-[2px]"
-                  style={CHECKER_BG}
-                >
-                  <span
-                    className="block h-full w-full rounded-[2px]"
-                    style={{
-                      backgroundColor: hexToRgba(
-                        selected.color,
-                        selected.opacity,
-                      ),
-                    }}
-                  />
-                </span>
-              </button>
-              {/* Icon-only line style (no label, no widths). */}
-              <button
-                title="線形"
-                aria-label="線形"
-                onClick={() => togglePanel('lineStyle')}
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 ${
-                  openPanel === 'lineStyle' ? 'bg-white/10' : ''
-                }`}
-              >
-                <span
-                  className="block w-6 border-t-2"
-                  style={{
-                    borderTopColor: hexToRgba(
-                      selected.color,
-                      selected.opacity,
-                    ),
-                    borderTopStyle:
-                      selected.style === 'solid'
-                        ? 'solid'
-                        : selected.style === 'dashed'
-                          ? 'dashed'
-                          : 'dotted',
-                  }}
-                />
-              </button>
-            </>
-          )}
-          {/* Icon-only lock / hide / settings / delete. */}
-          <button
-            title={selected.lock ? '已鎖定（點按解鎖）' : '鎖定（點按鎖定）'}
-            aria-label={selected.lock ? '已鎖定' : '鎖定'}
-            onClick={() => applyEdit({ lock: !selected.lock })}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
-          >
-            <BarLockIcon locked={selected.lock} />
-          </button>
-          <button
-            title={selected.visible ? '隱藏' : '顯示'}
-            aria-label={selected.visible ? '隱藏' : '顯示'}
-            onClick={() => applyEdit({ visible: !selected.visible })}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
-          >
-            <BarEyeIcon hidden={!selected.visible} />
-          </button>
-          <button
-            title="設定"
-            aria-label="設定"
-            onClick={() =>
-              openDialogFor(
-                selected.id,
-                selected.name === TEXT_ANNOTATION_NAME ? 'text' : 'style',
-              )
-            }
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
-          >
-            <BarGearIcon />
-          </button>
-          <button
-            title="刪除"
-            aria-label="刪除"
-            onClick={deleteSelected}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm text-[#ef5350] hover:bg-white/10"
-          >
-            <BarTrashIcon />
-          </button>
-          <button
-            onClick={deselect}
-            aria-label="取消選取"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
-          >
-            ✕
-          </button>
-          {openPanel === 'color' && (
-            <div className="absolute bottom-full left-0 z-40 mb-1">
-              <ColorPicker
-                color={selected.color}
-                opacity={selected.opacity}
-                // Picking a color closes the panel (same as the line-style
-                // panel): leaving it open covers the chart and swallows
-                // the next click on the canvas.
-                onColorChange={(c) => {
-                  applyEdit({ color: c });
-                  setOpenPanel(null);
-                }}
-                onOpacityChange={(op) => applyEdit({ opacity: op }, false)}
-                onOpacityStart={() => {
-                  if (!sliderHistoryPushedRef.current) {
-                    sliderHistoryPushedRef.current = true;
-                    pushHistory();
-                  }
-                }}
-                onOpacityEnd={() => {
-                  sliderHistoryPushedRef.current = false;
-                }}
-              />
-            </div>
-          )}
-          {openPanel === 'lineStyle' && (
-            <div className="absolute bottom-full left-0 z-40 mb-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
-              {LINE_STYLE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.id}
-                  onClick={() => {
-                    applyEdit({ style: opt.id });
-                    setOpenPanel(null);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
-                >
-                  <span
-                    className="block w-8 border-t-2"
-                    style={{
-                      borderTopColor: '#d1d4dc',
-                      borderTopStyle:
-                        opt.id === 'solid'
-                          ? 'solid'
-                          : opt.id === 'dashed'
-                            ? 'dashed'
-                            : 'dotted',
-                    }}
-                  />
-                  <span>{opt.label}</span>
-                  {selected.style === opt.id && (
-                    <span className="ml-auto text-[#2962ff]">✓</span>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-          {openPanel === 'template' && (
-            <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-2 shadow-xl">
-              <div className="mb-1 px-1 text-xs font-semibold text-[#d1d4dc]">
-                範本
-              </div>
-              {(templates[selected.name] ?? []).length === 0 ? (
-                <div className="px-1 py-2 text-xs text-[#80858f]">
-                  尚未儲存範本
-                </div>
-              ) : (
-                <div className="max-h-48 overflow-y-auto">
-                  {(templates[selected.name] ?? []).map((tpl) => (
-                    <div
-                      key={tpl.name}
-                      className="flex items-center gap-1 rounded-sm px-1 py-1 hover:bg-white/10"
-                    >
-                      <button
-                        onClick={() => applyTemplate(tpl)}
-                        title={`套用範本 ${tpl.name}`}
-                        className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
-                      >
-                        <span
-                          className="block h-4 w-4 shrink-0 rounded-[2px]"
-                          style={{
-                            backgroundColor: hexToRgba(
-                              tpl.style.color,
-                              tpl.style.opacity,
-                            ),
-                          }}
-                        />
-                        <span className="truncate text-xs">{tpl.name}</span>
-                      </button>
-                      <button
-                        onClick={() => deleteTemplate(tpl.name)}
-                        title={`刪除範本 ${tpl.name}`}
-                        aria-label={`刪除範本 ${tpl.name}`}
-                        className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-[#ef5350] hover:bg-white/10"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="mt-1 flex items-center gap-1 border-t border-[#2a2e39] pt-2">
-                <input
-                  value={templateName}
-                  onChange={(e) => setTemplateName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') saveTemplate();
-                  }}
-                  placeholder="範本名稱"
-                  aria-label="範本名稱"
-                  className="min-w-0 flex-1 rounded-sm border border-white/20 bg-transparent px-2 py-1.5 text-xs text-[#d1d4dc] placeholder:text-[#80858f] focus:border-[#2962ff] focus:outline-none"
-                />
-                <button
-                  onClick={saveTemplate}
-                  disabled={templateName.trim() === ''}
-                  className="shrink-0 rounded-sm bg-[#2962ff] px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
-                >
-                  儲存
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      <DrawingSelectionToolbar
+        ref={toolbarRef}
+        selected={selected}
+        barRef={barRef}
+        barIgnoreClicksUntilRef={barIgnoreClicksUntilRef}
+        onApplyEdit={applyEdit}
+        onDelete={deleteSelected}
+        onDeselect={deselect}
+        onOpenDialog={openDialogFor}
+        onOpacitySliderStart={() => {
+          if (!sliderHistoryPushedRef.current) {
+            sliderHistoryPushedRef.current = true;
+            pushHistory();
+          }
+        }}
+        onOpacitySliderEnd={() => {
+          sliderHistoryPushedRef.current = false;
+        }}
+        loadTemplates={() => persistence.loadTemplates()}
+        saveTemplates={(next) => persistence.saveTemplates(next)}
+        onTemplatesChange={setTemplates}
+      />
       {contextMenu !== null && (
         <>
           {/* Transparent backdrop: swallows pointer/wheel events so
@@ -4044,7 +3585,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
               (t) => t.name === name,
             );
             if (!tpl) return;
-            applyTemplate(tpl);
+            toolbarRef.current?.applyTemplate(tpl);
             closeDialog();
           }}
         />

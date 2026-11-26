@@ -82,6 +82,16 @@ interface ChartLegendProps {
   downColor?: string;
   /** Muted label colour (axis text colour). */
   labelColor?: string;
+  /**
+   * Bumps whenever the indicators effect (re)creates indicators, so
+   * the memo re-renders after the new indicator's calc results exist.
+   * Without it, toggling an indicator on leaves its legend row
+   * missing until the next hover/prop change: the render that
+   * carries the new `indicators` prop runs BEFORE the effect that
+   * creates the indicator, and memo then blocks every later render
+   * whose props are unchanged. Not displayed; only breaks the memo.
+   */
+  indicatorTick?: number;
 }
 
 /**
@@ -232,10 +242,12 @@ const ChartLegend = memo(function ChartLegend({
       {legendIndicators.map((row) => (
         <div
           key={row.name}
-          // Mobile: hide the VOL row — it collides with the canvas
-          // volume labels, and the volume pane below already shows
-          // the VOL values. Desktop keeps it.
-          className={`text-[11px]${row.name === 'VOL' ? ' hidden md:block' : ''}`}
+          // The VOL row shows on mobile too now: VOL lives in the
+          // candle pane (no separate volume pane below any more) and
+          // the built-in canvas indicator tooltips are hidden, so
+          // there is nothing left for it to collide with — and the
+          // legend is the only place VOL numbers appear.
+          className="text-[11px]"
           data-testid={`legend-indicator-${row.name}`}
         >
           <span style={{ color: labelColor }}>{row.name} </span>

@@ -3,6 +3,13 @@
 html,
 body {
   height: 100%;
+  /* No rubber-band / scroll chaining: the page is a fixed h-dvh
+     terminal, never a scrolling document. On real iOS Safari a
+     scrollable page lets Safari claim vertical drags as scrolls
+     (which killed the capsule swipe) — this removes the scroll
+     chain entirely. Inner scroll containers (watchlist, sheets)
+     keep their own scrolling. */
+  overscroll-behavior: none;
 }
 
 body {

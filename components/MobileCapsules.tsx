@@ -19,36 +19,36 @@
  *   the left rail ends above it (its undo + "⋯" buttons can no
  *   longer be clipped by a capsule).
  *
- * Swipe — why the old one failed on a real iPhone:
- *   The old zones used React synthetic onTouchStart/onTouchEnd.
- *   React attaches touch listeners as PASSIVE at the root, and the
- *   code never handled touchmove at all — so nothing ever called
- *   preventDefault, and the touch target (the inner <button>) had
- *   touch-action: auto. On real iOS Safari a vertical drag starting
- *   on that button is claimed by Safari as a page scroll /
- *   overscroll (h-dvh + the collapsing URL bar make the page
- *   rubber-bandable), Safari fires touchcancel, and onTouchEnd
- *   never arrives — the swipe is silently dropped. Headless Chrome
- *   cannot reproduce it: the emulated page has no scrollable
- *   overflow and Chrome honours the wrapper's touch-action: none,
- *   so CDP swipes passed (verified: 3/3 swipes + tap, zero
- *   touchcancel, zero scroll) while the real phone did nothing.
- *   The fix is native, non-passive listeners: touchstart records
- *   the start, touchmove calls preventDefault once the drag is
- *   clearly vertical (claiming the gesture before Safari can),
- *   touchend fires the swipe, and touchcancel completes it from
- *   the last move position instead of dropping it. touch-action:
- *   none is set on the zone AND the inner button. Taps still work:
- *   a move < 10px never prevents anything, so the click proceeds;
- *   a swipe's synthetic click is still swallowed by the capture
- *   guard.
+ * Swipe — round 1 (native non-passive touch + preventDefault +
+ * touchcancel completes the swipe) passed CDP but STILL failed on
+ * Ryan's real iPhone (16:42 screenshot: new layout live, swipe
+ * dead). Re-diagnosis, 2026-11-26 round 2:
+ *   1. Prime suspect — no `viewport-fit=cover` (layout.tsx had no
+ *      viewport export): env(safe-area-inset-bottom) is 0 without
+ *      it, so the bar's safe-area padding collapsed to 8px; and
+ *      h-dvh can exceed the safe viewport, leaving the page
+ *      scrollable by ~one safe-area height. Result: capsules half
+ *      under the home indicator ("hanging outside the window") AND
+ *      a scrollable page gives Safari a scroll gesture to claim.
+ *      Fixed in layout.tsx (viewportFit: 'cover') + globals.css
+ *      (overscroll-behavior: none) + a larger bottom margin here.
+ *   2. Mechanism hardened anyway: Pointer Events + setPointerCapture
+ *      + touch-action: none, threshold 30px -> 20px. Pointer events
+ *      do not depend on the touch passive/preventDefault dance at
+ *      all, and capture keeps the drag on the zone even when the
+ *      finger slides off the 48px-tall capsule.
+ *   3. Ground truth: ?debug-touch=1 shows a live overlay (window
+ *      vs zone event counts, last dy, swipe count, scrollHeight vs
+ *      innerHeight) — if it still fails on the real phone, Ryan's
+ *      screenshot of the overlay tells us exactly where the gesture
+ *      dies instead of another round of guessing.
  *
  * All sheets are bottom sheets (backdrop + drag handle), mobile-only
  * (`md:hidden`), portalled to document.body. Nothing here renders on
  * desktop.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
   CHART_TYPES,
@@ -61,8 +61,10 @@ import {
   type Interval,
 } from '@/lib/types';
 
-/** Vertical swipe threshold (px) and tap threshold (px). */
-const SWIPE_MIN_DY = 30;
+/** Vertical swipe threshold (px) and tap threshold (px). 20px: the
+ *  capsules are only 48px tall, so a natural flick on one is short;
+ *  30px (round 1) could silently swallow real swipes. */
+const SWIPE_MIN_DY = 20;
 const TAP_MAX_MOVE = 10;
 /** A click arriving this soon after a swipe is the swipe's own
  *  synthetic click — swallow it so a swipe never also taps. */
@@ -202,24 +204,170 @@ function MobileSheet({
 }
 
 /**
- * Native vertical-swipe handling for one zone. Swipe up calls
- * onUp, swipe down calls onDown; a short move (< 10px) is a tap
- * and the click goes through untouched. A swipe's synthetic click
- * is swallowed in the capture phase so a swipe never also taps.
+ * Touch/pointer diagnostic (?debug-touch=1). A module-level store so
+ * the native listeners (which live outside React) can record into it
+ * and the overlay can read it via useSyncExternalStore. Counters are
+ * cheap integers, recorded always; the overlay only renders when the
+ * URL param is present, so normal use is unaffected.
  *
- * Native listeners (not React synthetic ones): React attaches
- * touch handlers as passive at the root, so a React onTouchMove
- * could never preventDefault — and iOS Safari claims an
- * un-prevented vertical drag as a page scroll, fires touchcancel,
- * and the swipe dies. The touchmove listener here is non-passive
- * and calls preventDefault once the drag is clearly vertical.
- * The hook returns nothing and attaches everything (including the
- * capture-phase click guard that swallows a swipe's synthetic
- * click) in an effect, so no ref-derived value is ever read
- * during render.
+ * Reading it on a real phone answers, in order:
+ *   win T/P counts stay 0 while swiping  -> the gesture never reaches
+ *     the page at all (browser/OS level).
+ *   win counts rise, zone P counts stay 0 -> the zone is not the
+ *     touch target (something covers it / wrong element).
+ *   zone P counts rise, swipes stay 0    -> threshold / direction
+ *     logic, or pointercancel before pointerup.
+ *   scrollH > innerH or scrollY > 0      -> the page scrolls, and
+ *     Safari has a scroll gesture to claim.
  */
-function useVerticalSwipe(
+interface ZoneDebug {
+  /** pointerdown / move / up / cancel on this zone. */
+  pd: number;
+  pm: number;
+  pu: number;
+  pc: number;
+  /** Last move dy (px, signed), whether the drag was claimed. */
+  lastDy: number | null;
+  claimed: boolean;
+  /** Swipes actually fired, and the last direction. */
+  swipes: number;
+  lastSwipe: string;
+  /** Tag of the last pointerdown target. */
+  lastTarget: string;
+}
+interface TouchDebugState {
+  win: {
+    ts: number;
+    tm: number;
+    te: number;
+    tc: number;
+    pd: number;
+    pm: number;
+    pu: number;
+    pc: number;
+    lastTarget: string;
+  };
+  symbol: ZoneDebug;
+  interval: ZoneDebug;
+  scroll: { events: number; maxY: number };
+  geo: {
+    scrollH: number;
+    innerH: number;
+    visualH: number;
+    scrollY: number;
+    barPadBottom: string;
+  };
+}
+const zeroZone = (): ZoneDebug => ({
+  pd: 0,
+  pm: 0,
+  pu: 0,
+  pc: 0,
+  lastDy: null,
+  claimed: false,
+  swipes: 0,
+  lastSwipe: '-',
+  lastTarget: '-',
+});
+const touchDebugState: TouchDebugState = {
+  win: {
+    ts: 0,
+    tm: 0,
+    te: 0,
+    tc: 0,
+    pd: 0,
+    pm: 0,
+    pu: 0,
+    pc: 0,
+    lastTarget: '-',
+  },
+  symbol: zeroZone(),
+  interval: zeroZone(),
+  scroll: { events: 0, maxY: 0 },
+  geo: { scrollH: 0, innerH: 0, visualH: 0, scrollY: 0, barPadBottom: '-' },
+};
+let touchDebugVersion = 0;
+const touchDebugListeners = new Set<() => void>();
+function touchDebugEmit() {
+  touchDebugVersion += 1;
+  touchDebugListeners.forEach((fn) => fn());
+}
+function touchDebugSubscribe(fn: () => void) {
+  touchDebugListeners.add(fn);
+  return () => {
+    touchDebugListeners.delete(fn);
+  };
+}
+function touchDebugSnapshot() {
+  return touchDebugVersion;
+}
+function targetLabel(t: EventTarget | null): string {
+  const el = t as HTMLElement | null;
+  if (!el || !el.tagName) return 'none';
+  const tid =
+    typeof el.getAttribute === 'function'
+      ? el.getAttribute('data-testid')
+      : null;
+  return el.tagName.toLowerCase() + (tid ? `#${tid}` : '');
+}
+
+/**
+ * Live diagnostic overlay (gated by ?debug-touch=1, mobile only).
+ * pointer-events-none so it can never eat a touch itself.
+ */
+function TouchDebugOverlay() {
+  useSyncExternalStore(touchDebugSubscribe, touchDebugSnapshot);
+  const s = touchDebugState;
+  return (
+    <div
+      className="pointer-events-none fixed left-2 top-16 z-[60] max-w-[calc(100vw-1rem)] rounded-lg bg-black/85 p-2 font-mono text-[10px] leading-relaxed text-[#7ee787] md:hidden"
+      data-testid="touch-debug-overlay"
+    >
+      <div className="font-bold text-white">touch-debug ?debug-touch=1</div>
+      <div>
+        win T {s.win.ts}/{s.win.tm}/{s.win.te}/{s.win.tc} P{' '}
+        {s.win.pd}/{s.win.pm}/{s.win.pu}/{s.win.pc}
+      </div>
+      <div>win target: {s.win.lastTarget}</div>
+      <div>
+        sym P {s.symbol.pd}/{s.symbol.pm}/{s.symbol.pu}/{s.symbol.pc} dy=
+        {s.symbol.lastDy ?? '-'} claim={s.symbol.claimed ? 'Y' : 'n'} sw=
+        {s.symbol.swipes} {s.symbol.lastSwipe}
+      </div>
+      <div>
+        int P {s.interval.pd}/{s.interval.pm}/{s.interval.pu}/{s.interval.pc}{' '}
+        dy={s.interval.lastDy ?? '-'} claim={s.interval.claimed ? 'Y' : 'n'}{' '}
+        sw={s.interval.swipes} {s.interval.lastSwipe}
+      </div>
+      <div>
+        scrollH {s.geo.scrollH} innerH {s.geo.innerH} visH {s.geo.visualH}{' '}
+        scrollY {s.geo.scrollY} scrollEv {s.scroll.events} maxY{' '}
+        {s.scroll.maxY}
+      </div>
+      <div>bar padB {s.geo.barPadBottom}</div>
+    </div>
+  );
+}
+
+/**
+ * Pointer-events vertical swipe for one zone. Swipe up calls onUp,
+ * swipe down calls onDown; a short move (< 10px) is a tap and the
+ * click goes through untouched. A swipe's synthetic click is
+ * swallowed in the capture phase so a swipe never also taps.
+ *
+ * Why pointer events (round 2): they do not depend on the touch
+ * passive/preventDefault dance at all. With touch-action: none on
+ * the zone and the inner button, the browser takes no default
+ * gesture; setPointerCapture keeps the drag on the zone even when
+ * the finger slides off the 48px-tall capsule; pointercancel
+ * completes the swipe from the last move position instead of
+ * dropping it. Native listeners (not React synthetic ones): React
+ * attaches touch handlers as passive at the root, and pointer
+ * handlers attached here run on the element itself.
+ */
+function usePointerSwipe(
   ref: React.RefObject<HTMLDivElement | null>,
+  debugKey: 'symbol' | 'interval',
   {
     onSwipeUp,
     onSwipeDown,
@@ -238,45 +386,64 @@ function useVerticalSwipe(
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    let start: { x: number; y: number } | null = null;
+    const dbg = touchDebugState[debugKey];
+    let start: { x: number; y: number; id: number } | null = null;
     let claimed = false;
-    const onTouchStart = (e: TouchEvent) => {
-      const t = e.touches[0];
-      start = { x: t.clientX, y: t.clientY };
+    const onPointerDown = (e: PointerEvent) => {
+      if (start) return; // one finger at a time
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        // Pointer already gone; the drag still tracks by pointerId.
+      }
+      start = { x: e.clientX, y: e.clientY, id: e.pointerId };
       claimed = false;
+      dbg.pd += 1;
+      dbg.lastTarget = targetLabel(e.target);
+      touchDebugEmit();
     };
-    const onTouchMove = (e: TouchEvent) => {
-      if (!start) return;
-      const t = e.touches[0];
-      const dx = t.clientX - start.x;
-      const dy = t.clientY - start.y;
+    const onPointerMove = (e: PointerEvent) => {
+      if (!start || e.pointerId !== start.id) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      dbg.pm += 1;
+      dbg.lastDy = Math.round(dy);
       if (
         !claimed &&
         Math.abs(dy) > TAP_MAX_MOVE &&
         Math.abs(dy) > Math.abs(dx)
       ) {
-        // Clearly a vertical drag: claim the gesture before Safari
-        // can take it over as a page scroll.
         claimed = true;
       }
-      if (claimed) e.preventDefault();
+      dbg.claimed = claimed;
+      touchDebugEmit();
     };
-    const finish = (e: TouchEvent) => {
+    const finish = (e: PointerEvent, cancelled: boolean) => {
       const s = start;
       start = null;
-      claimed = false;
-      if (!s) return;
-      const t = e.changedTouches[0];
-      if (!t) return;
-      const dx = t.clientX - s.x;
-      const dy = t.clientY - s.y;
+      if (cancelled) dbg.pc += 1;
+      else dbg.pu += 1;
+      if (!s) {
+        touchDebugEmit();
+        return;
+      }
+      const dx = e.clientX - s.x;
+      const dy = e.clientY - s.y;
       if (Math.abs(dy) >= SWIPE_MIN_DY && Math.abs(dy) > Math.abs(dx)) {
         lastSwipeAt.current = Date.now();
+        dbg.swipes += 1;
+        dbg.lastSwipe = dy < 0 ? 'up' : 'down';
         if (dy < 0) cbRef.current.onSwipeUp();
         else cbRef.current.onSwipeDown();
       }
       // < TAP_MAX_MOVE total movement = a tap: the click proceeds.
+      touchDebugEmit();
     };
+    const onPointerUp = (e: PointerEvent) => finish(e, false);
+    // pointercancel (browser taking the gesture, an alert, …) still
+    // completes the swipe from the last move position instead of
+    // silently dropping it.
+    const onPointerCancel = (e: PointerEvent) => finish(e, true);
     // Capture-phase click guard: eat the synthetic click that
     // follows a swipe, so a swipe never also taps.
     const onClickCapture = (e: MouseEvent) => {
@@ -285,22 +452,19 @@ function useVerticalSwipe(
         e.stopPropagation();
       }
     };
-    el.addEventListener('touchstart', onTouchStart, { passive: true });
-    el.addEventListener('touchmove', onTouchMove, { passive: false });
-    el.addEventListener('touchend', finish, { passive: true });
-    // touchcancel (Safari taking the gesture, an alert, …) still
-    // completes the swipe from the last move position instead of
-    // silently dropping it.
-    el.addEventListener('touchcancel', finish, { passive: true });
+    el.addEventListener('pointerdown', onPointerDown);
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerCancel);
     el.addEventListener('click', onClickCapture, { capture: true });
     return () => {
-      el.removeEventListener('touchstart', onTouchStart);
-      el.removeEventListener('touchmove', onTouchMove);
-      el.removeEventListener('touchend', finish);
-      el.removeEventListener('touchcancel', finish);
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('pointermove', onPointerMove);
+      el.removeEventListener('pointerup', onPointerUp);
+      el.removeEventListener('pointercancel', onPointerCancel);
       el.removeEventListener('click', onClickCapture, { capture: true });
     };
-  }, [ref]);
+  }, [ref, debugKey]);
 }
 
 const CAPSULE_BG = 'border border-[#2a2e39] bg-[#131722]/90 shadow-lg backdrop-blur';
@@ -359,8 +523,9 @@ export function MobileTopPill({
  * renders it under the chart row). Left capsule [symbol | interval]
  * is flexible width, both zones vertically swipeable; right capsule
  * [ƒx | gear | ⋯] is compact. The bar's bottom padding is the
- * home-indicator safe area, so the capsules never sit under it.
- * Hidden on desktop (md:hidden).
+ * home-indicator safe area plus a margin (viewport-fit=cover makes
+ * the env() real), so the capsules sit fully inside the visible
+ * area, never under the home indicator. Hidden on desktop (md:hidden).
  */
 export default function MobileBottomBar({
   symbol,
@@ -406,56 +571,169 @@ export default function MobileBottomBar({
 
   const symbolZoneRef = useRef<HTMLDivElement | null>(null);
   const intervalZoneRef = useRef<HTMLDivElement | null>(null);
-  useVerticalSwipe(symbolZoneRef, {
+  usePointerSwipe(symbolZoneRef, 'symbol', {
     onSwipeUp: () => cycleSymbol(1),
     onSwipeDown: () => cycleSymbol(-1),
   });
-  useVerticalSwipe(intervalZoneRef, {
+  usePointerSwipe(intervalZoneRef, 'interval', {
     onSwipeUp: () => cycleInterval(1),
     onSwipeDown: () => cycleInterval(-1),
   });
 
+  // Touch diagnostic overlay, gated by ?debug-touch=1 (read once on
+  // mount, client-only — useSearchParams would need a Suspense
+  // boundary). Off by default: nothing renders, nothing listens.
+  const [debugTouch, setDebugTouch] = useState(false);
+  /* eslint-disable react-hooks/set-state-in-effect -- one-time mount
+     sync from the URL query string (an external system); a lazy
+     initializer would read window during SSR and mismatch hydration. */
+  useEffect(() => {
+    setDebugTouch(
+      new URLSearchParams(window.location.search).get('debug-touch') ===
+        '1',
+    );
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  // Window-level counters + scroll/page-geometry sampling while the
+  // overlay is on (all listeners passive; they only observe).
+  useEffect(() => {
+    if (!debugTouch) return;
+    const w = touchDebugState.win;
+    const onTs = (e: TouchEvent) => {
+      w.ts += 1;
+      w.lastTarget = targetLabel(e.target);
+      touchDebugEmit();
+    };
+    const onTm = () => {
+      w.tm += 1;
+      touchDebugEmit();
+    };
+    const onTe = () => {
+      w.te += 1;
+      touchDebugEmit();
+    };
+    const onTc = () => {
+      w.tc += 1;
+      touchDebugEmit();
+    };
+    const onPd = (e: PointerEvent) => {
+      w.pd += 1;
+      w.lastTarget = targetLabel(e.target);
+      touchDebugEmit();
+    };
+    const onPm = () => {
+      w.pm += 1;
+      touchDebugEmit();
+    };
+    const onPu = () => {
+      w.pu += 1;
+      touchDebugEmit();
+    };
+    const onPc = () => {
+      w.pc += 1;
+      touchDebugEmit();
+    };
+    const onScroll = () => {
+      touchDebugState.scroll.events += 1;
+      touchDebugState.scroll.maxY = Math.max(
+        touchDebugState.scroll.maxY,
+        window.scrollY,
+      );
+      touchDebugEmit();
+    };
+    const sampleGeo = () => {
+      const bar = document.querySelector(
+        '[data-testid="mobile-bottom-bar"]',
+      );
+      touchDebugState.geo = {
+        scrollH: document.documentElement.scrollHeight,
+        innerH: window.innerHeight,
+        visualH: window.visualViewport
+          ? Math.round(window.visualViewport.height)
+          : 0,
+        scrollY: Math.round(window.scrollY),
+        barPadBottom: bar ? getComputedStyle(bar).paddingBottom : '-',
+      };
+    };
+    sampleGeo();
+    const geoTimer = window.setInterval(() => {
+      sampleGeo();
+      touchDebugEmit();
+    }, 500);
+    window.addEventListener('touchstart', onTs, { passive: true });
+    window.addEventListener('touchmove', onTm, { passive: true });
+    window.addEventListener('touchend', onTe, { passive: true });
+    window.addEventListener('touchcancel', onTc, { passive: true });
+    window.addEventListener('pointerdown', onPd, { passive: true });
+    window.addEventListener('pointermove', onPm, { passive: true });
+    window.addEventListener('pointerup', onPu, { passive: true });
+    window.addEventListener('pointercancel', onPc, { passive: true });
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.clearInterval(geoTimer);
+      window.removeEventListener('touchstart', onTs);
+      window.removeEventListener('touchmove', onTm);
+      window.removeEventListener('touchend', onTe);
+      window.removeEventListener('touchcancel', onTc);
+      window.removeEventListener('pointerdown', onPd);
+      window.removeEventListener('pointermove', onPm);
+      window.removeEventListener('pointerup', onPu);
+      window.removeEventListener('pointercancel', onPc);
+      window.removeEventListener('scroll', onScroll);
+    };
+  }, [debugTouch]);
+
   return (
     <>
       {/* pl-14 (56px) clears the 48px mobile rail + 8px gap, so the
-          left capsule starts where the chart starts. */}
+          left capsule starts where the chart starts. Bottom padding
+          is the safe area PLUS a margin: with viewport-fit=cover the
+          env() is real (34px on Face ID iPhones), and the extra
+          0.75rem keeps the capsules visibly inside the viewport —
+          round 1's 8px left them hugging the bottom edge, half under
+          the home indicator. pt-2.5 keeps them off the chart above.
+          Both capsules are h-12 (48px) so their tops and bottoms
+          align; round 1 had 42px vs 50px. */}
       <div
-        className="flex shrink-0 items-center gap-2 py-2 pl-14 pr-2 md:hidden"
-        style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}
+        className="flex shrink-0 items-center gap-2 pl-14 pr-2 pt-2.5 md:hidden"
+        style={{
+          paddingBottom:
+            'max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))',
+        }}
         data-testid="mobile-bottom-bar"
       >
         {/* Bottom-left capsule: symbol | interval, both swipeable. */}
         <div
-          className={`flex min-w-0 flex-1 items-stretch overflow-hidden rounded-full ${CAPSULE_BG}`}
+          className={`flex h-12 min-w-0 flex-1 items-stretch overflow-hidden rounded-full ${CAPSULE_BG}`}
           data-testid="mobile-bottom-capsule"
         >
           <div
             ref={symbolZoneRef}
             style={{ touchAction: 'none' }}
-            className="flex min-w-0 flex-1 items-center"
+            className="flex h-full min-w-0 flex-1 items-center"
             data-testid="mobile-symbol-zone"
           >
             <button
               onClick={onOpenWatchlist}
               aria-label={`切換標的，目前 ${symbol}（上下滑動切換）`}
               style={{ touchAction: 'none' }}
-              className="w-full truncate px-3 py-2.5 text-sm font-semibold text-white"
+              className="flex h-full w-full items-center px-3 text-sm font-semibold text-white"
             >
-              {symbol}
+              <span className="truncate">{symbol}</span>
             </button>
           </div>
           <span className="w-px shrink-0 bg-[#2a2e39]" aria-hidden="true" />
           <div
             ref={intervalZoneRef}
             style={{ touchAction: 'none' }}
-            className="flex shrink-0 items-center"
+            className="flex h-full shrink-0 items-center"
             data-testid="mobile-interval-zone"
           >
             <button
               onClick={() => onSheetChange('interval')}
               aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}（上下滑動切換）`}
               style={{ touchAction: 'none' }}
-              className="px-3 py-2.5 text-sm font-medium text-white"
+              className="flex h-full items-center px-3 text-sm font-medium text-white"
             >
               {INTERVAL_LABELS[interval]}
             </button>
@@ -464,7 +742,7 @@ export default function MobileBottomBar({
 
         {/* Bottom-right capsule: indicators + chart settings + more. */}
         <div
-          className={`flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-1.5 ${CAPSULE_BG}`}
+          className={`flex h-12 shrink-0 items-center gap-0.5 rounded-full px-1.5 ${CAPSULE_BG}`}
           data-testid="mobile-actions-capsule"
         >
           <button
@@ -496,6 +774,8 @@ export default function MobileBottomBar({
           </button>
         </div>
       </div>
+
+      {debugTouch && <TouchDebugOverlay />}
 
       {sheet === 'interval' && (
         <MobileSheet

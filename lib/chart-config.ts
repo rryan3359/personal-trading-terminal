@@ -339,7 +339,7 @@ export const INDICATOR_OPTIONS: Array<{ id: string; label: string; mainPane: boo
   { id: 'MA', label: 'MA', mainPane: true },
   { id: 'EMA', label: 'EMA', mainPane: true },
   { id: 'BOLL', label: 'BOLL', mainPane: true },
-  { id: 'VOL', label: '成交量', mainPane: false },
+  { id: 'VOL', label: '成交量', mainPane: true },
   { id: 'RSI', label: 'RSI', mainPane: false },
   { id: 'MACD', label: 'MACD', mainPane: false },
 ];
