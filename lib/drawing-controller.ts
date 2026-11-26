@@ -1101,7 +1101,16 @@ export function createDrawingController(
       // create, so its push is never pending.
       deps.history.markArmPushPending();
     }
-    const style = deps.getLastOverlayStyle();
+    // A default template for this tool type wins over the last-used
+    // style: TV applies the default template to new drawings. A
+    // default whose template was deleted falls back silently.
+    const defaultName = deps.persistence.loadTemplateDefaults()[tool];
+    const defaultStyle = defaultName
+      ? deps.persistence
+          .loadTemplates()
+          [tool]?.find((t) => t.name === defaultName)?.style
+      : undefined;
+    const style = defaultStyle ?? deps.getLastOverlayStyle();
     const draft: SavedOverlay = {
       id: '',
       name: tool,

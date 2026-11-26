@@ -70,18 +70,12 @@ export interface DrawingSelectionToolbarProps {
   /** Template persistence (Step 3), via Chart's instance. */
   loadTemplates: () => OverlayTemplates;
   saveTemplates: (next: OverlayTemplates) => void;
+  /** Default template per tool type, via Chart's instance. */
+  loadTemplateDefaults: () => Record<string, string>;
+  saveTemplateDefaults: (next: Record<string, string>) => void;
   /** Mirror notification so Chart's dialog sees template changes. */
   onTemplatesChange: (next: OverlayTemplates) => void;
 }
-
-/** Checkerboard behind translucent color swatches (shows opacity). */
-const CHECKER_BG = {
-  backgroundImage:
-    'linear-gradient(45deg, #9e9e9e 25%, transparent 25%), linear-gradient(-45deg, #9e9e9e 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #9e9e9e 75%), linear-gradient(-45deg, transparent 75%, #9e9e9e 75%)',
-  backgroundSize: '6px 6px',
-  backgroundPosition: '0 0, 0 3px, 3px -3px, -3px 0',
-  backgroundColor: '#f5f5f5',
-};
 
 /** Small 20px stroke icons for the floating bar (icon-only). */
 const BAR_ICON_PROPS = {
@@ -168,6 +162,17 @@ export function BarGearIcon() {
   );
 }
 
+/** Pencil icon, matching TV's floating-bar colour button: the
+ *  pencil opens the colour picker; the bar under it (rendered by
+ *  the button, not the icon) shows the current line colour. */
+function BarPencilIcon() {
+  return (
+    <svg {...BAR_ICON_PROPS} aria-hidden="true">
+      <path d="M13.5 3.5l3 3L7 16H4v-3l9.5-9.5z" />
+    </svg>
+  );
+}
+
 /** Template icon: 2×2 rounded grid (田), matching TV's template button. */
 function BarTemplateIcon() {
   return (
@@ -209,6 +214,8 @@ const DrawingSelectionToolbar = forwardRef<
     onOpacitySliderEnd,
     loadTemplates,
     saveTemplates,
+    loadTemplateDefaults,
+    saveTemplateDefaults,
     onTemplatesChange,
   }: DrawingSelectionToolbarProps,
   ref,
@@ -220,8 +227,14 @@ const DrawingSelectionToolbar = forwardRef<
   /** Overlay style templates, grouped by overlay name (tool type). */
   const [templates, setTemplates] =
     useState<OverlayTemplates>(() => loadTemplates());
+  /** Default template per tool type (tool name -> template name). */
+  const [templateDefaults, setTemplateDefaults] = useState<
+    Record<string, string>
+  >(() => loadTemplateDefaults());
   /** Name typed for "save current style as template". */
   const [templateName, setTemplateName] = useState('');
+  /** The save-as name row only shows after "儲存繪圖模板為...". */
+  const [showSaveAs, setShowSaveAs] = useState(false);
 
   /** Deselect closes any open popover (was setOpenPanel(null) in
    *  Chart's setSelectedState; the bar unmounts with the selection,
@@ -247,6 +260,9 @@ const DrawingSelectionToolbar = forwardRef<
 
   const togglePanel = (panel: 'color' | 'lineStyle' | 'template') => {
     setOpenPanel((cur) => (cur === panel ? null : panel));
+    // The save-as name row only lives inside the template menu:
+    // switching panels (or closing) hides it.
+    setShowSaveAs(false);
   };
 
   /** Apply a saved template's style to the selected overlay.
@@ -262,6 +278,7 @@ const DrawingSelectionToolbar = forwardRef<
         fillOpacity: tpl.style.fillOpacity,
       });
       setOpenPanel(null);
+      setShowSaveAs(false);
     },
     [onApplyEdit],
   );
@@ -295,12 +312,22 @@ const DrawingSelectionToolbar = forwardRef<
       return next;
     });
     setTemplateName('');
+    setShowSaveAs(false);
   };
 
-  /** Delete a saved template from the selected overlay's group. */
+  /** Delete a saved template from the selected overlay's group. A
+   *  deleted default stops being the default for that tool type. */
   const deleteTemplate = (name: string) => {
     const cur = selected;
     if (!cur) return;
+    if (templateDefaults[cur.name] === name) {
+      setTemplateDefaults((prev) => {
+        const next = { ...prev };
+        delete next[cur.name];
+        saveTemplateDefaults(next);
+        return next;
+      });
+    }
     setTemplates((prev) => {
       const group = (prev[cur.name] ?? []).filter((t) => t.name !== name);
       const next = { ...prev };
@@ -310,6 +337,31 @@ const DrawingSelectionToolbar = forwardRef<
       onTemplatesChange(next);
       return next;
     });
+  };
+
+  /** Set (or clear, with null) the default template for the
+   *  selected overlay's tool type. The default applies to new
+   *  drawings of that type (armOverlay) and to "套用預設繪圖範本". */
+  const setDefaultTemplate = (name: string | null) => {
+    const cur = selected;
+    if (!cur) return;
+    setTemplateDefaults((prev) => {
+      const next = { ...prev };
+      if (name === null) delete next[cur.name];
+      else next[cur.name] = name;
+      saveTemplateDefaults(next);
+      return next;
+    });
+  };
+
+  /** Apply the default template for the selected overlay's tool type. */
+  const applyDefaultTemplate = () => {
+    const cur = selected;
+    if (!cur) return;
+    const name = templateDefaults[cur.name];
+    if (!name) return;
+    const tpl = (templates[cur.name] ?? []).find((t) => t.name === name);
+    if (tpl) applyTemplate(tpl);
   };
 
   if (selected === null) return null;
@@ -349,30 +401,20 @@ const DrawingSelectionToolbar = forwardRef<
           >
             <BarTemplateIcon />
           </button>
+          {/* TV-style colour button: pencil + current-colour bar. */}
           <button
             title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
             aria-label="顏色"
             onClick={() => togglePanel('color')}
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border hover:border-white/50 ${
-              openPanel === 'color'
-                ? 'border-white ring-1 ring-white'
-                : 'border-white/20'
+            className={`flex h-9 w-9 shrink-0 flex-col items-center justify-center gap-[3px] rounded-sm hover:bg-white/10 ${
+              openPanel === 'color' ? 'bg-white/10' : ''
             }`}
           >
+            <BarPencilIcon />
             <span
-              className="block h-4 w-6 rounded-[2px]"
-              style={CHECKER_BG}
-            >
-              <span
-                className="block h-full w-full rounded-[2px]"
-                style={{
-                  backgroundColor: hexToRgba(
-                    selected.color,
-                    selected.opacity,
-                  ),
-                }}
-              />
-            </span>
+              className="block h-[3px] w-5 rounded-full"
+              style={{ backgroundColor: selected.color }}
+            />
           </button>
           {/* Icon-only line style (no label, no widths). */}
           <button
@@ -496,68 +538,118 @@ const DrawingSelectionToolbar = forwardRef<
         </div>
       )}
       {openPanel === 'template' && (
-        <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-2 shadow-xl">
-          <div className="mb-1 px-1 text-xs font-semibold text-[#d1d4dc]">
-            範本
-          </div>
-          {(templates[selected.name] ?? []).length === 0 ? (
-            <div className="px-1 py-2 text-xs text-[#80858f]">
-              尚未儲存範本
-            </div>
-          ) : (
-            <div className="max-h-48 overflow-y-auto">
-              {(templates[selected.name] ?? []).map((tpl) => (
-                <div
-                  key={tpl.name}
-                  className="flex items-center gap-1 rounded-sm px-1 py-1 hover:bg-white/10"
-                >
-                  <button
-                    onClick={() => applyTemplate(tpl)}
-                    title={`套用範本 ${tpl.name}`}
-                    className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
-                  >
-                    <span
-                      className="block h-4 w-4 shrink-0 rounded-[2px]"
-                      style={{
-                        backgroundColor: hexToRgba(
-                          tpl.style.color,
-                          tpl.style.opacity,
-                        ),
-                      }}
-                    />
-                    <span className="truncate text-xs">{tpl.name}</span>
-                  </button>
-                  <button
-                    onClick={() => deleteTemplate(tpl.name)}
-                    title={`刪除範本 ${tpl.name}`}
-                    aria-label={`刪除範本 ${tpl.name}`}
-                    className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-[#ef5350] hover:bg-white/10"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
+        <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
+          {/* TV-style menu: save-as + apply default first. */}
+          <button
+            onClick={() => setShowSaveAs((v) => !v)}
+            className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm hover:bg-white/10 max-md:py-2.5"
+          >
+            儲存繪圖模板為...
+          </button>
+          <button
+            onClick={applyDefaultTemplate}
+            disabled={templateDefaults[selected.name] === undefined}
+            title={
+              templateDefaults[selected.name] === undefined
+                ? '尚未設定預設範本（在範本旁按 ☆ 設為預設）'
+                : `套用預設範本 ${templateDefaults[selected.name]}`
+            }
+            className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm hover:bg-white/10 disabled:opacity-40 max-md:py-2.5"
+          >
+            套用預設繪圖範本
+            {templateDefaults[selected.name] !== undefined && (
+              <span className="ml-auto text-xs text-[#80858f]">
+                {templateDefaults[selected.name]}
+              </span>
+            )}
+          </button>
+          {showSaveAs && (
+            <div className="flex items-center gap-1 border-t border-[#2a2e39] px-1 pb-1 pt-2">
+              <input
+                value={templateName}
+                onChange={(e) => setTemplateName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveTemplate();
+                }}
+                placeholder="範本名稱"
+                aria-label="範本名稱"
+                autoFocus
+                className="min-w-0 flex-1 rounded-sm border border-white/20 bg-transparent px-2 py-1.5 text-xs text-[#d1d4dc] placeholder:text-[#80858f] focus:border-[#2962ff] focus:outline-none"
+              />
+              <button
+                onClick={saveTemplate}
+                disabled={templateName.trim() === ''}
+                className="shrink-0 rounded-sm bg-[#2962ff] px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+              >
+                儲存
+              </button>
             </div>
           )}
-          <div className="mt-1 flex items-center gap-1 border-t border-[#2a2e39] pt-2">
-            <input
-              value={templateName}
-              onChange={(e) => setTemplateName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') saveTemplate();
-              }}
-              placeholder="範本名稱"
-              aria-label="範本名稱"
-              className="min-w-0 flex-1 rounded-sm border border-white/20 bg-transparent px-2 py-1.5 text-xs text-[#d1d4dc] placeholder:text-[#80858f] focus:border-[#2962ff] focus:outline-none"
-            />
-            <button
-              onClick={saveTemplate}
-              disabled={templateName.trim() === ''}
-              className="shrink-0 rounded-sm bg-[#2962ff] px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
-            >
-              儲存
-            </button>
-          </div>
+          {(templates[selected.name] ?? []).length > 0 && (
+            <div className="max-h-48 overflow-y-auto border-t border-[#2a2e39] pt-1">
+              {(templates[selected.name] ?? []).map((tpl) => {
+                const isDefault =
+                  templateDefaults[selected.name] === tpl.name;
+                return (
+                  <div
+                    key={tpl.name}
+                    className="flex items-center gap-1 rounded-sm px-1 py-1 hover:bg-white/10"
+                  >
+                    <button
+                      onClick={() => applyTemplate(tpl)}
+                      title={`套用範本 ${tpl.name}`}
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
+                    >
+                      <span
+                        className="block h-4 w-4 shrink-0 rounded-[2px]"
+                        style={{
+                          backgroundColor: hexToRgba(
+                            tpl.style.color,
+                            tpl.style.opacity,
+                          ),
+                        }}
+                      />
+                      <span className="truncate text-xs">{tpl.name}</span>
+                      {isDefault && (
+                        <span className="shrink-0 rounded bg-[#2962ff]/20 px-1 text-[10px] text-[#2962ff]">
+                          預設
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      onClick={() =>
+                        setDefaultTemplate(isDefault ? null : tpl.name)
+                      }
+                      title={isDefault ? '取消預設範本' : '設為預設範本'}
+                      aria-label={
+                        isDefault
+                          ? `取消預設範本 ${tpl.name}`
+                          : `設為預設範本 ${tpl.name}`
+                      }
+                      className={`shrink-0 rounded-sm px-1.5 py-0.5 text-sm hover:bg-white/10 ${
+                        isDefault ? 'text-[#f0b90b]' : 'text-[#80858f]'
+                      }`}
+                    >
+                      {isDefault ? '★' : '☆'}
+                    </button>
+                    <button
+                      onClick={() => deleteTemplate(tpl.name)}
+                      title={`刪除範本 ${tpl.name}`}
+                      aria-label={`刪除範本 ${tpl.name}`}
+                      className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-[#ef5350] hover:bg-white/10"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {(templates[selected.name] ?? []).length === 0 && !showSaveAs && (
+            <div className="px-2 py-2 text-xs text-[#80858f]">
+              尚未儲存範本
+            </div>
+          )}
         </div>
       )}
     </div>

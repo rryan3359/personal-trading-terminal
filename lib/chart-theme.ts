@@ -204,19 +204,6 @@ export function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
-function formatDuration(ms: number): string {
-  const totalMinutes = Math.round(ms / 60000);
-  if (totalMinutes < 60) return `${totalMinutes} 分鐘`;
-  const hours = Math.floor(totalMinutes / 60);
-  if (hours < 24) {
-    const mins = totalMinutes % 60;
-    return mins === 0 ? `${hours} 小時` : `${hours} 小時 ${mins} 分鐘`;
-  }
-  const days = Math.floor(hours / 24);
-  const remHours = hours % 24;
-  return remHours === 0 ? `${days} 天` : `${days} 天 ${remHours} 小時`;
-}
-
 let rectangleRegistered = false;
 
 /**
@@ -929,15 +916,29 @@ export function registerFibonacciRetracementOverlay(): void {
   });
 }
 
+/** Compact volume: 4.57 K / 1.23 M / 2.00 B (TV Date Range style). */
+function formatCompactVolume(v: number): string {
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return `${(v / 1e9).toFixed(2)} B`;
+  if (abs >= 1e6) return `${(v / 1e6).toFixed(2)} M`;
+  if (abs >= 1e3) return `${(v / 1e3).toFixed(2)} K`;
+  return v.toFixed(2);
+}
+
 let measureRegistered = false;
 
 /**
  * Register the custom "measure" overlay once per page load.
- * Two points -> one semi-transparent rect + a stats text block:
- * price difference, percentage, candle count and time span.
- * Rising is green, falling is red. Never persisted (Chart.tsx filters
- * it out of saves); Esc or clicking empty space removes it.
- * Candle count uses extendData.intervalMs (ms per candle).
+ * TV Date Range look: two points -> one blue rect + two direction
+ * arrows crossing at the rect centre (vertical at the centre x,
+ * horizontal at the centre y; heads point from the start toward
+ * the end: down/up for the price move, right/left for time) + a
+ * dark stats box below the rect (above it when there is no room
+ * below): price change, percent, ticks, candle count, calendar
+ * days, summed volume. Never persisted (Chart.tsx filters it out
+ * of saves); Esc or clicking empty space removes it. Candle count
+ * uses extendData.intervalMs (ms per candle); ticks assume one
+ * tick = 10^-pricePrecision (the symbol info has no tickSize).
  */
 export function registerMeasureOverlay(): void {
   if (measureRegistered) return;
@@ -963,8 +964,9 @@ export function registerMeasureOverlay(): void {
       ) {
         return [];
       }
-      const up = p1.value >= p0.value;
-      const color = up ? '#26a69a' : '#ef5350';
+      // TV Date Range is blue; the colour comes from the overlay
+      // itself (default #2962ff) so the edit bar can change it.
+      const color = overlay.styles?.line?.color ?? '#2962ff';
       const [a, b] = coordinates;
       const x = Math.min(a.x, b.x);
       const y = Math.min(a.y, b.y);
@@ -974,6 +976,16 @@ export function registerMeasureOverlay(): void {
       const pct = p0.value !== 0 ? (diff / p0.value) * 100 : 0;
       const sign = diff >= 0 ? '+' : '';
       const precision = chart.getSymbol()?.pricePrecision ?? 2;
+      const fmt = (v: number) =>
+        v.toLocaleString('en-US', {
+          minimumFractionDigits: precision,
+          maximumFractionDigits: precision,
+        });
+      const ticks = Math.round(diff / Math.pow(10, -precision));
+      const ticksText =
+        ticks >= 0
+          ? `+${ticks.toLocaleString('en-US')}`
+          : ticks.toLocaleString('en-US');
       const ext = (overlay.extendData ?? {}) as Record<string, unknown>;
       const intervalMs =
         typeof ext.intervalMs === 'number' ? ext.intervalMs : 0;
@@ -983,15 +995,35 @@ export function registerMeasureOverlay(): void {
               Math.abs(p1.timestamp - p0.timestamp) / intervalMs,
             ) + 1
           : 0;
-      const span = formatDuration(Math.abs(p1.timestamp - p0.timestamp));
-      const textLines =
-        bars > 0
-          ? [
-              `${sign}${diff.toFixed(precision)} (${sign}${pct.toFixed(2)}%)`,
-              `${bars} 根 K 線 · ${span}`,
-            ]
-          : [`${sign}${diff.toFixed(precision)} (${sign}${pct.toFixed(2)}%)`, span];
-      return [
+      // Calendar days, inclusive (93 daily bars span 93 days).
+      const days =
+        Math.floor(Math.abs(p1.timestamp - p0.timestamp) / 86400000) + 1;
+      // Summed volume over the bars inside the range (inclusive).
+      let volume: number | null = null;
+      try {
+        const data = chart.getDataList() ?? [];
+        const lo = Math.min(p0.timestamp, p1.timestamp);
+        const hi = Math.max(p0.timestamp, p1.timestamp);
+        let sum = 0;
+        let n = 0;
+        for (const d of data) {
+          if (d.timestamp >= lo && d.timestamp <= hi) {
+            sum += d.volume ?? 0;
+            n++;
+          }
+        }
+        volume = n > 0 ? sum : null;
+      } catch {
+        volume = null;
+      }
+      const textLines = [
+        `${sign}${fmt(diff)} (${sign}${pct.toFixed(2)}%) ${ticksText}`,
+        bars > 0 ? `${bars}根K棒， ${days}日` : `${days}日`,
+        ...(volume !== null
+          ? [`成交量 ${formatCompactVolume(volume)}`]
+          : []),
+      ];
+      const figures: Array<Record<string, unknown>> = [
         {
           type: 'rect',
           attrs: { x, y, width, height },
@@ -1002,18 +1034,98 @@ export function registerMeasureOverlay(): void {
             borderSize: 1,
           },
         },
-        {
-          type: 'text',
-          isCheckEvent: false,
-          attrs: textLines.map((text, i) => ({
-            x: x + 4,
-            y: y + 4 + i * 14,
-            text,
-            baseline: 'top',
-          })),
-          styles: { color },
+      ];
+      // Direction arrows crossing at the rect centre.
+      const cx = x + width / 2;
+      const cy = y + height / 2;
+      if (height > 0 && diff !== 0) {
+        figures.push({
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x: cx, y },
+              { x: cx, y: y + height },
+            ],
+          },
+          styles: { color, size: 2, style: 'solid' },
+        });
+        const down = diff < 0;
+        const hy = down ? y + height : y;
+        const back = down ? -7 : 7;
+        figures.push({
+          type: 'polygon',
+          attrs: {
+            coordinates: [
+              { x: cx - 4.5, y: hy + back },
+              { x: cx + 4.5, y: hy + back },
+              { x: cx, y: hy },
+            ],
+          },
+          styles: { style: 'fill', color },
+        });
+      }
+      if (width > 0 && p1.timestamp !== p0.timestamp) {
+        figures.push({
+          type: 'line',
+          attrs: {
+            coordinates: [
+              { x, y: cy },
+              { x: x + width, y: cy },
+            ],
+          },
+          styles: { color, size: 2, style: 'solid' },
+        });
+        const right = p1.timestamp > p0.timestamp;
+        const hx = right ? x + width : x;
+        const back = right ? -7 : 7;
+        figures.push({
+          type: 'polygon',
+          attrs: {
+            coordinates: [
+              { x: hx + back, y: cy - 4.5 },
+              { x: hx + back, y: cy + 4.5 },
+              { x: hx, y: cy },
+            ],
+          },
+          styles: { style: 'fill', color },
+        });
+      }
+      // Dark stats box below the rect (above it when there is no
+      // room below), left-aligned with the rect.
+      const fontSize = 12;
+      const lineH = 14;
+      const padX = 8;
+      const padY = 6;
+      const boxW =
+        Math.max(
+          ...textLines.map((t) => textNoHitWidth(t, fontSize, 'normal')),
+        ) +
+        padX * 2;
+      const boxH = textLines.length * lineH + padY * 2;
+      const paneH = chart.getSize('candle_pane')?.height ?? null;
+      const belowY = y + height + 6;
+      const boxY =
+        paneH !== null && belowY + boxH > paneH ? y - 6 - boxH : belowY;
+      figures.push({
+        type: 'rect',
+        attrs: { x, y: boxY, width: boxW, height: boxH },
+        styles: {
+          style: 'fill',
+          color: 'rgba(30, 34, 45, 0.95)',
         },
-      ] as never;
+      });
+      figures.push({
+        type: 'text',
+        isCheckEvent: false,
+        attrs: textLines.map((text, i) => ({
+          x: x + padX,
+          y: boxY + padY + i * lineH,
+          text,
+          baseline: 'top',
+        })),
+        styles: { color: '#d1d4dc' },
+      });
+      return figures as never;
     },
   });
 }

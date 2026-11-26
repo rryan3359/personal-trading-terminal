@@ -1290,6 +1290,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         }}
         loadTemplates={() => persistence.loadTemplates()}
         saveTemplates={(next) => persistence.saveTemplates(next)}
+        loadTemplateDefaults={() => persistence.loadTemplateDefaults()}
+        saveTemplateDefaults={(next) =>
+          persistence.saveTemplateDefaults(next)
+        }
         onTemplatesChange={setTemplates}
       />
       {contextMenu !== null && (

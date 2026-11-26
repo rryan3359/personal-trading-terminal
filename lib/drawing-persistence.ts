@@ -74,6 +74,12 @@ export interface DrawingPersistence {
   ): PersistResult;
   loadTemplates(): OverlayTemplates;
   saveTemplates(next: OverlayTemplates): void;
+  /** Default template per tool type (tool name -> template name).
+   *  A default is applied to new drawings of that type and by the
+   *  floating bar's "套用預設繪圖範本". Separate key from the
+   *  template lists, so the lists need no migration. */
+  loadTemplateDefaults(): Record<string, string>;
+  saveTemplateDefaults(next: Record<string, string>): void;
 }
 
 /**
@@ -85,6 +91,9 @@ export interface DrawingPersistence {
  * delete + recreate. Stored in localStorage; lib/store.ts is untouched.
  */
 const TEMPLATE_STORAGE_KEY = 'ptt:overlay-templates';
+
+/** Default template per tool type (tool name -> template name). */
+const TEMPLATE_DEFAULTS_STORAGE_KEY = 'ptt:overlay-template-defaults';
 
 export interface OverlayTemplate {
   name: string;
@@ -225,5 +234,46 @@ export function createDrawingPersistence(
     }
   };
 
-  return { readMergedList, persist, loadTemplates, saveTemplates };
+  const loadTemplateDefaults = (): Record<string, string> => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem(
+        TEMPLATE_DEFAULTS_STORAGE_KEY,
+      );
+      if (!raw) return {};
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+        return {};
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(
+        parsed as Record<string, unknown>,
+      )) {
+        if (typeof value === 'string' && value.length > 0) out[key] = value;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  };
+
+  const saveTemplateDefaults = (next: Record<string, string>): void => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(
+        TEMPLATE_DEFAULTS_STORAGE_KEY,
+        JSON.stringify(next),
+      );
+    } catch {
+      // Storage full / private mode: defaults stay in memory only.
+    }
+  };
+
+  return {
+    readMergedList,
+    persist,
+    loadTemplates,
+    saveTemplates,
+    loadTemplateDefaults,
+    saveTemplateDefaults,
+  };
 }

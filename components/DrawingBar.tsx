@@ -94,7 +94,7 @@ const TOOL_GROUPS: Array<{ title: string; ids: DrawingTool[] }> = [
   { title: '幾何圖形', ids: ['rectangle', 'ellipse', 'triangle', 'arc', 'curve', 'arrow', 'path', 'pen'] },
   { title: '形態', ids: ['headShoulders', 'elliottImpulse', 'elliottCorrection', 'abcdPattern', 'xabcdPattern', 'threeDrives'] },
   { title: '文字與註解', ids: ['brush', 'textAnnotation', 'simpleTag'] },
-  { title: '量測', ids: ['measure'] },
+  { title: '日期範圍', ids: ['measure'] },
   { title: '部位', ids: ['longPosition', 'shortPosition'] },
 ];
 const TOOL_BY_ID = new Map(DRAWING_TOOLS.map((t) => [t.id, t]));
