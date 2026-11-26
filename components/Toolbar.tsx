@@ -5,8 +5,7 @@
  *
  * Left: symbol button (opens a symbol search dropdown, same ranking as
  * the watchlist search), timeframe buttons as plain text (active =
- * text #2962ff, no pill container), chart-type dropdown (蠟燭圖／美國線
- * ／面積圖), "ƒx 指標" dropdown listing INDICATOR_OPTIONS with
+ * text #2962ff, no pill container), chart-type dropdown (K線／線形圖),
  * checkmarks, undo / redo (TradingView puts them in the top bar).
  * Right: connection status dot, and a mobile-only "自選" button that
  * opens the watchlist drawer.
@@ -187,7 +186,7 @@ export default function Toolbar({
   };
 
   const chartTypeLabel =
-    CHART_TYPES.find((t) => t.id === chartType)?.label ?? '蠟燭圖';
+    CHART_TYPES.find((t) => t.id === chartType)?.label ?? 'K線';
 
   return (
     <header onScroll={closeAllMenus} className="flex h-10 shrink-0 items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-[#2a2e39] bg-[#131722] px-3">

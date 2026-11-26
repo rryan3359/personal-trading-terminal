@@ -111,10 +111,10 @@ export default function Home() {
       STORAGE_KEYS.chartType,
       DEFAULT_CHART_TYPE,
     );
+    // Legacy stored values: 'ohlc' (美國線, removed) falls back to K線 so
+    // the chart always shows candles; 'area' is now 線形圖 and stays.
     setChartType(
-      savedChartType === 'ohlc' || savedChartType === 'area'
-        ? savedChartType
-        : DEFAULT_CHART_TYPE,
+      savedChartType === 'area' ? 'area' : DEFAULT_CHART_TYPE,
     );
     setHydrated(true);
     // Validate the restored list against the real Binance universe once

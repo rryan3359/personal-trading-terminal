@@ -145,6 +145,13 @@ export const DARK_STYLES: DeepPartial<Styles> = {
       downColor: '#ef5350',
       noChangeColor: '#888888',
     },
+    // 線形圖 (klinecharts 'area'): plain line, no fill, so it reads as a
+    // TradingView-style line chart instead of an area chart.
+    area: {
+      lineSize: 1,
+      lineColor: '#2962ff',
+      backgroundColor: 'transparent',
+    },
     priceMark: {
       last: {
         upColor: '#26a69a',

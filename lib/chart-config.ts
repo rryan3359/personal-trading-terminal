@@ -360,13 +360,17 @@ export const INTERVAL_MS: Record<string, number> = {
   '1M': 30 * 24 * 60 * 60 * 1000,
 };
 
-/** Candle render styles (klinecharts CandleType, verified 10.1.1). */
-export type ChartType = 'candle_solid' | 'ohlc' | 'area';
+/** Candle render styles (klinecharts CandleType, verified 10.1.1).
+ * Only two for now (Ryan 2026-11-26): K線 (candles) and 線形圖 (line,
+ * implemented as klinecharts 'area' with a transparent fill). 美國線
+ * (ohlc) removed — the chart always shows K線 unless 線形圖 is picked.
+ * 平均K線 (Heikin Ashi) needs a data transform in Chart.tsx and comes
+ * after Phase 3. */
+export type ChartType = 'candle_solid' | 'area';
 
 export const CHART_TYPES: Array<{ id: ChartType; label: string }> = [
-  { id: 'candle_solid', label: '蠟燭圖' },
-  { id: 'ohlc', label: '美國線' },
-  { id: 'area', label: '面積圖' },
+  { id: 'candle_solid', label: 'K線' },
+  { id: 'area', label: '線形圖' },
 ];
 
 export const DEFAULT_CHART_TYPE: ChartType = 'candle_solid';
