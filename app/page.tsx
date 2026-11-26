@@ -17,13 +17,15 @@
  *   └───────────────────────────────────────────────────┘
  *
  * Mobile (<md): the top toolbar, range bar and status bar are hidden
- * and replaced by floating capsules over a full-bleed chart: a
- * top-left symbol/interval pill, a favorites-only drawing bar on the
- * left (undo + full-list button at its bottom), a swipeable
- * symbol/interval capsule at bottom-left, and an actions capsule at
- * bottom-right. The watchlist stays a slide-over drawer from the
- * right. The root uses h-dvh so the mobile browser chrome does not
- * cut the layout off. Desktop (md+) is unchanged.
+ * and replaced by a top-left symbol/interval pill over the chart, a
+ * favorites-only drawing bar on the left (undo + full-list button at
+ * its bottom, ending above the bottom bar), and a bottom bar BELOW
+ * the chart row holding a swipeable symbol/interval capsule (left,
+ * flexible width) and an actions capsule (right, compact) — the
+ * capsules no longer overlay the chart, so the volume pane and time
+ * axis stay fully visible. The watchlist stays a slide-over drawer
+ * from the right. The root uses h-dvh so the mobile browser chrome
+ * does not cut the layout off. Desktop (md+) is unchanged.
  *
  * Symbol, interval, watchlist and indicator settings are persisted in
  * localStorage and restored on the next visit. Drawings are persisted by
@@ -46,7 +48,10 @@ import Watchlist from '@/components/Watchlist';
 import RangeBar from '@/components/RangeBar';
 import StatusBar from '@/components/StatusBar';
 import ChartAppearanceDialog from '@/components/ChartAppearanceDialog';
-import MobileCapsules from '@/components/MobileCapsules';
+import MobileBottomBar, {
+  MobileTopPill,
+  type MobileSheetKind,
+} from '@/components/MobileCapsules';
 import type { ChartHandle } from '@/components/Chart';
 import {
   DEFAULT_APPEARANCE,
@@ -98,6 +103,10 @@ export default function Home() {
   const [lastTickAt, setLastTickAt] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [mobileWatchlistOpen, setMobileWatchlistOpen] = useState(false);
+  /** Mobile bottom sheet open from the pill / bottom bar (shared
+   *  state: the pill and the bar live in different subtrees). */
+  const [mobileSheet, setMobileSheet] =
+    useState<MobileSheetKind | null>(null);
   /** Binance spot symbols, or null while still loading. */
   const [symbolList, setSymbolList] = useState<SymbolInfo[] | null>(null);
   const chartRef = useRef<ChartHandle | null>(null);
@@ -310,28 +319,14 @@ export default function Home() {
               continuousDraw={drawContinuous}
               onHistoryChange={handleHistoryChange}
             />
-            {/* Mobile (<md): floating capsules over the chart (top pill,
-                swipeable bottom capsule, actions capsule). */}
-            <MobileCapsules
+            {/* Mobile (<md): top-left pill over the chart. The
+                bottom capsules live in MobileBottomBar below the
+                chart row — they no longer overlay the chart. */}
+            <MobileTopPill
               symbol={symbol}
               interval={interval}
-              watchlist={watchlist}
-              onSelectSymbol={selectSymbol}
-              onIntervalChange={(tf) => {
-                setInterval(tf);
-                setActiveTool(null);
-                setActiveRange(null);
-              }}
               onOpenWatchlist={() => setMobileWatchlistOpen(true)}
-              indicators={indicators}
-              onToggleIndicator={toggleIndicator}
-              onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
-              chartType={chartType}
-              onChartTypeChange={setChartType}
-              onOpenObjectList={() => chartRef.current?.openObjectList()}
-              onRedo={() => chartRef.current?.redo()}
-              canRedo={canRedo}
-              onResetView={() => chartRef.current?.resetView()}
+              onOpenIntervalSheet={() => setMobileSheet('interval')}
             />
           </div>
           {/* Desktop only: hidden on mobile, the chart fills to the
@@ -374,6 +369,34 @@ export default function Home() {
           onCloseMobile={() => setMobileWatchlistOpen(false)}
         />
       </div>
+      {/* Mobile (<md): bottom bar below the chart row — swipeable
+          symbol/interval capsule (left, flexible) + actions capsule
+          (right, compact). A real flex row, not an overlay, so the
+          chart's volume pane and time axis stay fully visible and
+          the rail's bottom buttons sit above it. Hidden on desktop. */}
+      <MobileBottomBar
+        symbol={symbol}
+        interval={interval}
+        watchlist={watchlist}
+        onSelectSymbol={selectSymbol}
+        onIntervalChange={(tf) => {
+          setInterval(tf);
+          setActiveTool(null);
+          setActiveRange(null);
+        }}
+        onOpenWatchlist={() => setMobileWatchlistOpen(true)}
+        indicators={indicators}
+        onToggleIndicator={toggleIndicator}
+        onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
+        chartType={chartType}
+        onChartTypeChange={setChartType}
+        onOpenObjectList={() => chartRef.current?.openObjectList()}
+        onRedo={() => chartRef.current?.redo()}
+        canRedo={canRedo}
+        onResetView={() => chartRef.current?.resetView()}
+        sheet={mobileSheet}
+        onSheetChange={setMobileSheet}
+      />
       {appearanceDialogOpen && (
         <ChartAppearanceDialog
           initial={appearance}

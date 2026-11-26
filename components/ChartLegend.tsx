@@ -232,7 +232,10 @@ const ChartLegend = memo(function ChartLegend({
       {legendIndicators.map((row) => (
         <div
           key={row.name}
-          className="text-[11px]"
+          // Mobile: hide the VOL row — it collides with the canvas
+          // volume labels, and the volume pane below already shows
+          // the VOL values. Desktop keeps it.
+          className={`text-[11px]${row.name === 'VOL' ? ' hidden md:block' : ''}`}
           data-testid={`legend-indicator-${row.name}`}
         >
           <span style={{ color: labelColor }}>{row.name} </span>

@@ -1,29 +1,54 @@
 'use client';
 
 /**
- * MobileCapsules.tsx — mobile-only (<md) overlays on the chart.
+ * MobileCapsules.tsx — mobile-only (<md) capsules.
  *
- * Mirrors the clean black watch-app reference: no top toolbar, no
- * range/status bars on mobile — just three floating capsules over a
- * full-bleed chart.
+ * Two pieces, split so the bottom capsules no longer overlay the
+ * chart (Ryan's real-iPhone report 2026-11-26: they covered the
+ * volume pane + time axis, could not be swiped, and the left rail's
+ * bottom buttons were clipped by them):
  *
- *   Top-left pill:  [symbol] [interval]. Tap the symbol to open the
- *   watchlist drawer; tap the interval to open the interval sheet.
- *   Bottom-left capsule: [symbol | interval]. Vertical swipe on the
- *   symbol zone cycles the watchlist (wraps); vertical swipe on the
- *   interval zone cycles SWIPE_INTERVALS (wraps). A swipe is a
- *   vertical move >= 30px (and more vertical than horizontal); a
- *   move < 10px is a tap. The capsule is an HTML overlay, so touches
- *   on it never reach the chart canvas (no pan/zoom interference).
- *   Bottom-right capsule: indicators (ƒx) + chart settings (gear)
- *   shortcuts, plus "⋯" opening a sheet with chart type, object
- *   list, redo, reset view, and the watchlist.
+ *   MobileTopPill — the [symbol | interval] pill, an absolute
+ *   overlay at the chart's top-left (unchanged position).
+ *   MobileBottomBar (default export) — a real flex row BELOW the
+ *   chart row (page.tsx renders it under the chart, above the
+ *   home-indicator safe area): a flexible [symbol | interval]
+ *   capsule on the left and a compact [ƒx | gear | ⋯] capsule on
+ *   the right. Because it is a normal flex child, not an overlay,
+ *   the chart's volume pane and time axis are fully visible, and
+ *   the left rail ends above it (its undo + "⋯" buttons can no
+ *   longer be clipped by a capsule).
+ *
+ * Swipe — why the old one failed on a real iPhone:
+ *   The old zones used React synthetic onTouchStart/onTouchEnd.
+ *   React attaches touch listeners as PASSIVE at the root, and the
+ *   code never handled touchmove at all — so nothing ever called
+ *   preventDefault, and the touch target (the inner <button>) had
+ *   touch-action: auto. On real iOS Safari a vertical drag starting
+ *   on that button is claimed by Safari as a page scroll /
+ *   overscroll (h-dvh + the collapsing URL bar make the page
+ *   rubber-bandable), Safari fires touchcancel, and onTouchEnd
+ *   never arrives — the swipe is silently dropped. Headless Chrome
+ *   cannot reproduce it: the emulated page has no scrollable
+ *   overflow and Chrome honours the wrapper's touch-action: none,
+ *   so CDP swipes passed (verified: 3/3 swipes + tap, zero
+ *   touchcancel, zero scroll) while the real phone did nothing.
+ *   The fix is native, non-passive listeners: touchstart records
+ *   the start, touchmove calls preventDefault once the drag is
+ *   clearly vertical (claiming the gesture before Safari can),
+ *   touchend fires the swipe, and touchcancel completes it from
+ *   the last move position instead of dropping it. touch-action:
+ *   none is set on the zone AND the inner button. Taps still work:
+ *   a move < 10px never prevents anything, so the click proceeds;
+ *   a swipe's synthetic click is still swallowed by the capture
+ *   guard.
  *
  * All sheets are bottom sheets (backdrop + drag handle), mobile-only
- * (`md:hidden`). Nothing here renders on desktop.
+ * (`md:hidden`), portalled to document.body. Nothing here renders on
+ * desktop.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   CHART_TYPES,
@@ -42,6 +67,10 @@ const TAP_MAX_MOVE = 10;
 /** A click arriving this soon after a swipe is the swipe's own
  *  synthetic click — swallow it so a swipe never also taps. */
 const SWIPE_CLICK_GUARD_MS = 400;
+
+/** Which bottom sheet is open (owned by page.tsx, shared by the
+ *  pill and the bottom bar). */
+export type MobileSheetKind = 'interval' | 'indicators' | 'more';
 
 export interface MobileCapsulesProps {
   symbol: string;
@@ -63,6 +92,9 @@ export interface MobileCapsulesProps {
   canRedo: boolean;
   /** Restore the default chart view. */
   onResetView: () => void;
+  /** Open bottom sheet, or null when none is open. */
+  sheet: MobileSheetKind | null;
+  onSheetChange: (sheet: MobileSheetKind | null) => void;
 }
 
 /** Proper cog: toothed ring + centre hole (same as Toolbar's
@@ -170,57 +202,167 @@ function MobileSheet({
 }
 
 /**
- * Touch handlers for a vertical-swipe zone. Swipe up calls onUp,
- * swipe down calls onDown; a short move (< 10px) is a tap and the
- * click goes through untouched. A swipe's synthetic click is
- * swallowed in the capture phase so a swipe never also taps.
+ * Native vertical-swipe handling for one zone. Swipe up calls
+ * onUp, swipe down calls onDown; a short move (< 10px) is a tap
+ * and the click goes through untouched. A swipe's synthetic click
+ * is swallowed in the capture phase so a swipe never also taps.
+ *
+ * Native listeners (not React synthetic ones): React attaches
+ * touch handlers as passive at the root, so a React onTouchMove
+ * could never preventDefault — and iOS Safari claims an
+ * un-prevented vertical drag as a page scroll, fires touchcancel,
+ * and the swipe dies. The touchmove listener here is non-passive
+ * and calls preventDefault once the drag is clearly vertical.
+ * The hook returns nothing and attaches everything (including the
+ * capture-phase click guard that swallows a swipe's synthetic
+ * click) in an effect, so no ref-derived value is ever read
+ * during render.
  */
-function useVerticalSwipe({
-  onSwipeUp,
-  onSwipeDown,
-}: {
-  onSwipeUp: () => void;
-  onSwipeDown: () => void;
-}) {
-  const startRef = useRef<{ x: number; y: number } | null>(null);
+function useVerticalSwipe(
+  ref: React.RefObject<HTMLDivElement | null>,
+  {
+    onSwipeUp,
+    onSwipeDown,
+  }: {
+    onSwipeUp: () => void;
+    onSwipeDown: () => void;
+  },
+) {
   const lastSwipeAt = useRef(0);
-  return {
-    onTouchStart: (e: React.TouchEvent) => {
+  // Latest callbacks for the once-attached native listeners.
+  const cbRef = useRef({ onSwipeUp, onSwipeDown });
+  useEffect(() => {
+    cbRef.current = { onSwipeUp, onSwipeDown };
+  });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let start: { x: number; y: number } | null = null;
+    let claimed = false;
+    const onTouchStart = (e: TouchEvent) => {
       const t = e.touches[0];
-      startRef.current = { x: t.clientX, y: t.clientY };
-    },
-    onTouchEnd: (e: React.TouchEvent) => {
-      const s = startRef.current;
-      startRef.current = null;
-      if (!s) return;
-      const t = e.changedTouches[0];
-      const dx = t.clientX - s.x;
-      const dy = t.clientY - s.y;
+      start = { x: t.clientX, y: t.clientY };
+      claimed = false;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (!start) return;
+      const t = e.touches[0];
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
       if (
-        Math.abs(dy) >= SWIPE_MIN_DY &&
+        !claimed &&
+        Math.abs(dy) > TAP_MAX_MOVE &&
         Math.abs(dy) > Math.abs(dx)
       ) {
+        // Clearly a vertical drag: claim the gesture before Safari
+        // can take it over as a page scroll.
+        claimed = true;
+      }
+      if (claimed) e.preventDefault();
+    };
+    const finish = (e: TouchEvent) => {
+      const s = start;
+      start = null;
+      claimed = false;
+      if (!s) return;
+      const t = e.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - s.x;
+      const dy = t.clientY - s.y;
+      if (Math.abs(dy) >= SWIPE_MIN_DY && Math.abs(dy) > Math.abs(dx)) {
         lastSwipeAt.current = Date.now();
-        if (dy < 0) onSwipeUp();
-        else onSwipeDown();
+        if (dy < 0) cbRef.current.onSwipeUp();
+        else cbRef.current.onSwipeDown();
       }
       // < TAP_MAX_MOVE total movement = a tap: the click proceeds.
-      void TAP_MAX_MOVE;
-    },
-    /** Capture-phase click guard: eat the synthetic click that
-     *  follows a swipe. */
-    onClickCapture: (e: React.MouseEvent) => {
+    };
+    // Capture-phase click guard: eat the synthetic click that
+    // follows a swipe, so a swipe never also taps.
+    const onClickCapture = (e: MouseEvent) => {
       if (Date.now() - lastSwipeAt.current < SWIPE_CLICK_GUARD_MS) {
         e.preventDefault();
         e.stopPropagation();
       }
-    },
-  };
+    };
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('touchend', finish, { passive: true });
+    // touchcancel (Safari taking the gesture, an alert, …) still
+    // completes the swipe from the last move position instead of
+    // silently dropping it.
+    el.addEventListener('touchcancel', finish, { passive: true });
+    el.addEventListener('click', onClickCapture, { capture: true });
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', finish);
+      el.removeEventListener('touchcancel', finish);
+      el.removeEventListener('click', onClickCapture, { capture: true });
+    };
+  }, [ref]);
 }
 
 const CAPSULE_BG = 'border border-[#2a2e39] bg-[#131722]/90 shadow-lg backdrop-blur';
 
-export default function MobileCapsules({
+/**
+ * Top-left pill: [symbol | interval], an absolute overlay at the
+ * chart's top-left. Tap the symbol to open the watchlist drawer;
+ * tap the interval to open the interval sheet. Rendered inside the
+ * chart container by page.tsx; unchanged position.
+ */
+export function MobileTopPill({
+  symbol,
+  interval,
+  onOpenWatchlist,
+  onOpenIntervalSheet,
+}: {
+  symbol: string;
+  interval: Interval;
+  onOpenWatchlist: () => void;
+  onOpenIntervalSheet: () => void;
+}) {
+  return (
+    <div
+      className={`absolute left-2 top-2 z-20 flex items-center gap-2 rounded-full px-2.5 py-1.5 md:hidden ${CAPSULE_BG}`}
+      data-testid="mobile-top-pill"
+    >
+      <button
+        onClick={onOpenWatchlist}
+        aria-label={`切換標的，目前 ${symbol}`}
+        data-testid="mobile-top-symbol"
+        className="flex items-center gap-1.5"
+      >
+        <span
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-[11px] font-bold text-white"
+          aria-hidden="true"
+        >
+          {symbol.charAt(0)}
+        </span>
+        <span className="text-sm font-semibold text-white">{symbol}</span>
+      </button>
+      <span className="h-4 w-px bg-[#2a2e39]" aria-hidden="true" />
+      <button
+        onClick={onOpenIntervalSheet}
+        aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}`}
+        data-testid="mobile-top-interval"
+        className="text-sm font-medium text-[#2962ff]"
+      >
+        {INTERVAL_LABELS[interval]}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Mobile bottom bar: a real flex row below the chart (page.tsx
+ * renders it under the chart row). Left capsule [symbol | interval]
+ * is flexible width, both zones vertically swipeable; right capsule
+ * [ƒx | gear | ⋯] is compact. The bar's bottom padding is the
+ * home-indicator safe area, so the capsules never sit under it.
+ * Hidden on desktop (md:hidden).
+ */
+export default function MobileBottomBar({
   symbol,
   interval,
   watchlist,
@@ -236,9 +378,9 @@ export default function MobileCapsules({
   onRedo,
   canRedo,
   onResetView,
+  sheet,
+  onSheetChange,
 }: MobileCapsulesProps) {
-  const [sheet, setSheet] = useState<'interval' | 'indicators' | 'more' | null>(null);
-
   const cycleSymbol = (dir: 1 | -1) => {
     if (watchlist.length === 0) return;
     const i = watchlist.indexOf(symbol);
@@ -260,79 +402,59 @@ export default function MobileCapsules({
     onIntervalChange(next);
   };
 
-  const symbolSwipe = useVerticalSwipe({
+  const closeSheet = () => onSheetChange(null);
+
+  const symbolZoneRef = useRef<HTMLDivElement | null>(null);
+  const intervalZoneRef = useRef<HTMLDivElement | null>(null);
+  useVerticalSwipe(symbolZoneRef, {
     onSwipeUp: () => cycleSymbol(1),
     onSwipeDown: () => cycleSymbol(-1),
   });
-  const intervalSwipe = useVerticalSwipe({
+  useVerticalSwipe(intervalZoneRef, {
     onSwipeUp: () => cycleInterval(1),
     onSwipeDown: () => cycleInterval(-1),
   });
 
-  const closeSheet = () => setSheet(null);
-
   return (
     <>
-      <div className="pointer-events-none absolute inset-0 z-20 md:hidden">
-        {/* Top-left pill: symbol + interval. */}
-        <div
-          className={`pointer-events-auto absolute left-2 top-2 flex items-center gap-2 rounded-full px-2.5 py-1.5 ${CAPSULE_BG}`}
-          data-testid="mobile-top-pill"
-        >
-          <button
-            onClick={onOpenWatchlist}
-            aria-label={`切換標的，目前 ${symbol}`}
-            data-testid="mobile-top-symbol"
-            className="flex items-center gap-1.5"
-          >
-            <span
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-[11px] font-bold text-white"
-              aria-hidden="true"
-            >
-              {symbol.charAt(0)}
-            </span>
-            <span className="text-sm font-semibold text-white">{symbol}</span>
-          </button>
-          <span className="h-4 w-px bg-[#2a2e39]" aria-hidden="true" />
-          <button
-            onClick={() => setSheet('interval')}
-            aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}`}
-            data-testid="mobile-top-interval"
-            className="text-sm font-medium text-[#2962ff]"
-          >
-            {INTERVAL_LABELS[interval]}
-          </button>
-        </div>
-
+      {/* pl-14 (56px) clears the 48px mobile rail + 8px gap, so the
+          left capsule starts where the chart starts. */}
+      <div
+        className="flex shrink-0 items-center gap-2 py-2 pl-14 pr-2 md:hidden"
+        style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}
+        data-testid="mobile-bottom-bar"
+      >
         {/* Bottom-left capsule: symbol | interval, both swipeable. */}
         <div
-          className={`pointer-events-auto absolute bottom-2 left-2 flex items-stretch overflow-hidden rounded-full ${CAPSULE_BG}`}
+          className={`flex min-w-0 flex-1 items-stretch overflow-hidden rounded-full ${CAPSULE_BG}`}
           data-testid="mobile-bottom-capsule"
         >
           <div
-            {...symbolSwipe}
+            ref={symbolZoneRef}
             style={{ touchAction: 'none' }}
-            className="flex items-center"
+            className="flex min-w-0 flex-1 items-center"
             data-testid="mobile-symbol-zone"
           >
             <button
               onClick={onOpenWatchlist}
               aria-label={`切換標的，目前 ${symbol}（上下滑動切換）`}
-              className="px-3 py-2.5 text-sm font-semibold text-white"
+              style={{ touchAction: 'none' }}
+              className="w-full truncate px-3 py-2.5 text-sm font-semibold text-white"
             >
               {symbol}
             </button>
           </div>
-          <span className="w-px bg-[#2a2e39]" aria-hidden="true" />
+          <span className="w-px shrink-0 bg-[#2a2e39]" aria-hidden="true" />
           <div
-            {...intervalSwipe}
+            ref={intervalZoneRef}
             style={{ touchAction: 'none' }}
-            className="flex items-center"
+            className="flex shrink-0 items-center"
             data-testid="mobile-interval-zone"
           >
             <button
-              onClick={() => setSheet('interval')}
+              onClick={() => onSheetChange('interval')}
               aria-label={`切換週期，目前 ${INTERVAL_LABELS[interval]}（上下滑動切換）`}
+              style={{ touchAction: 'none' }}
               className="px-3 py-2.5 text-sm font-medium text-white"
             >
               {INTERVAL_LABELS[interval]}
@@ -342,11 +464,11 @@ export default function MobileCapsules({
 
         {/* Bottom-right capsule: indicators + chart settings + more. */}
         <div
-          className={`pointer-events-auto absolute bottom-2 right-2 flex items-center gap-0.5 rounded-full px-1.5 py-1.5 ${CAPSULE_BG}`}
+          className={`flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-1.5 ${CAPSULE_BG}`}
           data-testid="mobile-actions-capsule"
         >
           <button
-            onClick={() => setSheet('indicators')}
+            onClick={() => onSheetChange('indicators')}
             title="指標"
             aria-label="指標"
             data-testid="mobile-indicators-btn"
@@ -364,7 +486,7 @@ export default function MobileCapsules({
             <GearIcon />
           </button>
           <button
-            onClick={() => setSheet('more')}
+            onClick={() => onSheetChange('more')}
             title="更多"
             aria-label="更多"
             data-testid="mobile-more-btn"

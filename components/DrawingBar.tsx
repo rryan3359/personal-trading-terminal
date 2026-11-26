@@ -1102,7 +1102,7 @@ export default function DrawingBar({
   return (
     <aside
       data-drawing-bar
-      className="flex w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1"
+      className="flex w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1 md:w-11"
     >
       {/* Desktop: full bar (cursor + favorites + 10 groups + magnet +
           clear). Hidden below md; `contents` keeps the children as
@@ -1310,7 +1310,7 @@ export default function DrawingBar({
             </button>
           );
         })}
-        <div className="mt-auto flex flex-col items-center gap-2 pb-1 pt-2">
+        <div className="mt-auto flex flex-col items-center gap-2 pb-2 pt-2">
           <button
             onClick={onUndo}
             disabled={!canUndo}
