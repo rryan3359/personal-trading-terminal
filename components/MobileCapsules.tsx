@@ -471,13 +471,95 @@ function fireGearTick(audioCtxRef: { current: AudioContext | null }): void {
   }
 }
 
+/** Swipe preview row height (px): rows are h-11. The wheel maps
+ *  one row to MAG_STEP_PX of drag, so the list follows the finger
+ *  1:1 scaled by ROW_PX / MAG_STEP_PX (44px per 50px of drag). */
+const ROW_PX = 44;
+
+/** Cubic-bezier easing solver: returns y for a given x on the
+ *  curve (x1,y1,x2,y2). Newton–Raphson with a bisection fallback
+ *  (the standard WebKit algorithm, trimmed). */
+function cubicBezierEasing(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): (x: number) => number {
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sampleX = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const sampleY = (t: number) => ((ay * t + by) * t + cy) * t;
+  const sampleDX = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+  const solveX = (x: number): number => {
+    let t = x;
+    for (let i = 0; i < 8; i++) {
+      const err = sampleX(t) - x;
+      if (Math.abs(err) < 1e-6) return t;
+      const d = sampleDX(t);
+      if (Math.abs(d) < 1e-6) break;
+      t -= err / d;
+    }
+    let lo = 0;
+    let hi = 1;
+    t = x;
+    while (lo < hi) {
+      const v = sampleX(t);
+      if (Math.abs(v - x) < 1e-6) return t;
+      if (x > v) lo = t;
+      else hi = t;
+      t = (lo + hi) / 2;
+    }
+    return t;
+  };
+  return (x: number) => {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    return sampleY(solveX(x));
+  };
+}
+const SMOOTH_EASE_FN = cubicBezierEasing(0.22, 1, 0.36, 1);
+
+/** Tween an element's scrollTop to `to` over durationMs with the
+ *  smooth easing. Returns a cancel function. A no-op distance
+ *  applies instantly. Stops early if the element unmounts. */
+function tweenScrollTop(
+  el: HTMLElement,
+  to: number,
+  durationMs: number,
+): () => void {
+  const from = el.scrollTop;
+  if (Math.abs(to - from) < 0.5 || durationMs <= 0) {
+    el.scrollTop = to;
+    return () => {};
+  }
+  let raf = 0;
+  const start = performance.now();
+  const tick = (now: number) => {
+    const p = Math.min(1, (now - start) / durationMs);
+    el.scrollTop = from + (to - from) * SMOOTH_EASE_FN(p);
+    if (p < 1 && el.isConnected) {
+      raf = requestAnimationFrame(tick);
+    }
+  };
+  raf = requestAnimationFrame(tick);
+  return () => cancelAnimationFrame(raf);
+}
+
 /** Swipe preview list (Ryan 2026-11-27): dragging a capsule zone
  *  now floats the whole list over the chart centre — the same
- *  300px / -translate-y-8 / #1e222d card as CenterList, with the
- *  preview row pill-highlighted (#3a3f4a) and kept in the card's
- *  vertical centre, so the list looks like it ratchets past a
- *  fixed window one row at a time (TV f_001 screenshot). This
- *  replaces the 3-row MagnifierBubble mini wheel.
+ *  300px / -translate-y-8 / #1e222d card as CenterList. It is a
+ *  real picker wheel: a fixed pill band (#3a3f4a) is parked at
+ *  the card's vertical centre and the rows slide under it; the
+ *  row nearest the centre is the preview (white/bold text). The
+ *  parent drives the scroll container's scrollTop directly from
+ *  the finger (1:1, one row per MAG_STEP_PX of drag) — never a
+ *  per-step smooth scrollTo, which lagged behind the finger and
+ *  restarted on every step (the jank Ryan felt on 2026-11-27).
+ *  This replaces the 3-row MagnifierBubble mini wheel.
  *  pointer-events-none throughout, so it can never eat a touch.
  *  Enter: fade + scale 0.92→1. Release: fade + scale →0.95,
  *  then unmount — the unmount is delayed so the exit fade is
@@ -485,12 +567,17 @@ function fireGearTick(audioCtxRef: { current: AudioContext | null }): void {
  *  it and re-enters. */
 function SwipePreviewList({
   view,
+  scrollRef,
 }: {
   view: {
     zone: 'symbol' | 'interval';
     previewId: string;
     items: Array<{ id: string; label: string; icon?: string }>;
   } | null;
+  /** The scroll container, owned by the parent: during a drag the
+   *  parent sets its scrollTop directly from the drag distance,
+   *  so the list follows the finger instead of jumping per step. */
+  scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const cardRef = useRef<HTMLDivElement | null>(null);
   const [shown, setShown] = useState<typeof view>(null);
@@ -580,10 +667,13 @@ function SwipePreviewList({
     [],
   );
 
-  // Enter on mount; centre the preview row on every preview
-  // change. First appearance centres instantly (no glide from
-  // the top); later steps smooth-scroll, so the highlight stays
-  // parked in the middle while the rows ratchet past it.
+  // Enter on mount; centre the preview row instantly on first
+  // appearance only. During a drag the parent drives the scroll
+  // container's scrollTop directly from the finger (1:1 wheel),
+  // so this effect must never scroll afterwards: the old
+  // per-step smooth scrollTo lagged behind the finger and was
+  // restarted by every step change, which is what felt janky
+  // (Ryan 2026-11-27).
   useEffect(() => {
     if (shown === null) return;
     const card = cardRef.current;
@@ -604,23 +694,37 @@ function SwipePreviewList({
     }
     const first = prevPreviewRef.current === null;
     prevPreviewRef.current = shown.previewId;
-    const row = card?.querySelector(
+    if (!first) return;
+    const list = scrollRef.current;
+    const row = list?.querySelector(
       `[data-gear-row="${shown.previewId}"]`,
     ) as HTMLElement | null;
-    if (!card || !row) return;
-    const top =
-      row.offsetTop - (card.clientHeight - row.offsetHeight) / 2;
-    card.scrollTo({ top, behavior: first ? 'auto' : 'smooth' });
-  }, [shown]);
+    if (!list || !row) return;
+    list.scrollTop =
+      row.offsetTop - (list.clientHeight - row.offsetHeight) / 2;
+  }, [shown, scrollRef]);
 
   if (shown === null) return null;
   return createPortal(
     <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center md:hidden">
       <div
         ref={cardRef}
-        className="pointer-events-none h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-y-auto rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-2 shadow-2xl backdrop-blur"
+        className="pointer-events-none relative h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-hidden rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/95 shadow-2xl backdrop-blur"
         data-testid="capsule-magnifier"
       >
+        {/* Fixed highlight band: parked at the card's vertical
+            centre — the pill never moves, the rows slide under
+            it. Rows are transparent so the band shows through
+            behind them; the centred row's text goes white/bold. */}
+        <div
+          className="pointer-events-none absolute left-2 right-2 top-1/2 z-0 h-11 -translate-y-1/2 rounded-2xl bg-[#3a3f4a]"
+          aria-hidden="true"
+        />
+        <div
+          ref={scrollRef}
+          className="pointer-events-none relative z-10 h-full w-full overflow-y-auto px-2 py-2"
+          data-testid="capsule-magnifier-list"
+        >
         {/* Top/bottom spacers (half the viewport minus half a
             row) so even the first/last row can scroll to the
             card's vertical centre. */}
@@ -634,7 +738,7 @@ function SwipePreviewList({
               data-testid={`gear-row-${item.id}`}
               className={`flex h-11 w-full shrink-0 items-center gap-3 rounded-2xl px-3 text-[15px] ${
                 selected
-                  ? 'bg-[#3a3f4a] font-semibold text-white'
+                  ? 'font-semibold text-white'
                   : 'font-normal text-[#787b86]'
               }`}
             >
@@ -651,6 +755,7 @@ function SwipePreviewList({
           );
         })}
         <div className="h-[140px] shrink-0" aria-hidden="true" />
+        </div>
       </div>
     </div>,
     document.body,
@@ -1374,6 +1479,21 @@ export default function MobileBottomBar({
   /** Lazily created WebAudio context for the gear tick on iPhones
    *  (no Vibration API there) — see fireGearTick. */
   const gearAudioRef = useRef<AudioContext | null>(null);
+  /** The swipe preview list's scroll container (owned by
+   *  SwipePreviewList): the drag handler sets its scrollTop
+   *  directly from the finger. */
+  const gearCardRef = useRef<HTMLDivElement | null>(null);
+  /** Wheel anchor for the active drag: the scrollTop that centres
+   *  the current value's row, and that row's index. The list's
+   *  scrollTop is base + (-dy) * ROW_PX / MAG_STEP_PX, so the
+   *  rows follow the finger 1:1. Reset on every drag end. */
+  const gearDragRef = useRef<{
+    baseScrollTop: number;
+    baseIndex: number;
+    zone: 'symbol' | 'interval';
+  } | null>(null);
+  /** Cancel for the release snap tween (a fresh drag cancels it). */
+  const gearSnapRef = useRef<(() => void) | null>(null);
 
   /** Minimal toast (no toast system in the app): a dark pill above
    *  the bottom bar, auto-dismissed. Used for 尚未支援 / 儲存確認 /
@@ -1398,9 +1518,12 @@ export default function MobileBottomBar({
     'main',
   );
 
-  /** Preview value for a drag offset: no step until the swipe
-   *  threshold, then one step per 50px of drag. Null while the
-   *  drag is still a tap (<= 10px). */
+  /** Preview value for a drag offset — pre-mount fallback only.
+   *  The wheel path in onZoneDrag reads the preview off the
+   *  list's scroll position once the list exists; this is only
+   *  used for the first move, before the list has mounted. No
+   *  step until the swipe threshold, then one step per 50px of
+   *  drag. Null while the drag is still a tap (<= 10px). */
   const previewFor = (
     zone: 'symbol' | 'interval',
     dy: number,
@@ -1442,10 +1565,14 @@ export default function MobileBottomBar({
           magRef.current = null;
           setMagnifier(null);
         }
+        gearDragRef.current = null;
         return;
       }
       if (prev === null) {
         textEl?.getAnimations().forEach((a) => a.cancel());
+        // A fresh drag cancels any release snap still running.
+        gearSnapRef.current?.();
+        gearSnapRef.current = null;
       }
       if (textEl) {
         const clamped = Math.max(
@@ -1453,6 +1580,72 @@ export default function MobileBottomBar({
           Math.min(FOLLOW_MAX_PX, dy),
         );
         textEl.style.transform = `translateY(${clamped}px)`;
+      }
+      // Wheel (Ryan 2026-11-27): once the preview list is
+      // mounted, drive its scrollTop directly from the finger —
+      // 1:1, one row per MAG_STEP_PX of drag — and read the
+      // preview off the row nearest the fixed centre band. The
+      // discrete previewFor path below is only the pre-mount
+      // fallback (the first move, before the list exists).
+      const card = gearCardRef.current;
+      if (card !== null) {
+        const items =
+          zone === 'symbol' ? watchlist : swipeIntervals;
+        const currentId = zone === 'symbol' ? symbol : interval;
+        let drag = gearDragRef.current;
+        if (drag === null || drag.zone !== zone) {
+          // Anchor from geometry (robust even if the mount
+          // effect has not centred the list yet): the scrollTop
+          // that puts the current row on the centre band.
+          const row = card.querySelector(
+            `[data-gear-row="${currentId}"]`,
+          ) as HTMLElement | null;
+          const baseScrollTop = row
+            ? row.offsetTop -
+              (card.clientHeight - row.offsetHeight) / 2
+            : card.scrollTop;
+          drag = {
+            baseScrollTop,
+            baseIndex: Math.max(0, items.indexOf(currentId)),
+            zone,
+          };
+          gearDragRef.current = drag;
+        }
+        const maxScroll = Math.max(
+          0,
+          card.scrollHeight - card.clientHeight,
+        );
+        const target = Math.max(
+          0,
+          Math.min(
+            maxScroll,
+            drag.baseScrollTop - dy * (ROW_PX / MAG_STEP_PX),
+          ),
+        );
+        card.scrollTop = target;
+        const deltaRows = Math.round(
+          (target - drag.baseScrollTop) / ROW_PX,
+        );
+        const idx = Math.max(
+          0,
+          Math.min(items.length - 1, drag.baseIndex + deltaRows),
+        );
+        const previewId = items[idx];
+        if (
+          prev === null ||
+          prev.zone !== zone ||
+          prev.previewId !== previewId
+        ) {
+          // One tick per centre-row change; the first
+          // appearance on the current row is not a step.
+          if (prev !== null || deltaRows !== 0) {
+            fireGearTick(gearAudioRef);
+          }
+          const m = { zone, previewId, step: deltaRows };
+          magRef.current = m;
+          setMagnifier(m);
+        }
+        return;
       }
       if (
         prev === null ||
@@ -1482,6 +1675,28 @@ export default function MobileBottomBar({
         (m.zone === 'interval' && m.previewId !== interval));
     magRef.current = null;
     setMagnifier(null);
+    // Release snap (Ryan 2026-11-27): the wheel may stop
+    // between rows — tween the list to the nearest row over
+    // ~180ms with the smooth easing, so it lands on a row
+    // instead of floating mid-row. Runs under the exit fade;
+    // the tween stops itself if the card unmounts.
+    const card = gearCardRef.current;
+    const drag = gearDragRef.current;
+    gearDragRef.current = null;
+    if (card !== null && drag !== null) {
+      const deltaRows = Math.round(
+        (card.scrollTop - drag.baseScrollTop) / ROW_PX,
+      );
+      const maxScroll = Math.max(
+        0,
+        card.scrollHeight - card.clientHeight,
+      );
+      const target = Math.max(
+        0,
+        Math.min(maxScroll, drag.baseScrollTop + deltaRows * ROW_PX),
+      );
+      gearSnapRef.current = tweenScrollTop(card, target, 180);
+    }
     if (m === null) return;
     const textEl =
       m.zone === 'symbol' ? symbolTextRef.current : intervalTextRef.current;
@@ -1738,7 +1953,7 @@ export default function MobileBottomBar({
             to the screen centre (see SwipePreviewList), so this
             wrapper no longer positions it. */}
         <div className="relative min-w-0 flex-1">
-          <SwipePreviewList view={gearView} />
+          <SwipePreviewList view={gearView} scrollRef={gearCardRef} />
           {/* Bottom capsule: symbol | interval, both swipeable.
               Symbol flexes (left-aligned), interval is a fixed
               76px centred zone. */}
