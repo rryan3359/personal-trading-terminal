@@ -30,6 +30,8 @@ import {
   type SymbolInfo,
 } from '@/lib/symbols';
 import { formatPrice } from '@/lib/format';
+import CryptoIcon from '@/components/CryptoIcon';
+import { baseAssetOf } from '@/lib/crypto-icons';
 
 export interface WatchlistProps {
   symbols: string[];
@@ -399,13 +401,13 @@ export default function Watchlist({
                   : 'hover:bg-[#1a1e29]'
               }`}
             >
-              <span
-                aria-hidden
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white"
-                style={{ backgroundColor: iconColorFor(symbol) }}
-              >
-                {letter}
-              </span>
+              <CryptoIcon
+                baseAsset={info?.baseAsset ?? baseAssetOf(symbol)}
+                letter={letter}
+                sizeClass="h-9 w-9"
+                textClass="text-sm"
+                bgColor={iconColorFor(symbol)}
+              />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5">
                   <span className="truncate text-sm font-bold text-white">

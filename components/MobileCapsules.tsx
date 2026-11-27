@@ -85,6 +85,8 @@ import {
   type Interval,
 } from '@/lib/types';
 import type { SavedLayout } from '@/lib/store';
+import CryptoIcon from '@/components/CryptoIcon';
+import { baseAssetOf } from '@/lib/crypto-icons';
 
 /** Vertical swipe threshold (px) and tap threshold (px). 30px:
  *  Ryan 2026-11-27 asked for lower sensitivity — the swipe was
@@ -654,7 +656,7 @@ function SwipePreviewList({
      *  matches, not just the id, so only one of the three copies
      *  is ever highlighted. */
     previewAbs: number;
-    items: Array<{ id: string; label: string; icon?: string }>;
+    items: Array<{ id: string; label: string; icon?: string; iconBase?: string }>;
   } | null;
   /** The scroll container, owned by the parent: during a drag the
    *  parent sets its scrollTop directly from the drag distance,
@@ -846,14 +848,23 @@ function SwipePreviewList({
                     : 'font-normal text-[#787b86]'
                 }`}
               >
-                {item.icon !== undefined && (
-                  <span
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
-                    aria-hidden="true"
-                  >
-                    {item.icon}
-                  </span>
-                )}
+                {item.icon !== undefined &&
+                  (item.iconBase !== undefined ? (
+                    <CryptoIcon
+                      baseAsset={item.iconBase}
+                      letter={item.icon}
+                      sizeClass="h-7 w-7"
+                      textClass="text-xs"
+                      bgColor="#2a2e39"
+                    />
+                  ) : (
+                    <span
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
+                      aria-hidden="true"
+                    >
+                      {item.icon}
+                    </span>
+                  ))}
                 <span className="truncate">{item.label}</span>
               </div>
             );
@@ -1407,12 +1418,13 @@ export function MobileTopBar({
             data-testid="mobile-top-symbol"
             className="flex items-center gap-1.5"
           >
-            <span
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-[11px] font-bold text-white"
-              aria-hidden="true"
-            >
-              {symbol.charAt(0)}
-            </span>
+            <CryptoIcon
+              baseAsset={baseAssetOf(symbol)}
+              letter={symbol.charAt(0)}
+              sizeClass="h-5 w-5"
+              textClass="text-[11px]"
+              bgColor="#2a2e39"
+            />
             <span className="text-sm font-semibold text-white">
               {symbol}
             </span>
@@ -2127,6 +2139,7 @@ export default function MobileBottomBar({
                   id: s,
                   label: s,
                   icon: s.charAt(0),
+                  iconBase: baseAssetOf(s),
                 }))
               : swipeIntervals.map((iv) => ({
                   id: iv,
@@ -2422,12 +2435,13 @@ export default function MobileBottomBar({
               }}
               testId={`symbol-option-${s}`}
             >
-              <span
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
-                aria-hidden="true"
-              >
-                {s.charAt(0)}
-              </span>
+              <CryptoIcon
+                baseAsset={baseAssetOf(s)}
+                letter={s.charAt(0)}
+                sizeClass="h-7 w-7"
+                textClass="text-xs"
+                bgColor="#2a2e39"
+              />
               <span className="truncate">{s}</span>
             </CenterListRow>
           ))}
