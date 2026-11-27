@@ -743,6 +743,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
       getInterval: () => intervalRef.current,
       getChartType: () => chartTypeRef.current,
       getIndicators: () => indicatorsRef.current,
+      getInteractionMode: () => modeRef.current,
       initialAppearance: appearance,
       crosshair,
       onLastTick: (atMs) => onLastTickRef.current?.(atMs),

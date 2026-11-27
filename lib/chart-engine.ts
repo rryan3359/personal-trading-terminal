@@ -88,6 +88,7 @@ import {
   type AppearanceSettings,
 } from '@/lib/chart-appearance';
 import type { CrosshairController } from '@/lib/chart-crosshair';
+import type { InteractionMode } from './chart-interaction-mode';
 
 export interface ChartEngineOptions {
   getSymbol: () => string;
@@ -121,6 +122,15 @@ export interface ChartEngineOptions {
    * sets it around removeOverlay in the symbol/interval switch.
    */
   suppressSaveRef: { current: boolean };
+  /**
+   * Current interaction mode (Phase 1 state machine, owned by Chart).
+   * The main-pane vertical pan reads it to tell a chart pan (Idle /
+   * Selected) apart from an overlay drag (Moving / Resizing) or a
+   * drawing in progress (Drawing): the library resolves the press —
+   * and the mode transitions — synchronously in the pointerdown
+   * dispatch, so the mode is settled by the first move event.
+   */
+  getInteractionMode: () => InteractionMode;
 }
 
 export interface ChartEngine {
@@ -677,6 +687,204 @@ export function createChartEngine(
   });
   window.addEventListener('dblclick', onAxisDblClick, true);
 
+  // ---- Main-pane vertical pan (Ryan 2026-11-27: "主圖也是上下沒辦法動") ----
+  /**
+   * klinecharts' own main-pane vertical scroll (_processMainScrollingEvent
+   * in index.esm.js) only shifts a y-axis when the axis is manual
+   * (!getAutoCalcTickFlag) AND scrollZoomEnabled — and createOrOverrideYAxis
+   * resets autoCalc to true on every call, while this app turns the price
+   * axis' scrollZoomEnabled off for the anchored axis zoom above. So a
+   * vertical drag on the main pane never moves the price scale (probe:
+   * an 80px down-drag moves the 60000px by 0-6px; a horizontal drag
+   * moves the time range fine). TradingView pans the price scale on a
+   * vertical chart drag, so the engine does it itself, reusing the
+   * manualPriceRange + createRange mechanism: a vertical main-pane drag
+   * translates the held price range by (dy / paneHeight) * range —
+   * content follows the finger 1:1 — and the range stays manual until
+   * reset / axis double-click / symbol switch clears it, exactly like
+   * an axis zoom.
+   *
+   * The horizontal part of the same drag stays with the library
+   * (store.scroll): this handler never stops propagation, so the
+   * library still pans time, drags overlays and handles selection.
+   * Whether the press is a chart pan or an overlay drag / drawing is
+   * decided by the mode: Drawing/ContextMenu/Editing are excluded at
+   * pointerdown (they are set before the press); Moving/Resizing are
+   * excluded on the first move (the library resolves the press and the
+   * mode transitions synchronously in the pointerdown dispatch, before
+   * any move event). A tap (no move) shifts nothing, so tap-to-deselect
+   * is unaffected. A second finger cancels the pan; the library keeps
+   * its time pinch zoom.
+   */
+  let chartPan: {
+    startY: number;
+    baseRange: AxisRange;
+    paneHeight: number;
+    containerTop: number;
+    touchId: number | null;
+    moved: boolean;
+  } | null = null;
+  /** Pure translation of a price range: shift from/to by (dy/H)*range. */
+  const translatedRangeFrom = (
+    axis: YAxis,
+    base: AxisRange,
+    dy: number,
+    paneHeight: number,
+  ): AxisRange | null => {
+    const R = base.range;
+    if (!Number.isFinite(R) || R <= 0 || paneHeight <= 0) return null;
+    const d = R * (dy / paneHeight);
+    const fromPrime = base.from + d;
+    const toPrime = base.to + d;
+    const realFrom = axis.valueToRealValue(fromPrime, { range: base });
+    const realTo = axis.valueToRealValue(toPrime, { range: base });
+    const displayFrom = axis.realValueToDisplayValue(realFrom, {
+      range: base,
+    });
+    const displayTo = axis.realValueToDisplayValue(realTo, {
+      range: base,
+    });
+    return {
+      from: fromPrime,
+      to: toPrime,
+      range: toPrime - fromPrime,
+      realFrom,
+      realTo,
+      realRange: realTo - realFrom,
+      displayFrom,
+      displayTo,
+      displayRange: displayTo - displayFrom,
+    };
+  };
+  const cancelChartPan = () => {
+    window.removeEventListener('mousemove', onChartPanPointerMove);
+    window.removeEventListener('touchmove', onChartPanPointerMove);
+    chartPan = null;
+  };
+  const onChartPanPointerDown = (e: MouseEvent | TouchEvent) => {
+    if (disposed || !chart) return;
+    // A tool is armed / a menu or dialog is open: the press belongs
+    // to that flow, not to a chart pan.
+    const mode0 = opts.getInteractionMode();
+    if (
+      mode0 === 'Drawing' ||
+      mode0 === 'ContextMenu' ||
+      mode0 === 'Editing'
+    )
+      return;
+    if (e instanceof MouseEvent && e.button !== 0) return;
+    const p = pointerClient(e);
+    if (!p || !isAxisEventTarget(e) || p.x >= axisStartX()) return;
+    const rect = container.getBoundingClientRect();
+    const y = p.y - rect.top;
+    const H = chart.getSize(CANDLE_PANE_ID)?.height ?? rect.height;
+    if (y < 0 || y > H) return; // below the candle pane (x-axis strip / sub-panes)
+    if (e instanceof TouchEvent && e.touches.length !== 1) return;
+    // Capture the base range HERE (pointerdown, window capture runs
+    // before the library's container handlers): the library's scroll
+    // layout on the first move re-fits the auto-fit range and the
+    // value read at the first move is already wobbled (probe-pan-dbg:
+    // 3187.32 -> 3138.83 before the pan computed anything). The axis
+    // zoom captures its baseRange at pointerdown for the same reason.
+    const axis0 = getPriceAxis();
+    if (!axis0) return;
+    chartPan = {
+      startY: y,
+      baseRange: { ...axis0.getRange() },
+      paneHeight: H,
+      containerTop: rect.top,
+      touchId:
+        e instanceof TouchEvent
+          ? (e.touches[0]?.identifier ?? null)
+          : null,
+      moved: false,
+    };
+    if (e instanceof MouseEvent) {
+      window.addEventListener('mousemove', onChartPanPointerMove);
+      window.addEventListener('mouseup', onChartPanPointerUp, { once: true });
+    } else {
+      window.addEventListener('touchmove', onChartPanPointerMove, {
+        passive: false,
+      });
+      window.addEventListener('touchend', onChartPanPointerUp, { once: true });
+      window.addEventListener('touchcancel', onChartPanPointerUp, {
+        once: true,
+      });
+    }
+  };
+  const onChartPanPointerMove = (e: MouseEvent | TouchEvent) => {
+    if (!chartPan || disposed || !chart) return;
+    let p: { x: number; y: number } | null = null;
+    if (e instanceof TouchEvent) {
+      if (e.touches.length !== 1) {
+        cancelChartPan();
+        return;
+      }
+      const t = [...e.touches].find(
+        (tt) => tt.identifier === chartPan?.touchId,
+      );
+      if (!t) {
+        cancelChartPan();
+        return;
+      }
+      p = { x: t.clientX, y: t.clientY };
+    } else {
+      p = { x: e.clientX, y: e.clientY };
+    }
+    // Overlay drag / drawing / menu owns this gesture — hands off.
+    // The mode is settled by now: the library fires onPressedMoveStart
+    // (and the mode transitions) synchronously in the pointerdown
+    // dispatch, before any move event.
+    const mode = opts.getInteractionMode();
+    if (
+      mode === 'Moving' ||
+      mode === 'Resizing' ||
+      mode === 'Drawing' ||
+      mode === 'ContextMenu' ||
+      mode === 'Editing'
+    ) {
+      cancelChartPan();
+      return;
+    }
+    const axis = getPriceAxis();
+    if (!axis) {
+      cancelChartPan();
+      return;
+    }
+    const y = p.y - chartPan.containerTop;
+    const dy = y - chartPan.startY;
+    if (dy === 0) return;
+    const next = translatedRangeFrom(
+      axis,
+      chartPan.baseRange,
+      dy,
+      chartPan.paneHeight,
+    );
+    if (!next) return;
+    if (e instanceof TouchEvent) e.preventDefault();
+    chartPan.moved = true;
+    manualPriceRange = next;
+    schedulePriceAxisApply();
+  };
+  const onChartPanPointerUp = () => {
+    window.removeEventListener('mousemove', onChartPanPointerMove);
+    window.removeEventListener('touchmove', onChartPanPointerMove);
+    // The mouseup/touchend/touchcancel listeners were { once: true }.
+    if (chartPan?.moved) {
+      if (axisDragApplyRaf !== 0) {
+        cancelAnimationFrame(axisDragApplyRaf);
+        axisDragApplyRaf = 0;
+      }
+      applyPriceAxisRange();
+    }
+    chartPan = null;
+  };
+  window.addEventListener('mousedown', onChartPanPointerDown, true);
+  window.addEventListener('touchstart', onChartPanPointerDown, {
+    capture: true,
+    passive: false,
+  });
+
   // First load generation (see loadEpoch).
   loadEpoch += 1;
   chart.setSymbol({ ticker: opts.getSymbol(), pricePrecision: 2, volumePrecision: 0 });
@@ -982,6 +1190,10 @@ export function createChartEngine(
     window.removeEventListener('dblclick', onAxisDblClick, true);
     window.removeEventListener('mousemove', onAxisPointerMove);
     window.removeEventListener('touchmove', onAxisPointerMove);
+    window.removeEventListener('mousedown', onChartPanPointerDown, true);
+    window.removeEventListener('touchstart', onChartPanPointerDown, true);
+    window.removeEventListener('mousemove', onChartPanPointerMove);
+    window.removeEventListener('touchmove', onChartPanPointerMove);
     if (axisDragApplyRaf !== 0) {
       cancelAnimationFrame(axisDragApplyRaf);
       axisDragApplyRaf = 0;
