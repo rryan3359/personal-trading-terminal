@@ -523,30 +523,107 @@ function cubicBezierEasing(
 }
 const SMOOTH_EASE_FN = cubicBezierEasing(0.22, 1, 0.36, 1);
 
-/** Tween an element's scrollTop to `to` over durationMs with the
- *  smooth easing. Returns a cancel function. A no-op distance
- *  applies instantly. Stops early if the element unmounts. */
-function tweenScrollTop(
-  el: HTMLElement,
-  to: number,
+/** Momentum (fling) tuning for the swipe wheel (Ryan 2026-11-27:
+ *  the drag is 1:1 now, but it stops dead on release — it needs
+ *  to glide like a real picker). The release velocity is taken
+ *  from the finger's motion over the last ~100ms, mapped to list
+ *  px/ms (× ROW_PX / MAG_STEP_PX); the glide decays
+ *  exponentially with time constant TAU, and snaps to the nearest
+ *  row once it is slow enough. */
+const MOMENTUM_TAU_MS = 120;
+const MOMENTUM_MIN_VEL = 0.18; // list px/ms — below this, snap only
+const MOMENTUM_MAX_VEL = 2.5; // list px/ms — cap on the fling speed
+const MOMENTUM_STOP_VEL = 0.08; // list px/ms — glide ends, snap starts
+const MOMENTUM_MAX_MS = 1200; // safety cap on one glide
+const VELOCITY_WINDOW_MS = 100; // recent-motion window for the release velocity
+const VELOCITY_MAX_AGE_MS = 150; // drop older samples
+const VELOCITY_MIN_DT_MS = 30; // need at least this much time for a stable estimate
+const VELOCITY_CAP_FINGER = 4; // px/ms — cap on the raw finger speed
+
+/** True modulo (JS % keeps the sign). */
+function mod(a: number, n: number): number {
+  return ((a % n) + n) % n;
+}
+
+/** Finger velocity (px/ms) from recent move samples: the slope
+ *  over the last ~100ms (falling back to the oldest sample if
+ *  the window is too short for a stable estimate). Only moving
+ *  samples are recorded (see gearVelRef), so a stationary lift
+ *  cannot dilute it. */
+function fingerVelocity(samples: Array<{ t: number; dy: number }>): number {
+  if (samples.length < 2) return 0;
+  const now = samples[samples.length - 1].t;
+  let i = samples.length - 1;
+  while (i > 0 && now - samples[i - 1].t <= VELOCITY_WINDOW_MS) {
+    i--;
+  }
+  const a = samples[i];
+  const b = samples[samples.length - 1];
+  if (b.t - a.t >= VELOCITY_MIN_DT_MS) {
+    return (b.dy - a.dy) / (b.t - a.t);
+  }
+  const a0 = samples[0];
+  if (b.t - a0.t >= VELOCITY_MIN_DT_MS) {
+    return (b.dy - a0.dy) / (b.t - a0.t);
+  }
+  return 0;
+}
+
+/** Map a virtual wheel position to a physical scrollTop.
+ *  v is unbounded: virtual row 0 centres at midBase, one row is
+ *  ROW_PX. The list renders 3 copies of the items (see
+ *  SwipePreviewList); the middle copy is canonical. The centred
+ *  row is round((v - midBase) / ROW_PX); its item is that row
+ *  mod N, and frac is the offset within the row band — so the
+ *  list scrolls continuously through the wrap: at a wrap
+ *  boundary the physical scrollTop jumps by exactly one copy
+ *  (±44N px), which lands on identical content and is invisible
+ *  (the viewport never touches the spacers there). */
+function wheelScrollTop(v: number, midBase: number, n: number): number {
+  const rowFloat = (v - midBase) / ROW_PX;
+  const rowRound = Math.round(rowFloat);
+  const frac = rowFloat - rowRound;
+  return midBase + ROW_PX * mod(rowRound, n) + frac * ROW_PX;
+}
+
+/** Tween a virtual wheel position from `fromV` to `toV` over
+ *  durationMs with the smooth easing, calling `apply` every
+ *  frame. Returns a cancel function. A no-op distance applies
+ *  instantly. Used for the release snap (and the end of a
+ *  momentum glide): the snap is at most half a row, but it may
+ *  cross a wrap boundary, so it must tween in virtual space —
+ *  tweening the physical scrollTop linearly would scroll
+ *  backwards through the whole list. */
+function tweenWheelValue(
+  fromV: number,
+  toV: number,
   durationMs: number,
+  apply: (v: number) => void,
+  done?: () => void,
 ): () => void {
-  const from = el.scrollTop;
-  if (Math.abs(to - from) < 0.5 || durationMs <= 0) {
-    el.scrollTop = to;
+  if (Math.abs(toV - fromV) < 0.5 || durationMs <= 0) {
+    apply(toV);
+    done?.();
     return () => {};
   }
   let raf = 0;
+  let cancelled = false;
   const start = performance.now();
   const tick = (now: number) => {
+    if (cancelled) return;
     const p = Math.min(1, (now - start) / durationMs);
-    el.scrollTop = from + (to - from) * SMOOTH_EASE_FN(p);
-    if (p < 1 && el.isConnected) {
+    apply(fromV + (toV - fromV) * SMOOTH_EASE_FN(p));
+    if (p < 1) {
       raf = requestAnimationFrame(tick);
+    } else {
+      done?.();
     }
   };
   raf = requestAnimationFrame(tick);
-  return () => cancelAnimationFrame(raf);
+  return () => {
+    cancelled = true;
+    cancelAnimationFrame(raf);
+  };
 }
 
 /** Swipe preview list (Ryan 2026-11-27): dragging a capsule zone
@@ -572,6 +649,11 @@ function SwipePreviewList({
   view: {
     zone: 'symbol' | 'interval';
     previewId: string;
+    /** Absolute centred row (unbounded — wraps past the ends);
+     *  the highlighted row is the one whose absolute index
+     *  matches, not just the id, so only one of the three copies
+     *  is ever highlighted. */
+    previewAbs: number;
     items: Array<{ id: string; label: string; icon?: string }>;
   } | null;
   /** The scroll container, owned by the parent: during a drag the
@@ -625,7 +707,8 @@ function SwipePreviewList({
       if (
         cur === null ||
         cur.zone !== view.zone ||
-        cur.previewId !== view.previewId
+        cur.previewId !== view.previewId ||
+        cur.previewAbs !== view.previewAbs
       ) {
         shownRef.current = view;
         setShown(view);
@@ -697,11 +780,20 @@ function SwipePreviewList({
     if (!first) return;
     const list = scrollRef.current;
     const row = list?.querySelector(
-      `[data-gear-row="${shown.previewId}"]`,
+      `[data-gear-row="${shown.previewId}"][data-copy="1"]`,
     ) as HTMLElement | null;
     if (!list || !row) return;
-    list.scrollTop =
+    // Centre the preview row — unless a drag has already driven
+    // the list there: this effect is passive, so it can run a
+    // frame after the drag's scrollTop write, and overwriting it
+    // would yank the list back by up to half a row for one
+    // frame. Within half a row of the target, the drag owns the
+    // position and this stays out of the way.
+    const target =
       row.offsetTop - (list.clientHeight - row.offsetHeight) / 2;
+    if (Math.abs(list.scrollTop - target) > ROW_PX / 2) {
+      list.scrollTop = target;
+    }
   }, [shown, scrollRef]);
 
   if (shown === null) return null;
@@ -729,31 +821,44 @@ function SwipePreviewList({
             row) so even the first/last row can scroll to the
             card's vertical centre. */}
         <div className="h-[140px] shrink-0" aria-hidden="true" />
-        {shown.items.map((item) => {
-          const selected = item.id === shown.previewId;
-          return (
-            <div
-              key={item.id}
-              data-gear-row={item.id}
-              data-testid={`gear-row-${item.id}`}
-              className={`flex h-11 w-full shrink-0 items-center gap-3 rounded-2xl px-3 text-[15px] ${
-                selected
-                  ? 'font-semibold text-white'
-                  : 'font-normal text-[#787b86]'
-              }`}
-            >
-              {item.icon !== undefined && (
-                <span
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
-                  aria-hidden="true"
-                >
-                  {item.icon}
-                </span>
-              )}
-              <span className="truncate">{item.label}</span>
-            </div>
-          );
-        })}
+        {/* Three copies of the items (Ryan 2026-11-27: the wheel
+            wraps — dragging past the last row continues onto the
+            first). The middle copy is canonical; the parent maps
+            the virtual wheel position onto it (see
+            wheelScrollTop), so scrolling through the wrap lands
+            on identical content instead of stopping at the end.
+            Rows are highlighted by absolute index, so only one
+            of the three copies is ever white/bold. */}
+        {[0, 1, 2].flatMap((copy) =>
+          shown.items.map((item, i) => {
+            const abs = copy * shown.items.length + i;
+            const selected = abs === shown.previewAbs;
+            return (
+              <div
+                key={`${copy}-${item.id}`}
+                data-gear-row={item.id}
+                data-copy={copy}
+                data-abs={abs}
+                data-testid={`gear-row-${item.id}`}
+                className={`flex h-11 w-full shrink-0 items-center gap-3 rounded-2xl px-3 text-[15px] ${
+                  selected
+                    ? 'font-semibold text-white'
+                    : 'font-normal text-[#787b86]'
+                }`}
+              >
+                {item.icon !== undefined && (
+                  <span
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2a2e39] text-xs font-bold text-white"
+                    aria-hidden="true"
+                  >
+                    {item.icon}
+                  </span>
+                )}
+                <span className="truncate">{item.label}</span>
+              </div>
+            );
+          }),
+        )}
         <div className="h-[140px] shrink-0" aria-hidden="true" />
         </div>
       </div>
@@ -1470,11 +1575,15 @@ export default function MobileBottomBar({
     zone: 'symbol' | 'interval';
     previewId: string;
     step: number;
+    /** Absolute centred row (unbounded — wraps past the ends);
+     *  the list highlights the row whose absolute index matches. */
+    absRow: number;
   } | null>(null);
   const magRef = useRef<{
     zone: 'symbol' | 'interval';
     previewId: string;
     step: number;
+    absRow: number;
   } | null>(null);
   /** Lazily created WebAudio context for the gear tick on iPhones
    *  (no Vibration API there) — see fireGearTick. */
@@ -1484,16 +1593,42 @@ export default function MobileBottomBar({
    *  directly from the finger. */
   const gearCardRef = useRef<HTMLDivElement | null>(null);
   /** Wheel anchor for the active drag: the scrollTop that centres
-   *  the current value's row, and that row's index. The list's
-   *  scrollTop is base + (-dy) * ROW_PX / MAG_STEP_PX, so the
-   *  rows follow the finger 1:1. Reset on every drag end. */
+   *  the current value's row (middle copy), that row's index,
+   *  and the virtual wheel position. The virtual position v is
+   *  unbounded — row 0 centres at midBase, one row is ROW_PX —
+   *  and the physical scrollTop is wheelScrollTop(v), so the
+   *  list wraps through the ends instead of stopping. `samples`
+   *  is the recent finger motion for the release velocity;
+   *  `willFling` is set on every move once the gesture is a real
+   *  swipe with enough speed to glide on release. Reset on every
+   *  drag end (or when a momentum glide takes over). */
   const gearDragRef = useRef<{
     baseScrollTop: number;
     baseIndex: number;
+    midBase: number;
     zone: 'symbol' | 'interval';
+    v: number;
+    releaseVel: number;
+    willFling: boolean;
   } | null>(null);
   /** Cancel for the release snap tween (a fresh drag cancels it). */
   const gearSnapRef = useRef<(() => void) | null>(null);
+  /** Cancel for a running momentum glide (a fresh drag, or the
+   *  glide finishing, clears it). The glide's settle commit is
+   *  skipped when it is cancelled. */
+  const gearMomentumRef = useRef<(() => void) | null>(null);
+  /** Recent finger motion for the release velocity, sampled on
+   *  every drag move — including the pre-mount ones: the list
+   *  mounts a move or two into a fast flick (React batches
+   *  continuous-event updates), so sampling only once the list
+   *  exists would miss the flick's early motion and report no
+   *  speed at all. Only moving samples are kept (a repeated dy
+   *  is the stationary lift, not motion). Reset on every fresh
+   *  drag. */
+  const gearVelRef = useRef<{
+    samples: Array<{ t: number; dy: number }>;
+    lastDy: number | null;
+  }>({ samples: [], lastDy: null });
 
   /** Minimal toast (no toast system in the app): a dark pill above
    *  the bottom bar, auto-dismissed. Used for 尚未支援 / 儲存確認 /
@@ -1542,6 +1677,59 @@ export default function MobileBottomBar({
     return { previewId, step };
   };
 
+  /** Drive the wheel to virtual position v: set the physical
+   *  scrollTop (wrap-aware, see wheelScrollTop), read the centred
+   *  row off it, and update the preview + fire one gear tick per
+   *  centre-row change. Shared by the drag handler (1:1 with the
+   *  finger) and the momentum glide (rAF-driven). Also records
+   *  the unbounded centred row on the list element
+   *  (data-wheel-row) so tests can count rows crossed through
+   *  wraps. */
+  const applyWheelV = (
+    v: number,
+    drag: {
+      baseIndex: number;
+      midBase: number;
+      zone: 'symbol' | 'interval';
+    },
+    items: Array<string>,
+  ) => {
+    const card = gearCardRef.current;
+    if (card === null) return;
+    const n = items.length;
+    if (n === 0) return;
+    const maxScroll = Math.max(0, card.scrollHeight - card.clientHeight);
+    card.scrollTop = Math.max(
+      0,
+      Math.min(maxScroll, wheelScrollTop(v, drag.midBase, n)),
+    );
+    const rowRound = Math.round((v - drag.midBase) / ROW_PX);
+    const deltaRows = rowRound - drag.baseIndex;
+    const previewId = items[mod(rowRound, n)];
+    card.dataset.wheelRow = String(rowRound);
+    const prev = magRef.current;
+    if (
+      prev === null ||
+      prev.zone !== drag.zone ||
+      prev.previewId !== previewId ||
+      prev.absRow !== rowRound
+    ) {
+      // One tick per centre-row change; the first appearance on
+      // the current row is not a step.
+      if (prev !== null || deltaRows !== 0) {
+        fireGearTick(gearAudioRef);
+      }
+      const m = {
+        zone: drag.zone,
+        previewId,
+        step: deltaRows,
+        absRow: rowRound,
+      };
+      magRef.current = m;
+      setMagnifier(m);
+    }
+  };
+
   const onZoneDrag =
     /* eslint-disable react-hooks/refs -- onZoneDrag is only ever
        invoked from the native pointer handlers in usePointerSwipe
@@ -1550,6 +1738,12 @@ export default function MobileBottomBar({
        commit: the final onDrag and the swipe run inside one
        pointerup handler, so state would still be stale there. */
     (zone: 'symbol' | 'interval') => (dy: number) => {
+      // A fresh drag cancels a running momentum glide (and its
+      // deferred commit): the finger is in charge again.
+      if (gearMomentumRef.current !== null) {
+        gearMomentumRef.current();
+        gearMomentumRef.current = null;
+      }
       const next = previewFor(zone, dy);
       const prev = magRef.current;
       // Finger-follow (Ryan 2026-11-27): while swiping, the capsule
@@ -1573,6 +1767,23 @@ export default function MobileBottomBar({
         // A fresh drag cancels any release snap still running.
         gearSnapRef.current?.();
         gearSnapRef.current = null;
+        // Fresh drag: restart the velocity history (see
+        // gearVelRef).
+        gearVelRef.current = { samples: [], lastDy: null };
+      }
+      // Record this move's finger position for the release
+      // velocity (both paths — the list may not be mounted yet).
+      // A repeated dy is the stationary lift, not motion.
+      if (dy !== gearVelRef.current.lastDy) {
+        gearVelRef.current.lastDy = dy;
+        const now = performance.now();
+        gearVelRef.current.samples.push({ t: now, dy });
+        while (
+          gearVelRef.current.samples.length > 0 &&
+          now - gearVelRef.current.samples[0].t > VELOCITY_MAX_AGE_MS
+        ) {
+          gearVelRef.current.samples.shift();
+        }
       }
       if (textEl) {
         const clamped = Math.max(
@@ -1596,55 +1807,54 @@ export default function MobileBottomBar({
         if (drag === null || drag.zone !== zone) {
           // Anchor from geometry (robust even if the mount
           // effect has not centred the list yet): the scrollTop
-          // that puts the current row on the centre band.
+          // that puts the current row (middle copy) on the
+          // centre band.
           const row = card.querySelector(
-            `[data-gear-row="${currentId}"]`,
+            `[data-gear-row="${currentId}"][data-copy="1"]`,
           ) as HTMLElement | null;
           const baseScrollTop = row
             ? row.offsetTop -
               (card.clientHeight - row.offsetHeight) / 2
             : card.scrollTop;
+          const baseIndex = Math.max(0, items.indexOf(currentId));
           drag = {
             baseScrollTop,
-            baseIndex: Math.max(0, items.indexOf(currentId)),
+            baseIndex,
+            midBase: baseScrollTop - baseIndex * ROW_PX,
             zone,
+            v: baseScrollTop,
+            releaseVel: 0,
+            willFling: false,
           };
           gearDragRef.current = drag;
         }
-        const maxScroll = Math.max(
-          0,
-          card.scrollHeight - card.clientHeight,
-        );
-        const target = Math.max(
-          0,
+        // Virtual position: 1:1 with the finger, one row per
+        // MAG_STEP_PX of drag. The list wraps (see
+        // wheelScrollTop), so there is no clamp at the ends.
+        const v = drag.baseScrollTop - dy * (ROW_PX / MAG_STEP_PX);
+        drag.v = v;
+        // Release velocity from the finger's recent motion (see
+        // gearVelRef — sampled on every move, including the
+        // pre-mount ones): the fling on release glides from this
+        // speed. A slow tail before release means no fling.
+        const velFinger = Math.max(
+          -VELOCITY_CAP_FINGER,
           Math.min(
-            maxScroll,
-            drag.baseScrollTop - dy * (ROW_PX / MAG_STEP_PX),
+            VELOCITY_CAP_FINGER,
+            fingerVelocity(gearVelRef.current.samples),
           ),
         );
-        card.scrollTop = target;
-        const deltaRows = Math.round(
-          (target - drag.baseScrollTop) / ROW_PX,
+        drag.releaseVel = Math.max(
+          -MOMENTUM_MAX_VEL,
+          Math.min(
+            MOMENTUM_MAX_VEL,
+            -velFinger * (ROW_PX / MAG_STEP_PX),
+          ),
         );
-        const idx = Math.max(
-          0,
-          Math.min(items.length - 1, drag.baseIndex + deltaRows),
-        );
-        const previewId = items[idx];
-        if (
-          prev === null ||
-          prev.zone !== zone ||
-          prev.previewId !== previewId
-        ) {
-          // One tick per centre-row change; the first
-          // appearance on the current row is not a step.
-          if (prev !== null || deltaRows !== 0) {
-            fireGearTick(gearAudioRef);
-          }
-          const m = { zone, previewId, step: deltaRows };
-          magRef.current = m;
-          setMagnifier(m);
-        }
+        drag.willFling =
+          Math.abs(dy) >= SWIPE_MIN_DY &&
+          Math.abs(drag.releaseVel) >= MOMENTUM_MIN_VEL;
+        applyWheelV(v, drag, items);
         return;
       }
       if (
@@ -1658,14 +1868,152 @@ export default function MobileBottomBar({
         if (prev !== null || next.step !== 0) {
           fireGearTick(gearAudioRef);
         }
-        const m = { zone, previewId: next.previewId, step: next.step };
+        // Absolute row of the middle copy, so the highlight
+        // lands on the copy the mount effect centres.
+        const items = zone === 'symbol' ? watchlist : swipeIntervals;
+        const m = {
+          zone,
+          previewId: next.previewId,
+          step: next.step,
+          absRow:
+            items.length + Math.max(0, items.indexOf(next.previewId)),
+        };
         magRef.current = m;
         setMagnifier(m);
       }
     };
   /* eslint-enable react-hooks/refs */
+  /** Momentum glide after a fling release (Ryan 2026-11-27).
+   *  The list keeps sliding in the release direction on a rAF
+   *  loop, velocity decaying exponentially (friction), one gear
+   *  tick per row crossed — the glide is what makes the wheel
+   *  feel like it has frame rate, instead of stopping dead the
+   *  instant the finger lifts. When the speed drops below the
+   *  threshold it snaps to the nearest row (virtual space, so a
+   *  snap across the wrap goes the short way), then commits the
+   *  settled preview and hides the list. A fresh drag cancels
+   *  the glide (and the deferred commit). */
+  const startMomentum = (
+    drag: {
+      baseIndex: number;
+      midBase: number;
+      zone: 'symbol' | 'interval';
+      v: number;
+      releaseVel: number;
+    },
+    card: HTMLDivElement,
+  ) => {
+    const items = drag.zone === 'symbol' ? watchlist : swipeIntervals;
+    const n = items.length;
+    if (n === 0) return;
+    const maxScroll = Math.max(0, card.scrollHeight - card.clientHeight);
+    // ScrollTop only — the centred row cannot change during a
+    // snap (at most half a row), so no preview update is needed.
+    const setScroll = (vv: number) => {
+      card.scrollTop = Math.max(
+        0,
+        Math.min(maxScroll, wheelScrollTop(vv, drag.midBase, n)),
+      );
+    };
+    let v = drag.v;
+    let vel = drag.releaseVel;
+    // First rAF timestamp initialises the clock (performance.now
+    // is impure, so it must not be called here in the component
+    // body — the loop's first frame supplies it).
+    let last = 0;
+    let start = 0;
+    let raf = 0;
+    let snapCancel: (() => void) | null = null;
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      snapCancel?.();
+      gearMomentumRef.current = null;
+    };
+    gearMomentumRef.current = cancel;
+    const settle = () => {
+      // Snap to the nearest row, then commit the settled
+      // preview and hide the list. The snap runs under the
+      // exit fade, as before.
+      const vSnap =
+        drag.midBase + ROW_PX * Math.round((v - drag.midBase) / ROW_PX);
+      snapCancel = tweenWheelValue(v, vSnap, 180, setScroll, () => {
+        if (cancelled) return;
+        gearMomentumRef.current = null;
+        const committed =
+          drag.zone === 'symbol'
+            ? commitSymbolPreview()
+            : commitIntervalPreview();
+        magRef.current = null;
+        setMagnifier(null);
+        const textEl =
+          drag.zone === 'symbol'
+            ? symbolTextRef.current
+            : intervalTextRef.current;
+        if (committed && textEl) {
+          // The value-change slide-in takes over: clear the
+          // follow offset so it starts clean.
+          textEl.style.transform = '';
+        }
+      });
+    };
+    const step = (now: number) => {
+      if (cancelled) return;
+      if (last === 0) {
+        last = now;
+        start = now;
+      }
+      const dt = Math.min(50, now - last);
+      last = now;
+      vel *= Math.exp(-dt / MOMENTUM_TAU_MS);
+      v += vel * dt;
+      if (!card.isConnected) {
+        gearMomentumRef.current = null;
+        return;
+      }
+      applyWheelV(v, drag, items);
+      if (
+        Math.abs(vel) < MOMENTUM_STOP_VEL ||
+        now - start > MOMENTUM_MAX_MS
+      ) {
+        settle();
+        return;
+      }
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  };
+
   const onZoneEnd = () => {
     const m = magRef.current;
+    const card = gearCardRef.current;
+    const drag = gearDragRef.current;
+    // Fling release (Ryan 2026-11-27): keep the list mounted and
+    // let the momentum glide carry it; the value commits when
+    // the glide settles (see startMomentum). The swipe that
+    // already fired for this gesture was swallowed (commit*
+    // Preview return true while willFling is set), so nothing
+    // has committed yet. The capsule text still glides back to
+    // rest now — the finger is gone — and the value slide-in
+    // (if any) runs at settle.
+    if (drag !== null && drag.willFling && m !== null && card !== null) {
+      gearDragRef.current = null;
+      startMomentum(drag, card);
+      const textEl =
+        m.zone === 'symbol' ? symbolTextRef.current : intervalTextRef.current;
+      if (textEl) {
+        const current = textEl.style.transform;
+        textEl.style.transform = '';
+        if (current) {
+          textEl.animate(
+            [{ transform: current }, { transform: 'translateY(0px)' }],
+            { duration: 180, easing: SMOOTH_EASING },
+          );
+        }
+      }
+      return;
+    }
     // Did this gesture commit a new value? (Checked before the
     // magnifier is cleared; the values are still the pre-commit
     // ones — the commit's state update has not rendered yet.)
@@ -1676,26 +2024,23 @@ export default function MobileBottomBar({
     magRef.current = null;
     setMagnifier(null);
     // Release snap (Ryan 2026-11-27): the wheel may stop
-    // between rows — tween the list to the nearest row over
-    // ~180ms with the smooth easing, so it lands on a row
-    // instead of floating mid-row. Runs under the exit fade;
-    // the tween stops itself if the card unmounts.
-    const card = gearCardRef.current;
-    const drag = gearDragRef.current;
+    // between rows — tween to the nearest row over ~180ms with
+    // the smooth easing, so it lands on a row instead of
+    // floating mid-row. Runs under the exit fade. The snap
+    // tweens in virtual space (see tweenWheelValue), so a snap
+    // across the wrap goes the short way.
     gearDragRef.current = null;
     if (card !== null && drag !== null) {
-      const deltaRows = Math.round(
-        (card.scrollTop - drag.baseScrollTop) / ROW_PX,
-      );
-      const maxScroll = Math.max(
-        0,
-        card.scrollHeight - card.clientHeight,
-      );
-      const target = Math.max(
-        0,
-        Math.min(maxScroll, drag.baseScrollTop + deltaRows * ROW_PX),
-      );
-      gearSnapRef.current = tweenScrollTop(card, target, 180);
+      const n = drag.zone === 'symbol' ? watchlist.length : swipeIntervals.length;
+      const maxScroll = Math.max(0, card.scrollHeight - card.clientHeight);
+      const vSnap =
+        drag.midBase + ROW_PX * Math.round((drag.v - drag.midBase) / ROW_PX);
+      gearSnapRef.current = tweenWheelValue(drag.v, vSnap, 180, (vv) => {
+        card.scrollTop = Math.max(
+          0,
+          Math.min(maxScroll, wheelScrollTop(vv, drag.midBase, n)),
+        );
+      });
     }
     if (m === null) return;
     const textEl =
@@ -1724,6 +2069,15 @@ export default function MobileBottomBar({
    *  committed — the caller then skips the single-step cycle). The
    *  slide animation direction follows the preview's step sign. */
   const commitSymbolPreview = (): boolean => {
+    // A fling is pending for this zone: the swipe already fired
+    // for this gesture, but the value is not final until the
+    // momentum glide settles — swallow it (returning true also
+    // skips the single-step cycle fallback) and let the glide
+    // commit at settle.
+    const drag = gearDragRef.current;
+    if (drag !== null && drag.zone === 'symbol' && drag.willFling) {
+      return true;
+    }
     const m = magRef.current;
     if (m && m.zone === 'symbol' && m.previewId !== symbol) {
       symbolDirRef.current = m.step >= 0 ? 'up' : 'down';
@@ -1733,6 +2087,10 @@ export default function MobileBottomBar({
     return false;
   };
   const commitIntervalPreview = (): boolean => {
+    const drag = gearDragRef.current;
+    if (drag !== null && drag.zone === 'interval' && drag.willFling) {
+      return true;
+    }
     const m = magRef.current;
     if (m && m.zone === 'interval' && m.previewId !== interval) {
       intervalDirRef.current = m.step >= 0 ? 'up' : 'down';
@@ -1751,6 +2109,18 @@ export default function MobileBottomBar({
       : {
           zone: magnifier.zone,
           previewId: magnifier.previewId,
+          // The highlighted row is the middle copy of the centred
+          // item (absRow itself is unbounded — it counts wraps).
+          previewAbs:
+            (magnifier.zone === 'symbol'
+              ? watchlist.length
+              : swipeIntervals.length) +
+            mod(
+              magnifier.absRow,
+              magnifier.zone === 'symbol'
+                ? watchlist.length
+                : swipeIntervals.length,
+            ),
           items:
             magnifier.zone === 'symbol'
               ? watchlist.map((s) => ({
