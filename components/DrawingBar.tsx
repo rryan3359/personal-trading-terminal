@@ -1,75 +1,45 @@
 'use client';
 
 /**
- * DrawingBar.tsx — left vertical drawing toolbar (TradingView-style).
+ * DrawingBar.tsx — drawing toolbar (TradingView-style).
  *
- * Top: cursor/select tool (active when no drawing tool is armed;
- * clicking it exits drawing mode). Then a favorites button (star;
- * opens a flyout of starred tools, empty until something is
- * starred), then one icon per tool GROUP — 10 groups, 41 tools
- * (44 registered; the 3 vertical-line tools are hidden from the
- * toolbar per Ryan's decision, see below), per MASTER TASK §4.2
- * (trend lines, horizontal lines, channels, Fibonacci, Gann,
- * Pitchfork, geometric shapes, patterns,
- * text & annotations, measurement): each group shows its last-used
- * tool (armed > last-used > first), with a small chevron. Clicking
- * a group opens a flyout panel to the right of the bar listing that
- * group's tools (icon + Chinese label + star to toggle favorite);
- * picking one arms it, closes the panel and updates the group icon.
- * Clicking the armed tool in the panel disarms it. Double-click
- * (or Shift+click) arms in continuous mode. Clicking outside the
- * panel or pressing Esc closes it — the panel has no backdrop div
- * (a full-screen backdrop would swallow the second click of a
- * double-click on the group button, so closing is done by a
- * document-level pointerdown listener in capture phase instead:
- * a press whose target is outside both the panel
- * [data-flyout-panel] and the sidebar [data-drawing-bar] closes
- * the flyout). Single-tool groups (measure) render as a plain
- * button with no flyout, plus a small star button underneath to
- * toggle its favorite (same star style as the flyout items).
- * An outside press that closes the flyout is swallowed: it only
- * closes the flyout, exactly like the old backdrop did — nothing
- * underneath runs (no drawing point on the chart, no toolbar /
- * watchlist action). Two halves, both in the pointerdown branch:
- * stopPropagation + preventDefault on the capture-phase pointerdown
- * keeps the press from the canvas (and suppresses the
- * compatibility mousedown/mouseup), plus a one-shot capture
- * `click` listener, because Chrome still fires the click for the
- * same press even when pointerdown is canceled (verified with a
- * minimal CDP probe, verify/probe-pointer-swallow.mjs: all four
- * variants — pointerdown stop+prevent, prevent-only, mousedown
- * stop+prevent, stop-only — still delivered the click). Only the
- * primary button produces a click, so only it arms the
- * click-swallow; a right/middle press just closes. Presses on the
- * sidebar itself are NOT swallowed: the second press of a real
- * double-click on a group button must still reach that button,
- * or the click-toggle would break (React flushes the pointerdown
- * state update before the click handler reads isOpen).
- * Bottom: magnet (click cycles off -> weak -> strong, current
- * strength shown under the icon) and clear.
+ * Desktop (>=md) and mobile (<md) each get the same draggable
+ * floating favorites bar (Ryan 2026-11-26 mobile, 2026-11-28
+ * desktop): narrow 40px, dark, icon-only, grip on top; only the
+ * starred tools show (defaults when nothing is starred yet); drag
+ * by the grip handle, position persists in localStorage — mobile
+ * under `ptt:mobile-tools-pos`, desktop under its own key
+ * `ptt:floating-tools-pos-desktop` (viewports differ, so the keys
+ * must not be shared). The cursor button exits drawing mode; ⋯
+ * opens the full tool list (mobile: bottom sheet; desktop:
+ * frosted panel anchored to the bar's right). A round undo button
+ * sits below the bar (TV f_001), wired by page.tsx via
+ * onUndo/canUndo. Desktop keeps magnet + clear on the bar (they
+ * lived on the old fixed rail).
+ *
+ * Favorites (`ptt:favorite-tools`) and per-group last-used tools
+ * (`ptt:last-used-tools`) persist in localStorage; both keys are
+ * defined here in DrawingBar.tsx only, never in lib/store.ts.
+ * The favorites list is shared between the desktop and mobile
+ * bars (one state); both bars show them in group order.
+ *
+ * The full tool list (both surfaces) has 7 tabs covering all 11
+ * groups (41 tools; the 3 vertical-line tools are hidden per
+ * Ryan's decision, see below), each tool with a star to toggle
+ * favorite; picking one arms it and closes the panel/sheet.
+ * Double-click (or Shift+click) arms in continuous mode.
  *
  * Vertical lines (verticalStraightLine, verticalSegment,
  * verticalRayLine) are NOT on this toolbar: removed 2026-11-25 by
- * Ryan's decision, reaffirmed 2026-11-26 (the MASTER TASK §4.2
- * group-3 listing does not override it). The tools stay registered
+ * Ryan's decision, reaffirmed 2026-11-26. The tools stay registered
  * in lib/chart-config.ts / lib/chart-theme.ts / Chart.tsx, so
  * drawings saved earlier still render and stay editable, and the
  * context menu "加入垂直線" still creates them. Stored favorites /
  * last-used entries naming them are filtered out on load (the
  * stored values are left untouched until the next save).
  *
- * Favorites (`ptt:favorite-tools`) and per-group last-used tools
- * (`ptt:last-used-tools`) persist in localStorage; both keys are
- * defined here in DrawingBar.tsx only, never in lib/store.ts.
- * Group tooltips show "Group — 最近使用：X" when a last-used tool
- * is recorded, otherwise just the group name. Single-clicking a
- * group still only opens its flyout (it does NOT arm the last-used
- * tool — that is the TradingView behaviour, pending Ryan's ruling).
- *
- * The flyout is rendered through a portal to document.body with
- * fixed positioning, so it is not clipped by the aside's vertical
- * scroll. Undo / redo live in the top Toolbar now (TradingView puts
- * them there).
+ * Undo / redo live in the top Toolbar now (TradingView puts them
+ * there).
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -720,6 +690,52 @@ function clampFloatPos(p: { x: number; y: number }): {
   };
 }
 
+/** Floating tools bar position (desktop), persisted in localStorage
+ *  under its own key (Ryan 2026-11-28: desktop gets the same
+ *  draggable favorites bar as mobile). Never shared with the
+ *  mobile key: the viewports differ, so a stored mobile position
+ *  would park the desktop bar in the wrong place. */
+const DESK_FLOATING_TOOLS_POS_KEY = 'ptt:floating-tools-pos-desktop';
+
+function loadDeskFloatingToolsPos(): { x: number; y: number } | null {
+  try {
+    const raw = window.localStorage.getItem(DESK_FLOATING_TOOLS_POS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as { x?: unknown; y?: unknown };
+    if (typeof p.x !== 'number' || typeof p.y !== 'number') return null;
+    return { x: p.x, y: p.y };
+  } catch {
+    return null;
+  }
+}
+
+function saveDeskFloatingToolsPos(p: { x: number; y: number }): void {
+  try {
+    window.localStorage.setItem(DESK_FLOATING_TOOLS_POS_KEY, JSON.stringify(p));
+  } catch {
+    // Storage full / unavailable — non-fatal.
+  }
+}
+
+/** Clamp a desktop floating-bar position into the viewport, keeping
+ *  the whole bar visible: y stays below the top toolbar (44px) and
+ *  above the bottom bars (RangeBar + StatusBar), using the bar's
+ *  measured height (400px estimate before the first render, when
+ *  the height is still unknown). Returns the same object when nothing
+ *  changed, so re-clamp effects never loop. */
+function clampDeskFloatPos(
+  p: { x: number; y: number },
+  barH: number,
+): { x: number; y: number } {
+  const h = barH > 0 ? barH : 400;
+  const nx = Math.min(Math.max(0, p.x), Math.max(0, window.innerWidth - FLOAT_W));
+  const ny = Math.min(
+    Math.max(44, p.y),
+    Math.max(44, window.innerHeight - h - 8),
+  );
+  return nx === p.x && ny === p.y ? p : { x: nx, y: ny };
+}
+
 /** Display order for compact-bar favorites: group order, then tool
  *  order within the group (not starred order). */
 function sortToolsByGroup(ids: DrawingTool[]): DrawingTool[] {
@@ -953,6 +969,229 @@ function FullToolsSheet({
   );
 }
 
+/**
+ * Desktop full tool list panel (Ryan 2026-11-28: the desktop
+ * floating bar's ⋯ opens this instead of the mobile bottom sheet).
+ * Same tabs / search / star toggles as FullToolsSheet (reuses
+ * SHEET_TAB_DEFS + sheetTabToolIds), but a desktop frosted panel
+ * anchored to the right of the floating bar (like GroupFlyout was):
+ * fixed, 380px wide, max 72vh, scrollable grid. Closes on the
+ * backdrop press, Esc, resize, or a tool pick (via onSelect).
+ */
+function DesktopToolsPanel({
+  favorites,
+  activeTool,
+  onSelect,
+  onToggleFavorite,
+  onClose,
+  anchorLeft,
+  anchorTop,
+}: {
+  favorites: DrawingTool[];
+  activeTool: DrawingTool | null;
+  onSelect: (tool: DrawingTool, continuous: boolean) => void;
+  onToggleFavorite: (tool: DrawingTool) => void;
+  onClose: () => void;
+  anchorLeft: number;
+  anchorTop: number;
+}) {
+  const [tabId, setTabId] = useState<string>(() =>
+    favorites.length > 0 ? 'favorites' : 'trend',
+  );
+  const [query, setQuery] = useState('');
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [top, setTop] = useState(anchorTop);
+
+  // Clamp the panel inside the viewport once its height is known
+  // (same pattern as GroupFlyout).
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const h = el.offsetHeight;
+    const maxTop = window.innerHeight - h - 8;
+    setTop(Math.max(8, Math.min(anchorTop, maxTop)));
+  }, [anchorTop]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    const onResize = () => onClose();
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [onClose]);
+
+  const q = query.trim().toLowerCase();
+  // Searching overrides the active tab: match label or tool id.
+  const visibleIds: DrawingTool[] =
+    q === ''
+      ? sheetTabToolIds(tabId, favorites)
+      : DRAWING_TOOLS.filter(
+          (t) =>
+            !TOOLBAR_HIDDEN_TOOLS.has(t.id) &&
+            (t.label.toLowerCase().includes(q) || t.id.toLowerCase().includes(q)),
+        ).map((t) => t.id);
+  return createPortal(
+    <>
+      <div
+        className="fixed inset-0 z-40 bg-black/40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        data-desktop-tools-panel
+        role="dialog"
+        aria-label="繪圖"
+        data-testid="desktop-tools-panel"
+        className="fixed z-50 flex w-[380px] max-w-[calc(100vw-16px)] flex-col rounded-md border border-tv-border bg-tv-panel/80 shadow-tv-menu backdrop-blur-xl"
+        style={{ left: anchorLeft, top, maxHeight: '72vh' }}
+      >
+        <div className="relative flex shrink-0 items-center justify-between px-3 pb-1 pt-2.5">
+          <span className="text-[13px] font-medium text-tv-text-strong">繪圖</span>
+          <button
+            onClick={onClose}
+            aria-label="關閉"
+            data-testid="desktop-tools-panel-close"
+            className="flex h-7 w-7 items-center justify-center rounded text-tv-muted hover:bg-tv-elevated hover:text-tv-text-strong"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="relative mx-3 mb-2 shrink-0">
+          <span
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-tv-muted"
+            aria-hidden="true"
+          >
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <circle cx="9" cy="9" r="5.5" />
+              <line x1="13.5" y1="13.5" x2="17" y2="17" />
+            </svg>
+          </span>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜尋"
+            aria-label="搜尋繪圖工具"
+            data-testid="desktop-tools-panel-search"
+            className="h-8 w-full rounded-md border border-tv-border bg-tv-workspace pl-9 pr-3 text-[13px] text-tv-text placeholder-tv-muted outline-none focus:border-tv-accent"
+          />
+        </div>
+        <div
+          role="tablist"
+          aria-label="繪圖工具分類"
+          className="mb-2 flex shrink-0 gap-1 overflow-x-auto px-3"
+          style={{ scrollbarWidth: 'none' }}
+        >
+          {SHEET_TAB_DEFS.map((tab) => {
+            const active = q === '' && tabId === tab.id;
+            return (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={active}
+                data-testid={`desktop-tools-panel-tab-${tab.id}`}
+                onClick={() => {
+                  setTabId(tab.id);
+                  setQuery('');
+                }}
+                className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1 text-[12px] ${
+                  active
+                    ? 'bg-tv-active font-medium text-tv-text-strong'
+                    : 'text-tv-muted hover:text-tv-text'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+          {visibleIds.length === 0 ? (
+            <div className="py-8 text-center text-[13px] text-tv-muted">
+              {q !== ''
+                ? `找不到符合「${query.trim()}」的工具`
+                : tabId === 'favorites'
+                  ? '尚未收藏，點卡片右上角的星號收藏'
+                  : '此分類沒有工具'}
+            </div>
+          ) : (
+            <div
+              className="grid grid-cols-3 gap-2"
+              data-testid="desktop-tools-panel-grid"
+            >
+              {visibleIds.map((id) => {
+                const tool = TOOL_BY_ID.get(id);
+                if (!tool) return null;
+                const active = activeTool === id;
+                const isFavorite = favorites.includes(id);
+                return (
+                  <div
+                    key={id}
+                    className={`relative rounded-md border ${
+                      active
+                        ? 'border-tv-accent bg-tv-active'
+                        : 'border-tv-border bg-tv-workspace'
+                    }`}
+                  >
+                    <button
+                      onClick={(e) => onSelect(id, e.shiftKey)}
+                      onDoubleClick={() => onSelect(id, true)}
+                      data-testid={`desktop-tools-panel-card-${id}`}
+                      aria-label={tool.label}
+                      title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
+                      className="flex w-full flex-col items-center gap-1.5 px-1 py-3 text-tv-text"
+                    >
+                      <span className="flex h-6 w-6 items-center justify-center">
+                        <ToolIcon tool={id} />
+                      </span>
+                      <span className="text-center text-[12px] leading-tight">
+                        {tool.label}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={
+                        isFavorite
+                          ? `取消收藏 ${tool.label}`
+                          : `收藏 ${tool.label}`
+                      }
+                      aria-pressed={isFavorite}
+                      title={
+                        isFavorite
+                          ? `取消收藏 ${tool.label}`
+                          : `收藏 ${tool.label}`
+                      }
+                      data-testid={`desktop-tools-panel-star-${id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleFavorite(id);
+                      }}
+                      className={`absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded hover:bg-tv-elevated ${
+                        isFavorite
+                          ? 'text-tv-star'
+                          : 'text-tv-muted hover:text-tv-text-strong'
+                      }`}
+                    >
+                      <StarIcon filled={isFavorite} size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </>,
+    document.body,
+  );
+}
+
 /** Star for the favorites button / flyout favorite toggles. */
 function StarIcon({ filled, size = 14 }: { filled: boolean; size?: number }) {
   return (
@@ -971,30 +1210,9 @@ function StarIcon({ filled, size = 14 }: { filled: boolean; size?: number }) {
   );
 }
 
-/** Small chevron marking a group button that opens a flyout. */
-function FlyoutChevron() {
-  return (
-    <span
-      className="pointer-events-none absolute bottom-[2px] right-[2px] text-tv-muted"
-      aria-hidden="true"
-    >
-      <svg width="7" height="7" viewBox="0 0 7 7" fill="currentColor">
-        <path d="M1.2 1.2 L6 3.5 L1.2 5.8 Z" />
-      </svg>
-    </span>
-  );
-}
-
-const BUTTON_BASE =
-  'relative flex h-9 w-9 shrink-0 items-center justify-center rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-tv-text-2';
-
 /** Narrow (40px) variant for the mobile floating bar (TV f_001). */
 const FLOAT_BUTTON_BASE =
   'relative flex h-8 w-8 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#2a2e39] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
-
-/** Magnet button: taller, icon + current strength label underneath. */
-const MAGNET_BUTTON_BASE =
-  'relative flex h-11 w-9 shrink-0 flex-col items-center justify-center gap-px rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong';
 
 /** Left accent bar marking the active tool / cursor. */
 function ActiveBar() {
@@ -1003,119 +1221,6 @@ function ActiveBar() {
       className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-tv-accent"
       aria-hidden="true"
     />
-  );
-}
-
-interface FlyoutAnchor {
-  top: number;
-  right: number;
-}
-
-/**
- * Flyout panel for one tool group, portalled to document.body so the
- * aside's vertical scroll never clips it. Positioned fixed, to the
- * right of the group button, clamped inside the viewport.
- */
-function GroupFlyout({
-  group,
-  anchor,
-  activeTool,
-  favorites,
-  onSelect,
-  onToggleFavorite,
-}: {
-  group: { title: string; ids: DrawingTool[] };
-  anchor: FlyoutAnchor;
-  activeTool: DrawingTool | null;
-  favorites: DrawingTool[];
-  onSelect: (tool: DrawingTool, continuous: boolean) => void;
-  onToggleFavorite: (tool: DrawingTool) => void;
-}) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const [top, setTop] = useState(anchor.top);
-
-  // Clamp the panel inside the viewport once its height is known.
-  useEffect(() => {
-    const el = panelRef.current;
-    if (!el) return;
-    const h = el.offsetHeight;
-    const maxTop = window.innerHeight - h - 8;
-    setTop(Math.max(8, Math.min(anchor.top, maxTop)));
-  }, [anchor.top]);
-
-  // No backdrop div here on purpose: a full-screen backdrop sits
-  // above the sidebar button, so the second press of a real
-  // double-click on a group button would land on the backdrop and
-  // close the flyout instead of reaching the button (no dblclick
-  // ever fires). Outside-press closing lives in DrawingBar's
-  // document-level pointerdown listener; the panel is marked with
-  // data-flyout-panel so that listener can tell it apart.
-  return (
-    <div
-      ref={panelRef}
-      data-flyout-panel
-      role="menu"
-      aria-label={group.title}
-      className="fixed z-50 w-44 overflow-hidden rounded-md border border-tv-border bg-tv-panel/80 py-1 shadow-tv-menu backdrop-blur-xl"
-      style={{ left: anchor.right + 6, top }}
-    >
-        <div className="px-3 pb-1 pt-2 text-[11px] font-medium tracking-wide text-tv-muted">
-          {group.title}
-        </div>
-        {group.ids.length === 0 && (
-          <div className="px-3 py-2 text-[13px] text-tv-muted">
-            尚未收藏工具
-          </div>
-        )}
-        {group.ids.map((id) => {
-          const tool = TOOL_BY_ID.get(id);
-          if (!tool) return null;
-          const active = activeTool === id;
-          const isFavorite = favorites.includes(id);
-          return (
-            <div
-              key={id}
-              className={`relative flex h-9 w-full items-center hover:bg-tv-elevated hover:text-tv-text-strong ${
-                active ? 'bg-tv-active text-tv-accent' : 'text-tv-text'
-              }`}
-            >
-              {active && (
-                <span
-                  className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-tv-accent"
-                  aria-hidden="true"
-                />
-              )}
-              <button
-                role="menuitem"
-                title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
-                onClick={(e) => onSelect(id, e.shiftKey)}
-                onDoubleClick={() => onSelect(id, true)}
-                className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left text-[13px] max-md:py-3"
-              >
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center">
-                  <ToolIcon tool={id} />
-                </span>
-                {tool.label}
-              </button>
-              <button
-                type="button"
-                aria-label={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
-                aria-pressed={isFavorite}
-                title={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleFavorite(id);
-                }}
-                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-tv-elevated ${
-                  isFavorite ? 'text-tv-star' : 'text-tv-muted hover:text-tv-text-strong'
-                }`}
-              >
-                <StarIcon filled={isFavorite} />
-              </button>
-            </div>
-          );
-        })}
-    </div>
   );
 }
 
@@ -1129,15 +1234,12 @@ export default function DrawingBar({
   canUndo,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
-  /** Title of the group whose flyout is open, or null. '收藏' is the
-   *  favorites flyout (not a TOOL_GROUPS entry). */
-  const [openGroup, setOpenGroup] = useState<string | null>(null);
   /** Starred tool ids, in starred order (persisted, ptt:favorite-tools). */
   const [favorites, setFavorites] = useState<DrawingTool[]>(() => loadFavoriteTools());
-  /** Last tool picked per group (drives the group icon + tooltip).
-   *  Persisted (ptt:last-used-tools); was session-only useState. */
-  const [lastUsed, setLastUsed] = useState<Record<string, DrawingTool>>(() => loadLastUsedTools());
-  const [anchor, setAnchor] = useState<FlyoutAnchor | null>(null);
+  /** Last tool picked per group (persisted, ptt:last-used-tools).
+   *  Write-only since the fixed rail went away (nothing reads it
+   *  now); the stored values are kept for a future use. */
+  const [, setLastUsed] = useState<Record<string, DrawingTool>>(() => loadLastUsedTools());
   /** Mobile: full tool list bottom sheet open. Controlled when
    *  sheetOpen is passed (page.tsx), uncontrolled otherwise. */
   const [internalSheetOpen, setInternalSheetOpen] = useState(false);
@@ -1166,6 +1268,29 @@ export default function DrawingBar({
     origY: number;
   } | null>(null);
   const floatBarRef = useRef<HTMLDivElement | null>(null);
+
+  /** Desktop floating tools bar (Ryan 2026-11-28: the desktop rail
+   *  is replaced by the same draggable favorites bar as mobile).
+   *  Own position state + storage key (ptt:floating-tools-pos-desktop),
+   *  own drag refs; the mobile bar above is untouched. Null until
+   *  mounted (same one-time mount-sync pattern as the mobile bar). */
+  const [deskFloatPos, setDeskFloatPos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const deskFloatPosRef = useRef<{ x: number; y: number }>({
+    x: 0,
+    y: 0,
+  });
+  const deskFloatDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const deskFloatBarRef = useRef<HTMLDivElement | null>(null);
+  /** Desktop full tool list panel (DesktopToolsPanel) open. */
+  const [deskPanelOpen, setDeskPanelOpen] = useState(false);
 
   // Position the floating bar on mount (saved position, else the
   // LEFT-edge default), clamped into the viewport; keep it inside
@@ -1196,6 +1321,55 @@ export default function DrawingBar({
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  // Desktop floating bar: position on mount (saved position, else
+  // the LEFT-edge default at ~35% down, same as mobile), clamped
+  // into the viewport; keep it inside on resize / rotation. Left
+  // edge by default because the price axis occupies the right edge.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-time mount
+     sync from localStorage + viewport size (external systems); a
+     lazy initializer would read window during SSR and mismatch
+     hydration (same as the mobile bar). */
+  useEffect(() => {
+    const initial = clampDeskFloatPos(
+      loadDeskFloatingToolsPos() ?? {
+        x: 8,
+        y: Math.round(window.innerHeight * 0.35),
+      },
+      0,
+    );
+    deskFloatPosRef.current = initial;
+    setDeskFloatPos(initial);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Keep the desktop floating bar inside the viewport on resize /
+  // rotation; a resize also closes the full-list panel (its anchor
+  // moves with the bar).
+  useEffect(() => {
+    const onResize = () => {
+      setDeskFloatPos((prev) =>
+        prev
+          ? clampDeskFloatPos(prev, deskFloatBarRef.current?.offsetHeight ?? 0)
+          : prev,
+      );
+      setDeskPanelOpen(false);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // Re-clamp the desktop bar once its height is known (after the
+  // first render) and whenever the favorites change (the bar grows
+  // / shrinks with the tool count). clampDeskFloatPos returns the
+  // same object when nothing changed, so this never loops.
+  useEffect(() => {
+    setDeskFloatPos((prev) =>
+      prev
+        ? clampDeskFloatPos(prev, deskFloatBarRef.current?.offsetHeight ?? 0)
+        : prev,
+    );
+  }, [deskFloatPos, favorites.length]);
 
   /** Grip drag: Pointer Events + setPointerCapture, touch-action none
    *  on the handle, so the drag never becomes a page scroll. Position
@@ -1232,14 +1406,53 @@ export default function DrawingBar({
     floatDragRef.current = null;
     saveFloatingToolsPos(floatPosRef.current);
   };
+
+  /** Desktop grip drag: same Pointer Events + setPointerCapture
+   *  pattern as the mobile bar, own refs / storage key. Starting a
+   *  drag closes the full-list panel (its anchor moves with the bar).
+   *  Position persists on release. */
+  const onDeskFloatHandlePointerDown = (e: React.PointerEvent) => {
+    const el = deskFloatBarRef.current;
+    if (!el) return;
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      // Pointer already gone; the drag still tracks by pointerId.
+    }
+    setDeskPanelOpen(false);
+    deskFloatDragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: deskFloatPosRef.current.x,
+      origY: deskFloatPosRef.current.y,
+    };
+  };
+  const onDeskFloatHandlePointerMove = (e: React.PointerEvent) => {
+    const d = deskFloatDragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    const next = clampDeskFloatPos(
+      {
+        x: d.origX + e.clientX - d.startX,
+        y: d.origY + e.clientY - d.startY,
+      },
+      deskFloatBarRef.current?.offsetHeight ?? 0,
+    );
+    deskFloatPosRef.current = next;
+    setDeskFloatPos(next);
+  };
+  const onDeskFloatHandlePointerUp = (e: React.PointerEvent) => {
+    const d = deskFloatDragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    deskFloatDragRef.current = null;
+    saveDeskFloatingToolsPos(deskFloatPosRef.current);
+  };
   /** Mobile compact bar: starred tools in group order, or the 3
    *  defaults when nothing is starred yet. */
   const compactTools =
     favorites.length > 0
       ? sortToolsByGroup(favorites)
       : DEFAULT_COMPACT_TOOLS;
-  const groupBtnRefs = useRef(new Map<string, HTMLButtonElement>());
-
   const cycleMagnet = () => {
     const next =
       MAGNET_ORDER[(MAGNET_ORDER.indexOf(magnet) + 1) % MAGNET_ORDER.length];
@@ -1247,93 +1460,9 @@ export default function DrawingBar({
     saveMagnetMode(next);
   };
 
-  // Esc / resize / any scroll closes the open flyout (its anchor moves).
-  // A press outside the panel AND outside the sidebar also closes it:
-  // document-level pointerdown in capture phase (no backdrop div —
-  // see GroupFlyout). That press is swallowed (see the handler: the
-  // pointerdown half keeps it from the canvas, and a one-shot
-  // capture click listener eats the click Chrome still fires for
-  // the same press) — so it only closes the flyout, like the old
-  // backdrop. Presses on the sidebar itself are left to the
-  // sidebar buttons (toggle / switch flyout, arm a tool), so the
-  // second press of a real double-click on a group button still
-  // reaches that button.
-  useEffect(() => {
-    if (!openGroup) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpenGroup(null);
-    };
-    const onMove = () => setOpenGroup(null);
-    const onPointerDown = (e: PointerEvent) => {
-      const target = e.target as Element | null;
-      if (target?.closest('[data-flyout-panel]')) return;
-      if (target?.closest('[data-drawing-bar]')) return;
-      // Swallow the press: it only closes the flyout (old backdrop
-      // semantics). stopPropagation in capture keeps it from the
-      // canvas (no drawing point / selection change / pan) and
-      // preventDefault suppresses the compatibility mousedown /
-      // mouseup — but Chrome still fires the click for the same
-      // press, so the click is swallowed separately by a one-shot
-      // capture listener added here (probe-verified: pointerdown
-      // preventDefault alone does NOT stop the click).
-      e.stopPropagation();
-      e.preventDefault();
-      setOpenGroup(null);
-      // Only the primary button produces a click event; a right /
-      // middle press just closes the flyout and arms nothing.
-      if (e.button !== 0) return;
-      const swallowClick = (ce: MouseEvent) => {
-        ce.stopPropagation();
-        ce.preventDefault();
-      };
-      const dropSwallow = () => {
-        document.removeEventListener('click', swallowClick, true);
-      };
-      document.addEventListener('click', swallowClick, { capture: true, once: true });
-      // The click for this press is dispatched in a LATER task than
-      // pointerup (probe-verified: a microtask queued from pointerup
-      // runs before the click and would drop the listener too early),
-      // so the drop is a short timeout measured from pointerup;
-      // pointercancel / window blur mean no click is coming, so the
-      // one-shot listener is dropped there instead of lingering to
-      // eat a later, unrelated click.
-      document.addEventListener('pointerup', () => { window.setTimeout(dropSwallow, 100); }, { capture: true, once: true });
-      document.addEventListener('pointercancel', dropSwallow, { capture: true, once: true });
-      window.addEventListener('blur', dropSwallow, { once: true });
-    };
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('resize', onMove);
-    window.addEventListener('scroll', onMove, true);
-    document.addEventListener('pointerdown', onPointerDown, true);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('resize', onMove);
-      window.removeEventListener('scroll', onMove, true);
-      document.removeEventListener('pointerdown', onPointerDown, true);
-    };
-  }, [openGroup]);
-
-  const openFlyout = (title: string) => {
-    const el = groupBtnRefs.current.get(title);
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setAnchor({ top: r.top, right: r.right });
-    setOpenGroup(title);
-  };
-
-  /** Icon shown for a group: the armed tool if it is in this group,
-   *  else the last tool picked from the group, else its first tool. */
-  const displayedToolFor = (group: (typeof TOOL_GROUPS)[number]) => {
-    if (activeTool && group.ids.includes(activeTool)) return activeTool;
-    const last = lastUsed[group.title];
-    // A stale last-used entry (e.g. recorded before the tool left the
-    // toolbar) must never surface a hidden tool as the group icon.
-    return last && group.ids.includes(last) ? last : group.ids[0];
-  };
-
-  /** Record a pick as the owning group's last-used tool (persisted).
-   *  The owning group is derived from the tool id, so picks made from
-   *  the favorites flyout still update the right group's icon. */
+  /** Record a pick as the owning group's last-used tool (persisted
+   *  to ptt:last-used-tools). Nothing reads it since the fixed rail
+   *  went away, but the stored values are kept for a future use. */
   const recordLastUsed = (id: DrawingTool) => {
     const owner = TOOL_GROUPS.find((g) => g.ids.includes(id));
     if (!owner) return;
@@ -1354,18 +1483,8 @@ export default function DrawingBar({
     });
   };
 
-  /** Group-button tooltip: "Group — 最近使用：X", or just the group
-   *  name when nothing has been picked from it yet. */
-  const groupTitle = (group: (typeof TOOL_GROUPS)[number]) => {
-    const last = lastUsed[group.title];
-    if (!last || !group.ids.includes(last)) return group.title;
-    const label = TOOL_BY_ID.get(last)?.label ?? last;
-    return `${group.title} — 最近使用：${label}`;
-  };
-
   const handleSelect = (id: DrawingTool, continuous: boolean) => {
     recordLastUsed(id);
-    setOpenGroup(null);
     if (!continuous && activeTool === id) {
       onToolChange(null, false);
     } else {
@@ -1373,216 +1492,150 @@ export default function DrawingBar({
     }
   };
 
-  const openGroupDef =
-    openGroup === '收藏'
-      ? { title: '收藏', ids: favorites }
-      : openGroup
-        ? TOOL_GROUPS.find((g) => g.title === openGroup) ?? null
-        : null;
-  const favoritesActive =
-    activeTool !== null && favorites.includes(activeTool);
-
   return (
     <>
-    <aside
+    {/* Desktop (>=md): floating draggable favorites bar (Ryan
+        2026-11-28 — the fixed left rail is replaced by the same
+        draggable favorites bar as mobile). Narrow 40px, dark,
+        icon-only, grip on top; only the starred tools show
+        (defaults when nothing is starred yet); drag by the grip
+        handle, position persists in localStorage under its own key
+        (ptt:floating-tools-pos-desktop). The cursor button exits
+        drawing mode; magnet / clear stay on the bar (they lived on
+        the old rail); ⋯ opens the desktop full tool list panel.
+        A round undo button sits below the bar (TV f_001); it is
+        wired by page.tsx via onUndo/canUndo and disabled until then.
+        Rendered only after mount (deskFloatPos null on the server). */}
+    {deskFloatPos !== null && (
+    <div
       data-drawing-bar
-      className="hidden w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-tv-border bg-tv-workspace py-1 md:flex md:w-11"
+      data-testid="desktop-floating-tools"
+      className="fixed z-30 hidden w-10 flex-col items-center md:flex"
+      style={{ left: deskFloatPos.x, top: deskFloatPos.y, touchAction: 'none' }}
     >
-      {/* Desktop only: the fixed rail is gone on mobile (Ryan
-          2026-11-26 — the tools float instead, see below). The
-          `contents` keeps the children as direct flex items of the
-          aside, exactly as before. */}
-      <div className="hidden w-full flex-col items-center gap-0.5 md:contents">
-      <button
-        title="游標／選取（退出繪製模式）"
-        onClick={() => onToolChange(null, false)}
-        className={`${BUTTON_BASE} ${
-          activeTool === null ? 'bg-tv-active text-tv-accent' : ''
-        }`}
-      >
-        {activeTool === null && <ActiveBar />}
-        <CursorIcon />
-      </button>
-
-      <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
-
-      {/* Favorites: star button opening a flyout of starred tools. */}
       <div
-        className="flex flex-col items-center gap-0.5"
-        role="group"
-        aria-label="收藏"
+        ref={deskFloatBarRef}
+        className="flex w-10 flex-col items-center gap-0.5 rounded-xl border border-[#2a2e39] bg-[#1e222d]/75 py-1 shadow-2xl backdrop-blur-xl"
+        onPointerMove={onDeskFloatHandlePointerMove}
+        onPointerUp={onDeskFloatHandlePointerUp}
+        onPointerCancel={onDeskFloatHandlePointerUp}
       >
+        <div
+          data-testid="desktop-floating-handle"
+          role="button"
+          aria-label="拖動工具列"
+          title="拖動工具列"
+          className="flex h-5 w-full cursor-grab touch-none items-center justify-center text-[#787b86] active:cursor-grabbing"
+          onPointerDown={onDeskFloatHandlePointerDown}
+        >
+          <GripIcon />
+        </div>
         <button
-          ref={(el) => {
-            if (el) groupBtnRefs.current.set('收藏', el);
-            else groupBtnRefs.current.delete('收藏');
-          }}
-          title={
-            favorites.length > 0
-              ? `收藏 — ${favorites.length} 個工具（點擊展開）`
-              : '收藏（點擊展開已收藏工具）'
-          }
-          aria-haspopup="menu"
-          aria-expanded={openGroup === '收藏'}
-          onClick={() => {
-            if (openGroup === '收藏') setOpenGroup(null);
-            else openFlyout('收藏');
-          }}
-          className={`${BUTTON_BASE} ${
-            favoritesActive || openGroup === '收藏'
-              ? 'bg-tv-active text-tv-star'
-              : ''
+          title="游標／選取（退出繪製模式）"
+          aria-label="游標／選取"
+          onClick={() => onToolChange(null, false)}
+          className={`${FLOAT_BUTTON_BASE} ${
+            activeTool === null ? 'bg-tv-active text-tv-accent' : ''
           }`}
         >
-          {favoritesActive && <ActiveBar />}
-          <StarIcon filled={favorites.length > 0} size={20} />
-          <FlyoutChevron />
+          {activeTool === null && <ActiveBar />}
+          <CursorIcon />
         </button>
-        <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
-      </div>
-
-      {TOOL_GROUPS.map((group, gi) => {
-        const displayed = displayedToolFor(group);
-        const groupActive =
-          activeTool !== null && group.ids.includes(activeTool);
-        const isOpen = openGroup === group.title;
-        // Single-tool groups need no flyout: plain button, old behaviour,
-        // plus a small star underneath to toggle its favorite (the
-        // flyout-item star has no home here — this is the only group
-        // without a flyout).
-        if (group.ids.length === 1) {
-          const id = group.ids[0];
+        <span className="my-0.5 h-px w-6 shrink-0 bg-[#2a2e39]" />
+        {compactTools.map((id) => {
           const tool = TOOL_BY_ID.get(id);
           if (!tool) return null;
-          const isFavorite = favorites.includes(id);
+          const active = activeTool === id;
           return (
-            <div
-              key={group.title}
-              className="flex flex-col items-center gap-0.5"
-              role="group"
-              aria-label={group.title}
-            >
-              <button
-                title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
-                onClick={(e) => {
-                  recordLastUsed(id);
-                  onToolChange(groupActive ? null : id, e.shiftKey);
-                }}
-                onDoubleClick={() => {
-                  recordLastUsed(id);
-                  onToolChange(id, true);
-                }}
-                className={`${BUTTON_BASE} ${
-                  groupActive ? 'bg-tv-active text-tv-accent' : ''
-                }`}
-              >
-                {groupActive && <ActiveBar />}
-                <ToolIcon tool={id} />
-              </button>
-              <button
-                type="button"
-                aria-label={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
-                aria-pressed={isFavorite}
-                title={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
-                onClick={() => toggleFavorite(id)}
-                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-tv-elevated ${
-                  isFavorite ? 'text-tv-star' : 'text-tv-muted hover:text-tv-text-strong'
-                }`}
-              >
-                <StarIcon filled={isFavorite} size={12} />
-              </button>
-              {gi < TOOL_GROUPS.length - 1 && (
-                <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
-              )}
-            </div>
-          );
-        }
-        return (
-          <div
-            key={group.title}
-            className="flex flex-col items-center gap-0.5"
-            role="group"
-            aria-label={group.title}
-          >
             <button
-              ref={(el) => {
-                if (el) groupBtnRefs.current.set(group.title, el);
-                else groupBtnRefs.current.delete(group.title);
-              }}
-              title={groupTitle(group)}
-              aria-haspopup="menu"
-              aria-expanded={isOpen}
-              onClick={() => {
-                if (isOpen) setOpenGroup(null);
-                else openFlyout(group.title);
-              }}
-              onDoubleClick={() => {
-                setOpenGroup(null);
-                handleSelect(displayed, true);
-              }}
-              className={`${BUTTON_BASE} ${
-                groupActive || isOpen ? 'bg-tv-active text-tv-accent' : ''
+              key={id}
+              title={tool.label}
+              aria-label={tool.label}
+              aria-pressed={active}
+              data-testid={`desktop-floating-tool-${id}`}
+              onClick={() => handleSelect(id, false)}
+              className={`${FLOAT_BUTTON_BASE} ${
+                active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
               }`}
             >
-              {groupActive && <ActiveBar />}
-              <ToolIcon tool={displayed} />
-              <FlyoutChevron />
+              {active && <ActiveBar />}
+              <ToolIcon tool={id} />
             </button>
-            {gi < TOOL_GROUPS.length - 1 && (
-              <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
-            )}
-          </div>
-        );
-      })}
-
-      <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
-
-      <button
-        onClick={cycleMagnet}
-        title={`磁吸：${MAGNET_LABELS[magnet]}（點擊切換，關 → 弱 → 強）`}
-        className={`${MAGNET_BUTTON_BASE} ${
-          magnet !== 'off' ? 'bg-tv-active text-tv-accent' : ''
-        }`}
-      >
-        <MagnetIcon />
-        <span className="text-[8px] leading-none">
-          {MAGNET_LABELS[magnet]}
-        </span>
-      </button>
-      <button
-        onClick={onClear}
-        title="清除目前商品的所有畫線"
-        className={`${BUTTON_BASE} hover:text-tv-down`}
-      >
-        <ClearIcon />
-      </button>
+          );
+        })}
+        <span className="my-0.5 h-px w-6 shrink-0 bg-[#2a2e39]" />
+        <button
+          onClick={cycleMagnet}
+          title={`磁吸：${MAGNET_LABELS[magnet]}（點擊切換，關 → 弱 → 強）`}
+          aria-label={`磁吸：${MAGNET_LABELS[magnet]}`}
+          aria-pressed={magnet !== 'off'}
+          data-testid="desktop-floating-magnet"
+          className={`${FLOAT_BUTTON_BASE} ${
+            magnet !== 'off' ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          }`}
+        >
+          <MagnetIcon />
+        </button>
+        <button
+          onClick={onClear}
+          title="清除目前商品的所有畫線"
+          aria-label="清除目前商品的所有畫線"
+          data-testid="desktop-floating-clear"
+          className={`${FLOAT_BUTTON_BASE} hover:text-[#ef5350]`}
+        >
+          <ClearIcon />
+        </button>
+        <span className="my-0.5 h-px w-6 shrink-0 bg-[#2a2e39]" />
+        <button
+          onClick={() => setDeskPanelOpen(true)}
+          title="全部畫線工具"
+          aria-label="全部畫線工具"
+          data-testid="desktop-floating-all-tools"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#262b38] text-[#b2b5be] hover:text-white"
+        >
+          <DotsIcon />
+        </button>
       </div>
-
-      {openGroupDef && anchor &&
-        createPortal(
-          <GroupFlyout
-            group={openGroupDef}
-            anchor={anchor}
-            activeTool={activeTool}
-            favorites={favorites}
-            onSelect={(id, continuous) => handleSelect(id, continuous)}
-            onToggleFavorite={toggleFavorite}
-          />,
-          document.body,
-        )}
-      {fullSheetOpen && (
-        <FullToolsSheet
-          favorites={favorites}
-          activeTool={activeTool}
-          onSelect={(id, continuous) => {
-            setFullSheetOpen(false);
-            handleSelect(id, continuous);
-          }}
-          onToggleFavorite={toggleFavorite}
-          onClose={() => setFullSheetOpen(false)}
-        />
-      )}
-    </aside>
+      {/* Round undo button below the bar (TV f_001, same as mobile).
+          Disabled until page.tsx wires onUndo + canUndo. */}
+      <button
+        onClick={() => onUndo?.()}
+        disabled={!canUndo}
+        title="復原"
+        aria-label="復原"
+        data-testid="desktop-floating-undo"
+        className="mt-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d]/75 text-[#b2b5be] shadow-2xl backdrop-blur-xl hover:text-white disabled:opacity-30 disabled:hover:text-[#b2b5be]"
+      >
+        <UndoIcon />
+      </button>
+    </div>
+    )}
+    {deskPanelOpen && deskFloatPos && (
+      <DesktopToolsPanel
+        favorites={favorites}
+        activeTool={activeTool}
+        onSelect={(id, continuous) => {
+          setDeskPanelOpen(false);
+          handleSelect(id, continuous);
+        }}
+        onToggleFavorite={toggleFavorite}
+        onClose={() => setDeskPanelOpen(false)}
+        anchorLeft={deskFloatPos.x + FLOAT_W + 6}
+        anchorTop={deskFloatPos.y}
+      />
+    )}
+    {fullSheetOpen && (
+      <FullToolsSheet
+        favorites={favorites}
+        activeTool={activeTool}
+        onSelect={(id, continuous) => {
+          setFullSheetOpen(false);
+          handleSelect(id, continuous);
+        }}
+        onToggleFavorite={toggleFavorite}
+        onClose={() => setFullSheetOpen(false)}
+      />
+    )}
 
     {/* Mobile (<md): floating draggable favorites bar (Ryan
         2026-11-26 — replaces the fixed left rail, like the
