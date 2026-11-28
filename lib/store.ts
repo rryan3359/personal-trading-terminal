@@ -39,6 +39,8 @@ export const STORAGE_KEYS = {
   chartAppearance: 'ptt:chart-appearance',
   /** Saved chart layouts (analysis centre 儲存／開啟, TV-style). */
   layouts: 'ptt:layouts',
+  /** TV Stay-in-drawing-mode (Keep drawing) — Phase A P1. */
+  keepDrawing: 'ptt:keep-drawing',
 } as const;
 
 /** Current drawings-store format version. v1 was keyed `${symbol}:${interval}`. v2 keyed bare symbols with scope/interval. v3 replaces scope/interval with visibleIntervals + text. */
@@ -169,6 +171,17 @@ export function getMagnetMode(): MagnetMode {
 
 export function saveMagnetMode(mode: MagnetMode): void {
   saveString(STORAGE_KEYS.magnet, mode);
+}
+
+/** Keep drawing (TV Stay-in-drawing-mode): when on, finishing any
+ *  drawing re-arms the tool instead of disarming (page.tsx ORs it
+ *  into `continuousDraw`). Stored as '1' / '0'. */
+export function getKeepDrawing(): boolean {
+  return loadString(STORAGE_KEYS.keepDrawing, '0') === '1';
+}
+
+export function saveKeepDrawing(on: boolean): void {
+  saveString(STORAGE_KEYS.keepDrawing, on ? '1' : '0');
 }
 
 /** Last-used drawing style, reused for the next new drawing. */

@@ -27,7 +27,12 @@
  * groups (41 tools; the 3 vertical-line tools are hidden per
  * Ryan's decision, see below), each tool with a star to toggle
  * favorite; picking one arms it and closes the panel/sheet.
- * Double-click (or Shift+click) arms in continuous mode.
+ * Double-click (or Shift+click) arms in continuous mode (Phase A
+ * P1: the first click arms single and the panel stays open for a
+ * 300ms double-click window instead of closing at once, so the
+ * second click cannot fall through to the chart). The floating
+ * bars also have a Keep drawing toggle (pencil + lock): when on,
+ * finishing any drawing re-arms the tool instead of disarming.
  *
  * Vertical lines (verticalStraightLine, verticalSegment,
  * verticalRayLine) are NOT on this toolbar: removed 2026-11-25 by
@@ -42,7 +47,7 @@
  * there).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { DRAWING_TOOLS, type DrawingTool } from '@/lib/chart-config';
 import { getMagnetMode, saveMagnetMode, type MagnetMode } from '@/lib/store';
@@ -163,6 +168,12 @@ export interface DrawingBarProps {
   /** Whether undo has anything to undo; drives the round undo
    *  button's disabled state. */
   canUndo?: boolean;
+  /** TV Stay-in-drawing-mode (Keep drawing, Phase A P1): when on,
+   *  finishing any drawing re-arms the tool instead of disarming.
+   *  Owned by page.tsx (persisted `ptt:keep-drawing`). */
+  keepDrawing?: boolean;
+  /** Toggle the Keep drawing switch. */
+  onToggleKeepDrawing?: () => void;
 }
 
 const MAGNET_ORDER: MagnetMode[] = ['off', 'weak', 'strong'];
@@ -583,6 +594,38 @@ function MagnetIcon() {
   );
 }
 
+/** Pencil + lock (Keep drawing / Stay-in-drawing-mode toggle,
+ *  Phase A P1). No existing icon fits, so a small lock badge is
+ *  drawn over a diagonal pencil, same 20x20 stroke style. */
+function KeepDrawingIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M13.5 3.5l3 3L9 14H6v-3l7.5-7.5z" />
+      <path d="M11.5 5.5l3 3" />
+      <rect
+        x="12"
+        y="13"
+        width="6"
+        height="5"
+        rx="1"
+        fill="currentColor"
+        stroke="none"
+      />
+      <path d="M13.5 13v-1a1.5 1.5 0 0 1 3 0V13" />
+    </svg>
+  );
+}
+
 function ClearIcon() {
   return (
     <svg {...ICON_PROPS}>
@@ -751,6 +794,36 @@ function sortToolsByGroup(ids: DrawingTool[]): DrawingTool[] {
 }
 
 /**
+ * Double-click pick state (TV Parity Phase A P1, shared by the
+ * mobile sheet and the desktop panel). The first click arms the
+ * tool single and leaves the panel/sheet open for a 300ms window
+ * (report §8: 300ms double-click window); the click handler must
+ * tell a second click on the same card apart from a fresh pick, so
+ * the second click never runs the single-click path (which would
+ * toggle the just-armed tool off) and never falls through to the
+ * chart. onDoubleClick arms continuous and closes at once.
+ * The timer is cleared whenever the panel/sheet closes another way
+ * (backdrop / Esc / resize / X) and on unmount.
+ */
+function usePendingPick() {
+  const pendingRef = useRef<{
+    id: DrawingTool;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  const clearPending = useCallback(() => {
+    const p = pendingRef.current;
+    if (p) {
+      clearTimeout(p.timer);
+      pendingRef.current = null;
+    }
+  }, []);
+  // Unmount cleanup: a pending close timer must not fire after the
+  // panel/sheet is gone.
+  useEffect(() => clearPending, [clearPending]);
+  return { pendingRef, clearPending };
+}
+
+/**
  * Mobile bottom sheet with the full tool list (all 10 groups), each
  * tool with its favorite star — same state and toggles as the desktop
  * flyouts. Picking a tool arms it and closes the sheet.
@@ -800,13 +873,58 @@ function FullToolsSheet({
     favorites.length > 0 ? 'favorites' : 'trend',
   );
   const [query, setQuery] = useState('');
+  // Phase A P1 double-click: the sheet owns closing (onSelect only
+  // arms — the parent no longer closes on every pick), so the first
+  // click can arm single while the sheet stays open for the
+  // double-click window.
+  const { pendingRef, clearPending } = usePendingPick();
+  const closeSheet = useCallback(() => {
+    clearPending();
+    onClose();
+  }, [clearPending, onClose]);
+  /** First click arms single and starts the 300ms double-click
+   *  window (sheet closes when it expires); a second click on the
+   *  same card inside the window is skipped here and handled by
+   *  onDoubleClick; a click on another card arms it single and
+   *  closes at once; Shift+click arms continuous and closes. */
+  const handleCardClick = (id: DrawingTool, shiftKey: boolean) => {
+    if (shiftKey) {
+      clearPending();
+      onSelect(id, true);
+      onClose();
+      return;
+    }
+    const p = pendingRef.current;
+    // Second click on the same card inside the 300ms window (the
+    // pending entry only exists inside the window — the timer
+    // clears it on expiry): skip the single-click path; the
+    // dblclick handler arms continuous.
+    if (p && p.id === id) return;
+    if (p) {
+      clearPending();
+      onSelect(id, false);
+      onClose();
+      return;
+    }
+    onSelect(id, false);
+    const timer = setTimeout(() => {
+      pendingRef.current = null;
+      onClose();
+    }, 300);
+    pendingRef.current = { id, timer };
+  };
+  const handleCardDoubleClick = (id: DrawingTool) => {
+    clearPending();
+    onSelect(id, true);
+    onClose();
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') closeSheet();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [closeSheet]);
   const q = query.trim().toLowerCase();
   // Searching overrides the active tab: match label or tool id.
   const visibleIds: DrawingTool[] =
@@ -826,14 +944,14 @@ function FullToolsSheet({
     >
       <div
         className="absolute inset-0 bg-black/60"
-        onClick={onClose}
+        onClick={closeSheet}
         aria-hidden="true"
       />
       <div className="absolute bottom-0 left-0 right-0 flex max-h-[85vh] flex-col rounded-t-2xl border-t border-[#2a2e39] bg-[#131722]/80 px-4 pb-6 pt-2 backdrop-blur-xl">
         <div className="relative flex shrink-0 items-center justify-center py-2">
           <span className="text-[15px] font-semibold text-white">繪圖</span>
           <button
-            onClick={onClose}
+            onClick={closeSheet}
             aria-label="關閉"
             data-testid="drawing-sheet-close"
             className="absolute right-0 flex h-8 w-8 items-center justify-center rounded-full bg-[#2a2e39] text-[#b2b5be] hover:text-white"
@@ -919,9 +1037,11 @@ function FullToolsSheet({
                     }`}
                   >
                     <button
-                      onClick={() => onSelect(id, false)}
+                      onClick={(e) => handleCardClick(id, e.shiftKey)}
+                      onDoubleClick={() => handleCardDoubleClick(id)}
                       data-testid={`drawing-sheet-card-${id}`}
                       aria-label={tool.label}
+                      title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
                       className="flex w-full flex-col items-center gap-1.5 px-1 py-3 text-[#d1d4dc]"
                     >
                       <span className="flex h-6 w-6 items-center justify-center">
@@ -976,7 +1096,9 @@ function FullToolsSheet({
  * SHEET_TAB_DEFS + sheetTabToolIds), but a desktop frosted panel
  * anchored to the right of the floating bar (like GroupFlyout was):
  * fixed, 380px wide, max 72vh, scrollable grid. Closes on the
- * backdrop press, Esc, resize, or a tool pick (via onSelect).
+ * backdrop press, Esc, resize, or a tool pick: a single pick arms
+ * and closes 300ms later (the double-click window, Phase A P1),
+ * a double-click / Shift+click arms continuous and closes at once.
  */
 function DesktopToolsPanel({
   favorites,
@@ -1001,6 +1123,52 @@ function DesktopToolsPanel({
   const [query, setQuery] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(anchorTop);
+  // Phase A P1 double-click: the panel owns closing (onSelect only
+  // arms — the parent no longer closes on every pick), so the first
+  // click can arm single while the panel stays open for the
+  // double-click window instead of the second click falling through
+  // to the chart and dropping point 1 (audit R1).
+  const { pendingRef, clearPending } = usePendingPick();
+  const closePanel = useCallback(() => {
+    clearPending();
+    onClose();
+  }, [clearPending, onClose]);
+  /** First click arms single and starts the 300ms double-click
+   *  window (panel closes when it expires); a second click on the
+   *  same card inside the window is skipped here and handled by
+   *  onDoubleClick; a click on another card arms it single and
+   *  closes at once; Shift+click arms continuous and closes. */
+  const handleCardClick = (id: DrawingTool, shiftKey: boolean) => {
+    if (shiftKey) {
+      clearPending();
+      onSelect(id, true);
+      onClose();
+      return;
+    }
+    const p = pendingRef.current;
+    // Second click on the same card inside the 300ms window (the
+    // pending entry only exists inside the window — the timer
+    // clears it on expiry): skip the single-click path; the
+    // dblclick handler arms continuous.
+    if (p && p.id === id) return;
+    if (p) {
+      clearPending();
+      onSelect(id, false);
+      onClose();
+      return;
+    }
+    onSelect(id, false);
+    const timer = setTimeout(() => {
+      pendingRef.current = null;
+      onClose();
+    }, 300);
+    pendingRef.current = { id, timer };
+  };
+  const handleCardDoubleClick = (id: DrawingTool) => {
+    clearPending();
+    onSelect(id, true);
+    onClose();
+  };
 
   // Clamp the panel inside the viewport once its height is known
   // (same pattern as GroupFlyout).
@@ -1014,16 +1182,16 @@ function DesktopToolsPanel({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') closePanel();
     };
-    const onResize = () => onClose();
+    const onResize = () => closePanel();
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', onResize);
     };
-  }, [onClose]);
+  }, [closePanel]);
 
   const q = query.trim().toLowerCase();
   // Searching overrides the active tab: match label or tool id.
@@ -1039,7 +1207,7 @@ function DesktopToolsPanel({
     <>
       <div
         className="fixed inset-0 z-40 bg-black/40"
-        onClick={onClose}
+        onClick={closePanel}
         aria-hidden="true"
       />
       <div
@@ -1054,7 +1222,7 @@ function DesktopToolsPanel({
         <div className="relative flex shrink-0 items-center justify-between px-3 pb-1 pt-2.5">
           <span className="text-[13px] font-medium text-tv-text-strong">繪圖</span>
           <button
-            onClick={onClose}
+            onClick={closePanel}
             aria-label="關閉"
             data-testid="desktop-tools-panel-close"
             className="flex h-7 w-7 items-center justify-center rounded text-tv-muted hover:bg-tv-elevated hover:text-tv-text-strong"
@@ -1140,8 +1308,8 @@ function DesktopToolsPanel({
                     }`}
                   >
                     <button
-                      onClick={(e) => onSelect(id, e.shiftKey)}
-                      onDoubleClick={() => onSelect(id, true)}
+                      onClick={(e) => handleCardClick(id, e.shiftKey)}
+                      onDoubleClick={() => handleCardDoubleClick(id)}
                       data-testid={`desktop-tools-panel-card-${id}`}
                       aria-label={tool.label}
                       title={`${tool.label}（雙擊或 Shift+點選：連續繪製）`}
@@ -1232,6 +1400,8 @@ export default function DrawingBar({
   onSheetOpenChange,
   onUndo,
   canUndo,
+  keepDrawing = false,
+  onToggleKeepDrawing,
 }: DrawingBarProps) {
   const [magnet, setMagnet] = useState<MagnetMode>(() => getMagnetMode());
   /** Starred tool ids, in starred order (persisted, ptt:favorite-tools). */
@@ -1483,7 +1653,34 @@ export default function DrawingBar({
     });
   };
 
+  /** Last single (non-continuous) floating-bar pick: the second
+   *  click of a double-click must not toggle the just-armed tool
+   *  off before onDoubleClick arms it continuous (Phase A P1).
+   *  The entry only exists inside the 300ms window (a timer
+   *  clears it on expiry), so no timestamp is needed. Only set
+   *  for single picks — a continuous pick leaves it alone, so a
+   *  later deliberate toggle-off click is not eaten. */
+  const lastPickRef = useRef<{
+    id: DrawingTool;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
+
   const handleSelect = (id: DrawingTool, continuous: boolean) => {
+    const last = lastPickRef.current;
+    if (!continuous && last !== null && last.id === id && activeTool === id) {
+      // Second click of a double-click (before onDoubleClick fires):
+      // skip the toggle-off; the dblclick handler arms continuous.
+      return;
+    }
+    if (!continuous) {
+      if (last !== null) clearTimeout(last.timer);
+      lastPickRef.current = {
+        id,
+        timer: setTimeout(() => {
+          lastPickRef.current = null;
+        }, 300),
+      };
+    }
     recordLastUsed(id);
     if (!continuous && activeTool === id) {
       onToolChange(null, false);
@@ -1553,7 +1750,8 @@ export default function DrawingBar({
               aria-label={tool.label}
               aria-pressed={active}
               data-testid={`desktop-floating-tool-${id}`}
-              onClick={() => handleSelect(id, false)}
+              onClick={(e) => handleSelect(id, e.shiftKey)}
+              onDoubleClick={() => handleSelect(id, true)}
               className={`${FLOAT_BUTTON_BASE} ${
                 active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
               }`}
@@ -1575,6 +1773,18 @@ export default function DrawingBar({
           }`}
         >
           <MagnetIcon />
+        </button>
+        <button
+          onClick={() => onToggleKeepDrawing?.()}
+          title="連續繪製：開啟後畫完不解除工具（雙擊或 Shift+點選也有相同效果）"
+          aria-label="連續繪製"
+          aria-pressed={keepDrawing}
+          data-testid="desktop-floating-keep-drawing"
+          className={`${FLOAT_BUTTON_BASE} ${
+            keepDrawing ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          }`}
+        >
+          <KeepDrawingIcon />
         </button>
         <button
           onClick={onClear}
@@ -1614,10 +1824,9 @@ export default function DrawingBar({
       <DesktopToolsPanel
         favorites={favorites}
         activeTool={activeTool}
-        onSelect={(id, continuous) => {
-          setDeskPanelOpen(false);
-          handleSelect(id, continuous);
-        }}
+        // The panel owns closing (Phase A P1 double-click window);
+        // onSelect only arms.
+        onSelect={handleSelect}
         onToggleFavorite={toggleFavorite}
         onClose={() => setDeskPanelOpen(false)}
         anchorLeft={deskFloatPos.x + FLOAT_W + 6}
@@ -1628,10 +1837,9 @@ export default function DrawingBar({
       <FullToolsSheet
         favorites={favorites}
         activeTool={activeTool}
-        onSelect={(id, continuous) => {
-          setFullSheetOpen(false);
-          handleSelect(id, continuous);
-        }}
+        // The sheet owns closing (Phase A P1 double-click window);
+        // onSelect only arms.
+        onSelect={handleSelect}
         onToggleFavorite={toggleFavorite}
         onClose={() => setFullSheetOpen(false)}
       />
@@ -1695,7 +1903,8 @@ export default function DrawingBar({
               aria-label={tool.label}
               aria-pressed={active}
               data-testid={`floating-tool-${id}`}
-              onClick={() => handleSelect(id, false)}
+              onClick={(e) => handleSelect(id, e.shiftKey)}
+              onDoubleClick={() => handleSelect(id, true)}
               className={`${FLOAT_BUTTON_BASE} ${
                 active ? 'bg-[#2a2e39] text-[#2962ff]' : ''
               }`}
@@ -1706,6 +1915,18 @@ export default function DrawingBar({
           );
         })}
         <span className="my-0.5 h-px w-6 shrink-0 bg-[#2a2e39]" />
+        <button
+          onClick={() => onToggleKeepDrawing?.()}
+          title="連續繪製：開啟後畫完不解除工具（雙擊或 Shift+點選也有相同效果）"
+          aria-label="連續繪製"
+          aria-pressed={keepDrawing}
+          data-testid="floating-keep-drawing"
+          className={`${FLOAT_BUTTON_BASE} ${
+            keepDrawing ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          }`}
+        >
+          <KeepDrawingIcon />
+        </button>
         <button
           onClick={() => setFullSheetOpen(true)}
           title="全部畫線工具"

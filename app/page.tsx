@@ -69,7 +69,7 @@ import {
 // load in the browser. The page itself still prerenders (toolbar +
 // watchlist); the chart mounts on hydration.
 const Chart = dynamic(() => import('@/components/Chart'), { ssr: false });
-import { STORAGE_KEYS, getChartAppearance, loadJSON, loadLayouts, loadString, newOverlayId, saveChartAppearance, saveJSON, saveLayouts, saveString, type SavedLayout } from '@/lib/store';
+import { STORAGE_KEYS, getChartAppearance, getKeepDrawing, loadJSON, loadLayouts, loadString, newOverlayId, saveChartAppearance, saveJSON, saveKeepDrawing, saveLayouts, saveString, type SavedLayout } from '@/lib/store';
 import { fetchSymbolList, isKnownSymbol, type SymbolInfo } from '@/lib/symbols';
 import type { Interval } from '@/lib/types';
 import { isInterval } from '@/lib/types';
@@ -87,6 +87,10 @@ export default function Home() {
   const [stockWatchlist, setStockWatchlist] = useState<string[]>([]);
   const [activeTool, setActiveTool] = useState<DrawingTool | null>(null);
   const [drawContinuous, setDrawContinuous] = useState(false);
+  /** TV Stay-in-drawing-mode (Keep drawing, Phase A P1): when on,
+   *  finishing any drawing re-arms the tool instead of disarming.
+   *  Persisted in localStorage (`ptt:keep-drawing`). */
+  const [keepDrawing, setKeepDrawing] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [indicators, setIndicators] = useState<string[]>(DEFAULT_INDICATORS);
@@ -148,6 +152,7 @@ export default function Home() {
       savedChartType === 'area' ? 'area' : DEFAULT_CHART_TYPE,
     );
     setAppearance(getChartAppearance());
+    setKeepDrawing(getKeepDrawing());
     setLayouts(loadLayouts());
     setHydrated(true);
     // Validate the restored list against the real Binance universe once
@@ -200,6 +205,10 @@ export default function Home() {
     if (!hydrated) return;
     saveChartAppearance(appearance);
   }, [appearance, hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
+    saveKeepDrawing(keepDrawing);
+  }, [keepDrawing, hydrated]);
 
   // A symbol / interval change reloads the chart, so any range fit
   // from before no longer applies. Reset in the change handlers
@@ -318,6 +327,10 @@ export default function Home() {
     [],
   );
 
+  const toggleKeepDrawing = useCallback(() => {
+    setKeepDrawing((v) => !v);
+  }, []);
+
   const handleHistoryChange = useCallback((u: boolean, r: boolean) => {
     setCanUndo(u);
     setCanRedo(r);
@@ -355,6 +368,8 @@ export default function Home() {
         <DrawingBar
           activeTool={activeTool}
           onToolChange={handleToolChange}
+          keepDrawing={keepDrawing}
+          onToggleKeepDrawing={toggleKeepDrawing}
           onClear={() => chartRef.current?.clearDrawings()}
           sheetOpen={drawingSheetOpen}
           onSheetOpenChange={setDrawingSheetOpen}
@@ -375,7 +390,7 @@ export default function Home() {
               onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
               onConnectionStatus={setConnectionStatus}
               onLastTick={setLastTickAt}
-              continuousDraw={drawContinuous}
+              continuousDraw={drawContinuous || keepDrawing}
               onHistoryChange={handleHistoryChange}
             />
             {/* Mobile (<md): TV-style top bar over the chart —

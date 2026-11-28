@@ -409,6 +409,24 @@ export function createDrawingController(
   };
   const drawingIdRef: { current: string | null } = { current: null };
   /**
+   * P2 (TV Parity Audit Phase A) weak-magnet distance gate state.
+   * klinecharts snaps in-body points to the nearest OHLC at any
+   * distance (audit R2); the gate flips a drawing overlay to
+   * 'normal' while the cursor is far from every OHLC of the candle
+   * under it, and back to 'weak_magnet' when close. The candle
+   * lookup is built once per draw (onDrawStart) and cleared on draw
+   * end / discard; suppression is tracked per drawing id.
+   */
+  const weakMagnetCandlesRef: {
+    current: Map<
+      number,
+      { open: number; high: number; low: number; close: number }
+    >;
+  } = { current: new Map() };
+  const weakMagnetSuppressedRef: { current: Map<string, boolean> } = {
+    current: new Map(),
+  };
+  /**
    * Id of a just-drawn standalone text annotation whose dialog is
    * open. If the user closes it without typing any text, the empty
    * annotation is removed (it would otherwise be invisible and
@@ -446,6 +464,102 @@ export function createDrawingController(
     if (magnet === 'off') return invert ? 'weak_magnet' : 'normal';
     if (magnet === 'weak') return invert ? 'normal' : 'weak_magnet';
     return invert ? 'normal' : 'strong_magnet';
+  };
+
+  /** P2 thresholds (corrected 2026-11-28 after verification found the
+   * original 8-enter/10-exit pair oscillates: at 9px both conditions
+   * hold on alternating frames, flipping the mode 19/20 mousemoves
+   * and making the preview jump 9px per frame). Correct hysteresis:
+   * enter suppression only when FARTHER than the outer threshold
+   * (>10px from every OHLC) and leave it only when CLOSE to one
+   * (≤8px), so the 8–10px band keeps whichever state it entered
+   * with instead of flapping. A point at 9px therefore snaps or
+   * not depending on approach direction — stable, by design. */
+  const WEAK_MAGNET_SUPPRESS_ENTER_PX = 10;
+  const WEAK_MAGNET_SUPPRESS_EXIT_PX = 8;
+
+  /**
+   * P2 weak-magnet distance gate, called from onDrawing (after the
+   * library has already computed this frame's preview point with the
+   * old mode, so a switch takes effect on the next mousemove/click —
+   * one frame of lag, accepted by the audit proposal S2).
+   * Only acts while the effective magnet mode is weak; strong keeps
+   * its full-distance snap and off is already normal. The cursor's
+   * candle timestamp comes from the live preview point (the library
+   * snapped it to the candle under the cursor for this very event);
+   * convertFromPixel is the fallback when the preview carries none.
+   * Cursor Y (e.y) and convertToPixel Y share the pane-relative
+   * coordinate system (both default absolute=false).
+   * overrideOverlay is only called when the desired mode differs
+   * from the live mode read back via getOverlays.
+   */
+  const applyWeakMagnetGate = (
+    chart: Chart,
+    overlay: Overlay,
+    cursorX: number | undefined,
+    cursorY: number | undefined,
+  ): void => {
+    const id = overlay.id;
+    if (currentOverlayMode() !== 'weak_magnet') {
+      // Effective mode is not weak (strong / off / Ctrl-inverted):
+      // leave the overlay's mode alone and drop any stale record so
+      // a later return to weak starts clean.
+      weakMagnetSuppressedRef.current.delete(id);
+      return;
+    }
+    if (cursorX === undefined || cursorY === undefined) return;
+    let timestamp: number | undefined;
+    const pts = overlay.points;
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const t = pts[i]?.timestamp;
+      if (typeof t === 'number') {
+        timestamp = t;
+        break;
+      }
+    }
+    if (timestamp === undefined) {
+      const raw = chart.convertFromPixel([{ x: cursorX, y: cursorY }]);
+      const first = Array.isArray(raw) ? raw[0] : raw;
+      if (typeof first?.timestamp === 'number') {
+        timestamp = first.timestamp;
+      }
+    }
+    if (timestamp === undefined) return;
+    const candle = weakMagnetCandlesRef.current.get(timestamp);
+    // Cursor outside the visible candles: keep the current mode.
+    if (!candle) return;
+    const ohlc = [candle.open, candle.high, candle.low, candle.close];
+    let minDist = Infinity;
+    for (const v of ohlc) {
+      const px = chart.convertToPixel([{ timestamp, value: v }]);
+      const p = Array.isArray(px) ? px[0] : px;
+      if (typeof p?.y === 'number') {
+        minDist = Math.min(minDist, Math.abs(p.y - cursorY));
+      }
+    }
+    if (minDist === Infinity) return;
+    const suppressed = weakMagnetSuppressedRef.current.get(id) ?? false;
+    const threshold = suppressed
+      ? WEAK_MAGNET_SUPPRESS_EXIT_PX
+      : WEAK_MAGNET_SUPPRESS_ENTER_PX;
+    const shouldSuppress = minDist > threshold;
+    if (shouldSuppress === suppressed) return;
+    const desired: OverlayMode = shouldSuppress ? 'normal' : 'weak_magnet';
+    const live = chart.getOverlays({ id })[0];
+    if (live?.mode === desired) {
+      weakMagnetSuppressedRef.current.set(id, shouldSuppress);
+      return;
+    }
+    chart.overrideOverlay({ id, mode: desired });
+    weakMagnetSuppressedRef.current.set(id, shouldSuppress);
+  };
+
+  /** Clear the P2 gate state for one drawing (draw end / discard).
+   * The candle map is per-draw (only one draw runs at a time), so
+   * clearing it here is safe. */
+  const clearWeakMagnetGate = (id: string): void => {
+    weakMagnetSuppressedRef.current.delete(id);
+    weakMagnetCandlesRef.current.clear();
   };
 
   // ---- drawing persistence -------------------------------------------
@@ -961,9 +1075,38 @@ export function createDrawingController(
       onDrawStart: (e) => {
         if (deps.restoringRef.current) return;
         drawingIdRef.current = e.overlay.id;
+        // P2: snapshot the candles once per draw for the gate's
+        // timestamp -> OHLC lookup (per-frame work is then a Map
+        // lookup plus four pixel conversions).
+        weakMagnetCandlesRef.current.clear();
+        weakMagnetSuppressedRef.current.delete(e.overlay.id);
+        for (const d of e.chart.getDataList()) {
+          weakMagnetCandlesRef.current.set(d.timestamp, {
+            open: d.open,
+            high: d.high,
+            low: d.low,
+            close: d.close,
+          });
+        }
+      },
+      onDrawing: (e) => {
+        if (deps.restoringRef.current) return;
+        applyWeakMagnetGate(e.chart, e.overlay, e.x, e.y);
       },
       onDrawEnd: (e) => {
         if (deps.restoringRef.current) return;
+        // P2: restore the mode the gate may have flipped to 'normal'
+        // during this draw, so the finished overlay drags with the
+        // effective magnet mode (drag-time magnet is Phase B's P4).
+        // Only when this draw was actually suppressed: a Ctrl-held
+        // draw keeps the 'normal' mode it was created with.
+        if (weakMagnetSuppressedRef.current.get(e.overlay.id) === true) {
+          e.chart.overrideOverlay({
+            id: e.overlay.id,
+            mode: currentOverlayMode(),
+          });
+        }
+        clearWeakMagnetGate(e.overlay.id);
         // Position tools: the interactive draw commits the raw
         // clicked stop, and the figure callback only corrects it on
         // the next render, so a freshly drawn position could be
@@ -1077,7 +1220,17 @@ export function createDrawingController(
           deps.onToolDone();
         }
       },
-      onRemoved: () => {
+      onRemoved: (e) => {
+        // P2: a discarded in-progress draw (Esc / disarm / tool
+        // switch) ends without onDrawEnd — drop its gate state here.
+        // Guarded by restoringRef: a restore wipes and recreates
+        // overlays while no draw is in progress.
+        if (
+          !deps.restoringRef.current &&
+          drawingIdRef.current === e.overlay.id
+        ) {
+          clearWeakMagnetGate(e.overlay.id);
+        }
         if (deps.restoringRef.current || deps.suppressSaveRef.current) return;
         persistDrawings(deps.getSymbol(), deps.getInterval());
       },
