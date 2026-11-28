@@ -318,6 +318,16 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     y: number;
     time: number;
   } | null>(null);
+  /** P3 (TV Parity Audit Phase B) mouse click-to-select fallback:
+   *  the mouse press the current click belongs to (cleared after
+   *  each click is handled). Touch has its own ref above; mouse/pen
+   *  never take the touch path. Pen stays out: the fallback is
+   *  mouse-only, matching the audit's desktop-mouse scope. */
+  const mouseClickStartRef = useRef<{
+    x: number;
+    y: number;
+    time: number;
+  } | null>(null);
   /** Pending fallback timer (one at most); cleared on unmount. */
   const touchFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -978,12 +988,57 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   // timestamp: the click that completes a measure draw
   // (measureJustDrawnRef) must not dismiss the measure it just
   // created — at that moment mode is already Idle.
-  const handleContainerClick = () => {
+  const handleContainerClick = (e: ReactMouseEvent<HTMLDivElement>) => {
     if (measureJustDrawnRef.current) {
       measureJustDrawnRef.current = false;
+      mouseClickStartRef.current = null;
       return;
     }
-    if (modeRef.current !== 'Idle') return;
+    // P3: mouse click-to-select fallback. The library's click
+    // handling already ran synchronously before this React onClick
+    // (its ±2px hit test wins when it lands). If this click was a
+    // short press without drag and no tool is armed, select the
+    // nearest overlay within 6px — the desktop-mouse equivalent
+    // of the touch fallback (which uses 24px). The selection is by
+    // nearest overlay, not by current mode: the library may have
+    // selected on this click (then near is that overlay and the
+    // refresh is a no-op), or an earlier fallback selection may
+    // stand (then a click near a different overlay switches to
+    // it). A blank click clears a fallback selection the library
+    // never hears about — its stored click info is null after a
+    // fallback select, so a later blank click produces no
+    // onDeselected and only this fallback can clear it (same as
+    // the touch fallback). Clicks on the container's own buttons
+    // (appearance gear, object-list toggle) are excluded: they
+    // bubble here too, and must never select a line passing
+    // underneath them.
+    const press = mouseClickStartRef.current;
+    mouseClickStartRef.current = null;
+    const target = e.target as HTMLElement | null;
+    if (
+      press &&
+      !activeToolRef.current &&
+      !drawingController.getDrawingId() &&
+      !(target && target.closest('button')) &&
+      Math.hypot(e.clientX - press.x, e.clientY - press.y) < 10 &&
+      Date.now() - press.time < 500
+    ) {
+      const near = nearestOverlayAt(e.clientX, e.clientY, 6);
+      if (near) {
+        if (near.id !== drawingController.getSelected()?.id) {
+          drawingController.refreshSelected(near.id);
+        }
+        return;
+      }
+      if (drawingController.getSelected() !== null) {
+        drawingController.deselect();
+      }
+    } else if (modeRef.current !== 'Idle') {
+      // Not a qualifying click and an overlay / drag owns the mode:
+      // never dismiss the measure from it (pre-existing gate,
+      // formerly the early return above the fallback).
+      return;
+    }
     const chart = engineRef.current?.getChart() ?? null;
     if (!chart) return;
     const measure = chart.getOverlays({ name: MEASURE_NAME })[0];
@@ -1076,13 +1131,27 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     // predates the draw end, so only a genuinely later press clears
     // it — the following click may then dismiss the measure.
     measureJustDrawnRef.current = false;
-    if (e.pointerType !== 'touch') return;
-    touchTapStartRef.current = {
-      pointerId: e.pointerId,
-      x: e.clientX,
-      y: e.clientY,
-      time: Date.now(),
-    };
+    if (e.pointerType === 'touch') {
+      touchTapStartRef.current = {
+        pointerId: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        time: Date.now(),
+      };
+      return;
+    }
+    // P3: record the mouse press start for the click fallback
+    // (see handleContainerClick). Overwritten by each new press;
+    // a stale record can only qualify if a click lands within
+    // 500ms and 10px of it, which is exactly "this click belongs
+    // to that press".
+    if (e.pointerType === 'mouse') {
+      mouseClickStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        time: Date.now(),
+      };
+    }
   };
 
   const onContainerPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {

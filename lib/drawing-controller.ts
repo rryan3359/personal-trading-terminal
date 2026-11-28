@@ -427,6 +427,24 @@ export function createDrawingController(
     current: new Map(),
   };
   /**
+   * P4 (TV Parity Audit Phase B) drag-time magnet state. While an
+   * overlay is dragged its live magnet mode is saved here and the
+   * overlay is switched to 'normal', so the drag delta comes from
+   * raw coordinates instead of OHLC-snapped ones (audit R4: weak
+   * magnet drifts a dragged anchor 18px in y). Restored in
+   * onPressedMoveEnd; no snap is applied on release (Ryan's
+   * default). Keyed by overlay id; at most one drag runs at a time.
+   * Caveat (to verify by probe): the library captures the press
+   * point (snapped, old mode) before onPressedMoveStart runs, so a
+   * whole-overlay drag's move delta is measured against that snapped
+   * press point. Anchor drags are exact (the anchor is set straight
+   * to the raw move point); whole drags may carry a release error
+   * equal to the press-point snap offset — see work/p4-notes.md.
+   */
+  const dragMagnetSavedRef: { current: Map<string, OverlayMode> } = {
+    current: new Map(),
+  };
+  /**
    * Id of a just-drawn standalone text annotation whose dialog is
    * open. If the user closes it without typing any text, the empty
    * annotation is removed (it would otherwise be invisible and
@@ -1231,12 +1249,26 @@ export function createDrawingController(
         ) {
           clearWeakMagnetGate(e.overlay.id);
         }
+        // P4: a drag interrupted by removal (e.g. Delete mid-drag)
+        // must not leave a stale saved mode behind.
+        dragMagnetSavedRef.current.delete(e.overlay.id);
         if (deps.restoringRef.current || deps.suppressSaveRef.current) return;
         persistDrawings(deps.getSymbol(), deps.getInterval());
       },
       onPressedMoveStart: (e) => {
         if (deps.restoringRef.current) return;
         if (saved.name === MEASURE_NAME) return;
+        // P4: drag with magnet off — save the overlay's live mode
+        // and switch to 'normal' for the drag (see ref comment).
+        // The library reads the mode per move event, so the switch
+        // takes effect from the first move after this callback.
+        // Locked overlays never reach here (the library returns
+        // false on a locked press before calling this callback).
+        const liveMode = e.overlay.mode;
+        if (liveMode !== 'normal') {
+          dragMagnetSavedRef.current.set(e.overlay.id, liveMode);
+          e.chart.overrideOverlay({ id: e.overlay.id, mode: 'normal' });
+        }
         // Position tools: mark the drag so the figure callback can
         // tell an entry drag (whole-position move) apart from a
         // dialog edit / restore / preset write, which change the
@@ -1278,6 +1310,16 @@ export function createDrawingController(
         // would be mistaken for a drag.
         if (isPositionTool(saved.name)) {
           markPositionDragEnd(e.overlay.id);
+        }
+        // P4: restore the mode saved at drag start. Runs before the
+        // early returns below: the overlay keeps its own mode after
+        // the drag even when this move is not persisted. A no-op
+        // when nothing was saved (mode was already 'normal', or the
+        // drag never started a press).
+        const savedMode = dragMagnetSavedRef.current.get(e.overlay.id);
+        if (savedMode !== undefined) {
+          dragMagnetSavedRef.current.delete(e.overlay.id);
+          e.chart.overrideOverlay({ id: e.overlay.id, mode: savedMode });
         }
         if (deps.restoringRef.current || deps.suppressSaveRef.current) return;
         // A zero-risk draw stays a 2-point shape with no target
