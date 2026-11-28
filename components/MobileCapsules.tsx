@@ -803,7 +803,7 @@ function SwipePreviewList({
     <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center md:hidden">
       <div
         ref={cardRef}
-        className="pointer-events-none relative h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-hidden rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/80 shadow-2xl backdrop-blur-xl"
+        className="pointer-events-none relative h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-hidden rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/65 shadow-2xl backdrop-blur-xl"
         data-testid="capsule-magnifier"
       >
         {/* Fixed highlight band: parked at the card's vertical
