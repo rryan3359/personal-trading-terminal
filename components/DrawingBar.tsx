@@ -813,7 +813,7 @@ function FullToolsSheet({
         onClick={onClose}
         aria-hidden="true"
       />
-      <div className="absolute bottom-0 left-0 right-0 flex max-h-[85vh] flex-col rounded-t-2xl border-t border-[#2a2e39] bg-[#131722] px-4 pb-6 pt-2">
+      <div className="absolute bottom-0 left-0 right-0 flex max-h-[85vh] flex-col rounded-t-2xl border-t border-[#2a2e39] bg-[#131722]/80 px-4 pb-6 pt-2 backdrop-blur-xl">
         <div className="relative flex shrink-0 items-center justify-center py-2">
           <span className="text-[15px] font-semibold text-white">繪圖</span>
           <button
@@ -1056,7 +1056,7 @@ function GroupFlyout({
       data-flyout-panel
       role="menu"
       aria-label={group.title}
-      className="fixed z-50 w-44 overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d] py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
+      className="fixed z-50 w-44 overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d]/80 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)] backdrop-blur-xl"
       style={{ left: anchor.right + 6, top }}
     >
         <div className="px-3 pb-1 pt-1.5 text-[11px] font-medium text-[#787b86]">
@@ -1604,7 +1604,7 @@ export default function DrawingBar({
     >
       <div
         ref={floatBarRef}
-        className="flex w-10 flex-col items-center gap-0.5 rounded-xl border border-[#2a2e39] bg-[#1e222d]/95 py-1 shadow-2xl backdrop-blur"
+        className="flex w-10 flex-col items-center gap-0.5 rounded-xl border border-[#2a2e39] bg-[#1e222d]/75 py-1 shadow-2xl backdrop-blur-xl"
         onPointerMove={onFloatHandlePointerMove}
         onPointerUp={onFloatHandlePointerUp}
         onPointerCancel={onFloatHandlePointerUp}
@@ -1672,7 +1672,7 @@ export default function DrawingBar({
         title="復原"
         aria-label="復原"
         data-testid="floating-undo"
-        className="mt-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d]/95 text-[#b2b5be] shadow-2xl backdrop-blur hover:text-white disabled:opacity-30 disabled:hover:text-[#b2b5be]"
+        className="mt-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#2a2e39] bg-[#1e222d]/75 text-[#b2b5be] shadow-2xl backdrop-blur-xl hover:text-white disabled:opacity-30 disabled:hover:text-[#b2b5be]"
       >
         <UndoIcon />
       </button>

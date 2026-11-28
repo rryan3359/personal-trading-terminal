@@ -65,7 +65,7 @@ export default function ChartContextMenu({
       role="menu"
       data-testid="chart-context-menu"
       onContextMenu={(e) => e.preventDefault()}
-      className="absolute z-40 w-56 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 text-xs text-[#d1d4dc] shadow-xl"
+      className="absolute z-40 w-56 rounded-md border border-[#2a2e39] bg-[#1e222d]/80 p-1 text-xs text-[#d1d4dc] shadow-xl backdrop-blur-xl"
       style={{ left: pos.x, top: pos.y }}
     >
       {sections.map((section, si) => (

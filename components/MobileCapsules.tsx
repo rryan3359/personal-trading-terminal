@@ -305,7 +305,7 @@ function MobileSheet({
         onClick={onClose}
         aria-hidden="true"
       />
-      <div className="absolute bottom-0 left-0 right-0 max-h-[70vh] overflow-y-auto rounded-t-2xl border-t border-[#2a2e39] bg-[#131722] px-4 pb-6 pt-2">
+      <div className="absolute bottom-0 left-0 right-0 max-h-[70vh] overflow-y-auto rounded-t-2xl border-t border-[#2a2e39] bg-[#131722]/80 px-4 pb-6 pt-2 backdrop-blur-xl">
         <div
           className="mx-auto mb-1 h-1 w-10 rounded-full bg-[#2a2e39]"
           aria-hidden="true"
@@ -381,7 +381,7 @@ function CenterList({
         onClick={onClose}
         aria-hidden="true"
       />
-      <div className="relative max-h-[62vh] w-[300px] -translate-y-8 overflow-y-auto rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-2 shadow-2xl backdrop-blur">
+      <div className="relative max-h-[62vh] w-[300px] -translate-y-8 overflow-y-auto rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/80 px-2 py-2 shadow-2xl backdrop-blur-xl">
         {children}
       </div>
     </div>,
@@ -803,7 +803,7 @@ function SwipePreviewList({
     <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center md:hidden">
       <div
         ref={cardRef}
-        className="pointer-events-none relative h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-hidden rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/95 shadow-2xl backdrop-blur"
+        className="pointer-events-none relative h-[324px] max-h-[62vh] w-[300px] -translate-y-8 overflow-hidden rounded-[20px] border border-[#2a2e39] bg-[#1e222d]/80 shadow-2xl backdrop-blur-xl"
         data-testid="capsule-magnifier"
       >
         {/* Fixed highlight band: parked at the card's vertical
@@ -1306,7 +1306,7 @@ function usePointerSwipe(
   }, [ref, debugKey]);
 }
 
-const CAPSULE_BG = 'border border-[#2a2e39] bg-[#131722]/90 shadow-lg backdrop-blur';
+const CAPSULE_BG = 'border border-[#2a2e39] bg-[#131722]/75 shadow-lg backdrop-blur-xl';
 
 /**
  * Animate a capsule's text when its value changes. Swipe up slides
@@ -2324,7 +2324,7 @@ export default function MobileBottomBar({
         {toast !== null &&
           createPortal(
             <div
-              className="pointer-events-none fixed bottom-24 left-1/2 z-[60] -translate-x-1/2 whitespace-nowrap rounded-full border border-[#2a2e39] bg-[#1e222d] px-4 py-2 text-sm text-white shadow-2xl md:hidden"
+              className="pointer-events-none fixed bottom-24 left-1/2 z-[60] -translate-x-1/2 whitespace-nowrap rounded-full border border-[#2a2e39] bg-[#1e222d]/80 px-4 py-2 text-sm text-white shadow-2xl backdrop-blur-xl md:hidden"
               data-testid="mobile-toast"
               role="status"
             >

@@ -25,6 +25,9 @@ export interface ColorPickerProps {
   onOpacityEnd?: () => void;
   /** Hide the opacity slider (appearance settings use opaque colors). */
   showOpacity?: boolean;
+  /** Frosted-glass panel (floating popover over the chart). Default false:
+      the settings dialogs keep their solid panels. */
+  frosted?: boolean;
 }
 
 export default function ColorPicker({
@@ -35,12 +38,17 @@ export default function ColorPicker({
   onOpacityStart,
   onOpacityEnd,
   showOpacity = true,
+  frosted = false,
 }: ColorPickerProps) {
   const pct = Math.round(opacity * 100);
   const lower = color.toLowerCase();
 
   return (
-    <div className="w-[228px] rounded-md border border-[#2a2e39] bg-[#1e222d] p-2 text-xs text-[#d1d4dc] shadow-xl">
+    <div
+      className={`w-[228px] rounded-md border border-[#2a2e39] p-2 text-xs text-[#d1d4dc] shadow-xl ${
+        frosted ? 'bg-[#1e222d]/80 backdrop-blur-xl' : 'bg-[#1e222d]'
+      }`}
+    >
       <div className="grid grid-cols-10 gap-1">
         {COLOR_PALETTE_GRID.map((c) => (
           <button

@@ -81,7 +81,7 @@ export default function ObjectList({
       data-testid="object-list-panel"
       role="dialog"
       aria-label="物件清單"
-      className="absolute right-2 top-12 z-30 flex max-h-[70%] w-80 max-w-[calc(100%-16px)] flex-col overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d] text-xs text-[#d1d4dc] shadow-xl"
+      className="absolute right-2 top-12 z-30 flex max-h-[70%] w-80 max-w-[calc(100%-16px)] flex-col overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d]/80 text-xs text-[#d1d4dc] shadow-xl backdrop-blur-xl"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-[#2a2e39] px-2 py-2">
         <input

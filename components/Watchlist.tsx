@@ -255,7 +255,7 @@ export default function Watchlist({
         />
       )}
       <aside
-        className={`flex h-full w-64 shrink-0 flex-col border-l border-[#2a2e39] bg-[#131722] transition-transform duration-200 ${
+        className={`flex h-full w-64 shrink-0 flex-col border-l border-[#2a2e39] bg-[#131722] transition-transform duration-200 max-md:bg-[#131722]/80 max-md:backdrop-blur-xl ${
           mobileOpen
             ? 'max-md:translate-x-0'
             : 'max-md:translate-x-full'

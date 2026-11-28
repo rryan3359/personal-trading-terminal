@@ -380,7 +380,7 @@ const DrawingSelectionToolbar = forwardRef<
           e.preventDefault();
         }
       }}
-      className="absolute z-20 flex max-w-full flex-nowrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/95 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg"
+      className="absolute z-20 flex max-w-full flex-nowrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/75 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg backdrop-blur-xl"
       style={{ left: '50%', bottom: 8, transform: 'translateX(-50%)' }}
     >
       {/* A standalone text annotation has no line to style: hide
@@ -493,6 +493,7 @@ const DrawingSelectionToolbar = forwardRef<
           <ColorPicker
             color={selected.color}
             opacity={selected.opacity}
+            frosted
             // Picking a color closes the panel (same as the line-style
             // panel): leaving it open covers the chart and swallows
             // the next click on the canvas.
@@ -507,7 +508,7 @@ const DrawingSelectionToolbar = forwardRef<
         </div>
       )}
       {openPanel === 'lineStyle' && (
-        <div className="absolute bottom-full left-0 z-40 mb-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
+        <div className="absolute bottom-full left-0 z-40 mb-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d]/80 p-1 shadow-xl backdrop-blur-xl">
           {LINE_STYLE_OPTIONS.map((opt) => (
             <button
               key={opt.id}
@@ -538,7 +539,7 @@ const DrawingSelectionToolbar = forwardRef<
         </div>
       )}
       {openPanel === 'template' && (
-        <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d] p-1 shadow-xl">
+        <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d]/80 p-1 shadow-xl backdrop-blur-xl">
           {/* TV-style menu: save-as + apply default first. */}
           <button
             onClick={() => setShowSaveAs((v) => !v)}
