@@ -975,7 +975,7 @@ function StarIcon({ filled, size = 14 }: { filled: boolean; size?: number }) {
 function FlyoutChevron() {
   return (
     <span
-      className="pointer-events-none absolute bottom-[2px] right-[2px] text-[#787b86]"
+      className="pointer-events-none absolute bottom-[2px] right-[2px] text-tv-muted"
       aria-hidden="true"
     >
       <svg width="7" height="7" viewBox="0 0 7 7" fill="currentColor">
@@ -986,7 +986,7 @@ function FlyoutChevron() {
 }
 
 const BUTTON_BASE =
-  'relative flex h-9 w-9 shrink-0 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]';
+  'relative flex h-9 w-9 shrink-0 items-center justify-center rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-tv-text-2';
 
 /** Narrow (40px) variant for the mobile floating bar (TV f_001). */
 const FLOAT_BUTTON_BASE =
@@ -994,13 +994,13 @@ const FLOAT_BUTTON_BASE =
 
 /** Magnet button: taller, icon + current strength label underneath. */
 const MAGNET_BUTTON_BASE =
-  'relative flex h-11 w-9 shrink-0 flex-col items-center justify-center gap-px rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white';
+  'relative flex h-11 w-9 shrink-0 flex-col items-center justify-center gap-px rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong';
 
 /** Left accent bar marking the active tool / cursor. */
 function ActiveBar() {
   return (
     <span
-      className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-[#2962ff]"
+      className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-tv-accent"
       aria-hidden="true"
     />
   );
@@ -1056,14 +1056,14 @@ function GroupFlyout({
       data-flyout-panel
       role="menu"
       aria-label={group.title}
-      className="fixed z-50 w-44 overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d]/80 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+      className="fixed z-50 w-44 overflow-hidden rounded-md border border-tv-border bg-tv-panel/80 py-1 shadow-tv-menu backdrop-blur-xl"
       style={{ left: anchor.right + 6, top }}
     >
-        <div className="px-3 pb-1 pt-1.5 text-[11px] font-medium text-[#787b86]">
+        <div className="px-3 pb-1 pt-2 text-[11px] font-medium tracking-wide text-tv-muted">
           {group.title}
         </div>
         {group.ids.length === 0 && (
-          <div className="px-3 py-2 text-[13px] text-[#787b86]">
+          <div className="px-3 py-2 text-[13px] text-tv-muted">
             尚未收藏工具
           </div>
         )}
@@ -1075,13 +1075,13 @@ function GroupFlyout({
           return (
             <div
               key={id}
-              className={`relative flex w-full items-center hover:bg-[#2a2e39] hover:text-white ${
-                active ? 'bg-[#2a2e39] text-[#2962ff]' : 'text-[#d1d4dc]'
+              className={`relative flex h-9 w-full items-center hover:bg-tv-elevated hover:text-tv-text-strong ${
+                active ? 'bg-tv-active text-tv-accent' : 'text-tv-text'
               }`}
             >
               {active && (
                 <span
-                  className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-[#2962ff]"
+                  className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-tv-accent"
                   aria-hidden="true"
                 />
               )}
@@ -1106,8 +1106,8 @@ function GroupFlyout({
                   e.stopPropagation();
                   onToggleFavorite(id);
                 }}
-                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-[#2a2e39] ${
-                  isFavorite ? 'text-[#ff9800]' : 'text-[#787b86] hover:text-white'
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-tv-elevated ${
+                  isFavorite ? 'text-tv-star' : 'text-tv-muted hover:text-tv-text-strong'
                 }`}
               >
                 <StarIcon filled={isFavorite} />
@@ -1386,7 +1386,7 @@ export default function DrawingBar({
     <>
     <aside
       data-drawing-bar
-      className="hidden w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[#2a2e39] bg-[#131722] py-1 md:flex md:w-11"
+      className="hidden w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-tv-border bg-tv-workspace py-1 md:flex md:w-11"
     >
       {/* Desktop only: the fixed rail is gone on mobile (Ryan
           2026-11-26 — the tools float instead, see below). The
@@ -1397,14 +1397,14 @@ export default function DrawingBar({
         title="游標／選取（退出繪製模式）"
         onClick={() => onToolChange(null, false)}
         className={`${BUTTON_BASE} ${
-          activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          activeTool === null ? 'bg-tv-active text-tv-accent' : ''
         }`}
       >
         {activeTool === null && <ActiveBar />}
         <CursorIcon />
       </button>
 
-      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+      <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
 
       {/* Favorites: star button opening a flyout of starred tools. */}
       <div
@@ -1430,7 +1430,7 @@ export default function DrawingBar({
           }}
           className={`${BUTTON_BASE} ${
             favoritesActive || openGroup === '收藏'
-              ? 'bg-[#2a2e39] text-[#ff9800]'
+              ? 'bg-tv-active text-tv-star'
               : ''
           }`}
         >
@@ -1438,7 +1438,7 @@ export default function DrawingBar({
           <StarIcon filled={favorites.length > 0} size={20} />
           <FlyoutChevron />
         </button>
-        <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+        <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
       </div>
 
       {TOOL_GROUPS.map((group, gi) => {
@@ -1473,7 +1473,7 @@ export default function DrawingBar({
                   onToolChange(id, true);
                 }}
                 className={`${BUTTON_BASE} ${
-                  groupActive ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+                  groupActive ? 'bg-tv-active text-tv-accent' : ''
                 }`}
               >
                 {groupActive && <ActiveBar />}
@@ -1485,14 +1485,14 @@ export default function DrawingBar({
                 aria-pressed={isFavorite}
                 title={isFavorite ? `取消收藏 ${tool.label}` : `收藏 ${tool.label}`}
                 onClick={() => toggleFavorite(id)}
-                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-[#2a2e39] ${
-                  isFavorite ? 'text-[#ff9800]' : 'text-[#787b86] hover:text-white'
+                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-tv-elevated ${
+                  isFavorite ? 'text-tv-star' : 'text-tv-muted hover:text-tv-text-strong'
                 }`}
               >
                 <StarIcon filled={isFavorite} size={12} />
               </button>
               {gi < TOOL_GROUPS.length - 1 && (
-                <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+                <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
               )}
             </div>
           );
@@ -1521,7 +1521,7 @@ export default function DrawingBar({
                 handleSelect(displayed, true);
               }}
               className={`${BUTTON_BASE} ${
-                groupActive || isOpen ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+                groupActive || isOpen ? 'bg-tv-active text-tv-accent' : ''
               }`}
             >
               {groupActive && <ActiveBar />}
@@ -1529,19 +1529,19 @@ export default function DrawingBar({
               <FlyoutChevron />
             </button>
             {gi < TOOL_GROUPS.length - 1 && (
-              <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+              <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
             )}
           </div>
         );
       })}
 
-      <span className="my-1 h-px w-7 shrink-0 bg-[#2a2e39]" />
+      <span className="my-1 h-px w-6 shrink-0 bg-tv-border" />
 
       <button
         onClick={cycleMagnet}
         title={`磁吸：${MAGNET_LABELS[magnet]}（點擊切換，關 → 弱 → 強）`}
         className={`${MAGNET_BUTTON_BASE} ${
-          magnet !== 'off' ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+          magnet !== 'off' ? 'bg-tv-active text-tv-accent' : ''
         }`}
       >
         <MagnetIcon />
@@ -1552,7 +1552,7 @@ export default function DrawingBar({
       <button
         onClick={onClear}
         title="清除目前商品的所有畫線"
-        className={`${BUTTON_BASE} hover:text-[#ef5350]`}
+        className={`${BUTTON_BASE} hover:text-tv-down`}
       >
         <ClearIcon />
       </button>
@@ -1624,7 +1624,7 @@ export default function DrawingBar({
           aria-label="游標／選取"
           onClick={() => onToolChange(null, false)}
           className={`${FLOAT_BUTTON_BASE} ${
-            activeTool === null ? 'bg-[#2a2e39] text-[#2962ff]' : ''
+            activeTool === null ? 'bg-tv-active text-tv-accent' : ''
           }`}
         >
           {activeTool === null && <ActiveBar />}

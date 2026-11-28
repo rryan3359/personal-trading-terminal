@@ -81,9 +81,9 @@ export default function ObjectList({
       data-testid="object-list-panel"
       role="dialog"
       aria-label="物件清單"
-      className="absolute right-2 top-12 z-30 flex max-h-[70%] w-80 max-w-[calc(100%-16px)] flex-col overflow-hidden rounded-md border border-[#2a2e39] bg-[#1e222d]/80 text-xs text-[#d1d4dc] shadow-xl backdrop-blur-xl"
+      className="absolute right-2 top-12 z-30 flex max-h-[70%] w-80 max-w-[calc(100%-16px)] flex-col overflow-hidden rounded-md border border-tv-border bg-[#1e222d]/80 text-xs text-[#d1d4dc] shadow-xl backdrop-blur-xl"
     >
-      <div className="flex shrink-0 items-center gap-2 border-b border-[#2a2e39] px-2 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-b border-tv-border px-2 py-2">
         <input
           type="checkbox"
           checked={allChecked}
@@ -96,18 +96,18 @@ export default function ObjectList({
         <span className="min-w-0 flex-1 truncate font-semibold">
           物件清單（{items.length}）
         </span>
-        <span className="shrink-0 text-[#80858f]">目前：{currentIntervalLabel}</span>
+        <span className="shrink-0 text-tv-muted">目前：{currentIntervalLabel}</span>
         <button
           onClick={onClose}
           aria-label="關閉物件清單"
           title="關閉"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated"
         >
           ✕
         </button>
       </div>
       {items.length === 0 ? (
-        <div className="px-3 py-4 text-[#80858f]">目前標的沒有物件</div>
+        <div className="px-3 py-4 text-tv-muted">目前標的沒有物件</div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
           {items.map((item) => {
@@ -130,7 +130,7 @@ export default function ObjectList({
                 key={item.id}
                 data-testid="object-list-row"
                 data-item-id={item.id}
-                className={`flex items-center gap-1 border-b border-[#2a2e39]/60 px-2 py-1.5 ${
+                className={`flex items-center gap-1 border-b border-tv-border/60 px-2 py-1.5 ${
                   selected ? 'bg-[#2962ff]/20' : checked ? 'bg-white/5' : ''
                 }`}
               >
@@ -150,12 +150,12 @@ export default function ObjectList({
                       ? `選取 ${item.label}`
                       : '不在目前週期，切換週期後才能在圖上選取；點按改為多選'
                   }
-                  className="min-w-0 flex-1 rounded-sm px-1 py-0.5 text-left hover:bg-white/10"
+                  className="min-w-0 flex-1 rounded-sm px-1 py-0.5 text-left hover:bg-tv-elevated"
                 >
                   <span className="block truncate font-medium">
                     {item.label}
                   </span>
-                  <span className="block truncate text-[11px] text-[#80858f]">
+                  <span className="block truncate text-[11px] text-tv-muted">
                     {status.join(' · ')}
                   </span>
                 </button>
@@ -164,7 +164,7 @@ export default function ObjectList({
                   aria-label={item.visible ? '隱藏' : '顯示'}
                   title={item.visible ? '隱藏' : '顯示'}
                   data-testid="object-list-visible"
-                  className="shrink-0 rounded-sm px-1.5 py-1 hover:bg-white/10"
+                  className="shrink-0 rounded-sm px-1.5 py-1 hover:bg-tv-elevated"
                 >
                   {item.visible ? '隱藏' : '顯示'}
                 </button>
@@ -173,7 +173,7 @@ export default function ObjectList({
                   aria-label={item.lock ? '已鎖定' : '鎖定'}
                   title={item.lock ? '解鎖' : '鎖定'}
                   data-testid="object-list-lock"
-                  className="shrink-0 rounded-sm px-1.5 py-1 hover:bg-white/10"
+                  className="shrink-0 rounded-sm px-1.5 py-1 hover:bg-tv-elevated"
                 >
                   {item.lock ? '已鎖定' : '鎖定'}
                 </button>
@@ -182,7 +182,7 @@ export default function ObjectList({
                   aria-label="刪除"
                   title="刪除"
                   data-testid="object-list-delete"
-                  className="shrink-0 rounded-sm px-1.5 py-1 text-[#ef5350] hover:bg-white/10"
+                  className="shrink-0 rounded-sm px-1.5 py-1 text-[#ef5350] hover:bg-tv-elevated"
                 >
                   刪除
                 </button>
@@ -192,42 +192,42 @@ export default function ObjectList({
         </div>
       )}
       {checkedIds.length > 0 && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-[#2a2e39] px-2 py-2">
-          <span className="mr-1 text-[#80858f]">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-tv-border px-2 py-2">
+          <span className="mr-1 text-tv-muted">
             已選 {checkedIds.length} 個
           </span>
           <button
             onClick={() => onBatch('hide')}
             data-testid="object-list-batch-hide"
-            className="rounded-sm px-2 py-1 hover:bg-white/10"
+            className="rounded-sm px-2 py-1 hover:bg-tv-elevated"
           >
             隱藏
           </button>
           <button
             onClick={() => onBatch('show')}
             data-testid="object-list-batch-show"
-            className="rounded-sm px-2 py-1 hover:bg-white/10"
+            className="rounded-sm px-2 py-1 hover:bg-tv-elevated"
           >
             顯示
           </button>
           <button
             onClick={() => onBatch('lock')}
             data-testid="object-list-batch-lock"
-            className="rounded-sm px-2 py-1 hover:bg-white/10"
+            className="rounded-sm px-2 py-1 hover:bg-tv-elevated"
           >
             鎖定
           </button>
           <button
             onClick={() => onBatch('unlock')}
             data-testid="object-list-batch-unlock"
-            className="rounded-sm px-2 py-1 hover:bg-white/10"
+            className="rounded-sm px-2 py-1 hover:bg-tv-elevated"
           >
             解鎖
           </button>
           <button
             onClick={() => onBatch('delete')}
             data-testid="object-list-batch-delete"
-            className="rounded-sm px-2 py-1 text-[#ef5350] hover:bg-white/10"
+            className="rounded-sm px-2 py-1 text-[#ef5350] hover:bg-tv-elevated"
           >
             刪除
           </button>

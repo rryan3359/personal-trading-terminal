@@ -1,5 +1,37 @@
 @import "tailwindcss";
 
+/* Desktop redesign tokens (2026-11-28): TradingView Professional +
+   institutional dark terminal. Layered charcoal, one border colour,
+   one accent, one hover per surface. Values converge the existing
+   palette (#131722 / #1e222d / #2a2e39 / #2962ff); only the two
+   mid-tones formalise what was already in use (#262b38 chip hover,
+   #1e222d workspace hover). Mobile is untouched — these utilities
+   are only referenced from desktop-scoped classes. */
+@theme {
+  --color-tv-app: #0b0e11;
+  --color-tv-workspace: #131722;
+  --color-tv-panel: #1e222d;
+  --color-tv-elevated: #262b38;
+  --color-tv-active: #2a2e39;
+  --color-tv-hover: #1e222d;
+  --color-tv-border: #2a2e39;
+  --color-tv-divider: #1e222d;
+  --color-tv-text: #d1d4dc;
+  --color-tv-text-strong: #ffffff;
+  --color-tv-text-2: #b2b5be;
+  --color-tv-muted: #787b86;
+  --color-tv-dim: #5d606b;
+  --color-tv-accent: #2962ff;
+  --color-tv-accent-hover: #1e53e5;
+  --color-tv-accent-soft: rgb(41 98 255 / 0.12);
+  --color-tv-up: #26a69a;
+  --color-tv-down: #ef5350;
+  --color-tv-star: #ff9800;
+  --color-tv-warn: #ffb300;
+  --shadow-tv-menu: 0 8px 24px rgb(0 0 0 / 0.5);
+  --shadow-tv-chip: 0 2px 8px rgb(0 0 0 / 0.35);
+}
+
 html,
 body {
   height: 100%;

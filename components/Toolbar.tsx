@@ -251,10 +251,10 @@ export default function Toolbar({
     CHART_TYPES.find((t) => t.id === chartType)?.label ?? 'K線';
 
   return (
-    <header onScroll={closeAllMenus} className="flex h-10 shrink-0 items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-[#2a2e39] bg-[#131722] px-3">
+    <header onScroll={closeAllMenus} className="flex h-10 shrink-0 items-center gap-3 overflow-x-auto whitespace-nowrap border-b border-tv-border bg-tv-workspace px-3">
       <button
         onClick={onOpenWatchlist}
-        className="shrink-0 rounded px-2 py-1 text-xs text-[#b2b5be] hover:bg-[#1e222d] hover:text-white md:hidden"
+        className="shrink-0 rounded px-2 py-1 text-xs text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong md:hidden"
       >
         ☰ 自選
       </button>
@@ -277,7 +277,7 @@ export default function Toolbar({
               setTimeout(() => inputRef.current?.focus(), 0);
             }
           }}
-          className="text-sm font-semibold tracking-wide text-white hover:text-[#2962ff]"
+          className="text-sm font-semibold tracking-wide text-tv-text-strong hover:text-tv-accent"
           title="切換商品"
         >
           {symbol} ▾
@@ -288,7 +288,7 @@ export default function Toolbar({
               className="fixed inset-0 z-40"
               onClick={closeAllMenus}
             />
-            <div className="fixed z-50 w-64 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
+            <div className="fixed z-50 w-64 rounded-md border border-tv-border bg-tv-panel/80 py-1 shadow-tv-menu backdrop-blur-xl" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
               <input
                 ref={inputRef}
                 value={query}
@@ -299,13 +299,13 @@ export default function Toolbar({
                 onKeyDown={onSymbolKeyDown}
                 placeholder="搜尋標的，如 BTC 或 SOLUSDT"
                 autoComplete="off"
-                className="mx-2 mb-1 w-[calc(100%-16px)] rounded bg-[#131722] px-2 py-1.5 text-xs text-[#d1d4dc] outline-none placeholder:text-[#5d606b] focus:ring-1 focus:ring-[#2962ff]"
+                className="mx-2 mb-1 w-[calc(100%-16px)] rounded bg-tv-workspace px-2 py-1.5 text-xs text-tv-text outline-none placeholder:text-tv-dim focus:ring-1 focus:ring-tv-accent"
               />
               {symbolList === null && (
-                <p className="px-3 py-2 text-xs text-[#787b86]">載入標的中…</p>
+                <p className="px-3 py-2 text-xs text-tv-muted">載入標的中…</p>
               )}
               {listReady && query.trim() !== '' && results.length === 0 && (
-                <p className="px-3 py-2 text-xs text-[#787b86]">
+                <p className="px-3 py-2 text-xs text-tv-muted">
                   找不到相關標的
                 </p>
               )}
@@ -322,18 +322,18 @@ export default function Toolbar({
                   onMouseEnter={() => setHighlight(i)}
                   className={`flex cursor-pointer items-center justify-between px-3 py-2 text-xs ${
                     i === highlight
-                      ? 'bg-[#2a2e39] text-white'
-                      : 'text-[#b2b5be]'
+                      ? 'bg-tv-elevated text-tv-text-strong'
+                      : 'text-tv-text-2'
                   }`}
                 >
                   <span className="font-medium">{info.symbol}</span>
-                  <span className="text-[#787b86]">
+                  <span className="text-tv-muted">
                     {info.baseAsset} / {info.quoteAsset}
                   </span>
                 </div>
               ))}
               {query.trim() === '' && (
-                <p className="px-3 py-2 text-[11px] text-[#5d606b]">
+                <p className="px-3 py-2 text-[11px] text-tv-dim">
                   輸入代號或幣名搜尋 Binance 標的
                 </p>
               )}
@@ -342,21 +342,25 @@ export default function Toolbar({
         )}
       </div>
 
-      <div className="flex shrink-0 items-center gap-2.5">
+      <span className="h-5 w-px shrink-0 bg-tv-border" aria-hidden="true" />
+
+      <div className="flex shrink-0 items-center gap-0.5">
         {INTERVALS.map((tf) => (
           <button
             key={tf}
             onClick={() => onIntervalChange(tf)}
-            className={`text-xs ${
+            className={`rounded px-2 py-1 text-xs ${
               tf === interval
-                ? 'font-medium text-[#2962ff]'
-                : 'text-[#b2b5be] hover:text-white'
+                ? 'bg-tv-accent-soft font-medium text-tv-accent'
+                : 'text-tv-text-2 hover:text-tv-text-strong'
             }`}
           >
             {INTERVAL_LABELS[tf]}
           </button>
         ))}
       </div>
+
+      <span className="h-5 w-px shrink-0 bg-tv-border" aria-hidden="true" />
 
       <div className="relative shrink-0">
         <button
@@ -371,7 +375,7 @@ export default function Toolbar({
               setChartTypeOpen(true);
             }
           }}
-          className="text-xs text-[#b2b5be] hover:text-white"
+          className="rounded px-2 py-1 text-xs text-tv-text-2 hover:text-tv-text-strong"
         >
           {chartTypeLabel} ▾
         </button>
@@ -381,7 +385,7 @@ export default function Toolbar({
               className="fixed inset-0 z-40"
               onClick={closeAllMenus}
             />
-            <div className="fixed z-50 w-28 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
+            <div className="fixed z-50 w-28 rounded-md border border-tv-border bg-tv-panel/80 py-1 shadow-tv-menu backdrop-blur-xl" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
               {CHART_TYPES.map((t) => (
                 <button
                   key={t.id}
@@ -389,9 +393,9 @@ export default function Toolbar({
                     onChartTypeChange(t.id);
                     closeAllMenus();
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[#d1d4dc] hover:bg-[#2a2e39]"
+                  className="flex h-8 w-full items-center gap-2 px-3 text-left text-xs text-tv-text hover:bg-tv-elevated"
                 >
-                  <span className="w-3 shrink-0 text-[#2962ff]">
+                  <span className="w-3 shrink-0 text-tv-accent">
                     {t.id === chartType ? '✓' : ''}
                   </span>
                   {t.label}
@@ -415,7 +419,7 @@ export default function Toolbar({
               setIndicatorsOpen(true);
             }
           }}
-          className="text-xs text-[#b2b5be] hover:text-white"
+          className="rounded px-2 py-1 text-xs text-tv-text-2 hover:text-tv-text-strong"
         >
           ƒx 指標
         </button>
@@ -425,16 +429,16 @@ export default function Toolbar({
               className="fixed inset-0 z-40"
               onClick={closeAllMenus}
             />
-            <div className="fixed z-50 w-36 rounded border border-[#2a2e39] bg-[#1e222d] py-1 shadow-lg" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
+            <div className="fixed z-50 w-36 rounded-md border border-tv-border bg-tv-panel/80 py-1 shadow-tv-menu backdrop-blur-xl" style={{ left: menuAnchor.left, top: menuAnchor.top }}>
               {INDICATOR_OPTIONS.map((ind) => {
                 const on = indicators.includes(ind.id);
                 return (
                   <button
                     key={ind.id}
                     onClick={() => onToggleIndicator(ind.id)}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[#d1d4dc] hover:bg-[#2a2e39]"
+                    className="flex h-8 w-full items-center gap-2 px-3 text-left text-xs text-tv-text hover:bg-tv-elevated"
                   >
-                    <span className="w-3 shrink-0 text-[#2962ff]">
+                    <span className="w-3 shrink-0 text-tv-accent">
                       {on ? '✓' : ''}
                     </span>
                     {ind.label}
@@ -446,12 +450,14 @@ export default function Toolbar({
         )}
       </div>
 
+      <span className="h-5 w-px shrink-0 bg-tv-border" aria-hidden="true" />
+
       <div className="flex shrink-0 items-center gap-0.5">
         <button
           onClick={onUndo}
           disabled={!canUndo}
           title="復原 (Ctrl+Z)"
-          className="flex h-7 w-7 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]"
+          className="flex h-7 w-7 items-center justify-center rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-tv-text-2"
         >
           <UndoIcon />
         </button>
@@ -459,11 +465,13 @@ export default function Toolbar({
           onClick={onRedo}
           disabled={!canRedo}
           title="重做 (Ctrl+Shift+Z)"
-          className="flex h-7 w-7 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#b2b5be]"
+          className="flex h-7 w-7 items-center justify-center rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-tv-text-2"
         >
           <RedoIcon />
         </button>
       </div>
+
+      <span className="h-5 w-px shrink-0 bg-tv-border" aria-hidden="true" />
 
       <div
         className="ml-auto flex shrink-0 items-center gap-1.5"
@@ -474,7 +482,7 @@ export default function Toolbar({
           title="圖表設定"
           aria-label="圖表設定"
           data-testid="toolbar-appearance-settings"
-          className="flex h-7 w-7 items-center justify-center rounded text-[#b2b5be] hover:bg-[#1e222d] hover:text-white"
+          className="flex h-7 w-7 items-center justify-center rounded text-tv-text-2 hover:bg-tv-hover hover:text-tv-text-strong"
         >
           <GearIcon />
         </button>

@@ -178,8 +178,8 @@ const ChartLegend = memo(function ChartLegend({
 
   if (legendKline === null || loadError !== null) return null;
   return (
-    <div className="pointer-events-none absolute left-2 top-14 z-10 leading-relaxed md:top-2">
-      <div className="text-xs font-semibold text-white">
+    <div className="pointer-events-none absolute left-2 top-14 z-10 leading-snug md:left-3 md:top-2">
+      <div className="text-xs font-semibold text-white md:text-[13px]">
         {symbol} · {INTERVAL_LABELS[interval]} · Binance
         <CandleCountdown
           lastCloseMs={lastCloseMs}

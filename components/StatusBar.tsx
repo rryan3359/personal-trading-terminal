@@ -65,11 +65,12 @@ export default function StatusBar({
     lastTickAt !== null ? formatHMS(new Date(lastTickAt), false) : '—';
 
   return (
-    <div className="flex h-7 shrink-0 items-center gap-2 overflow-hidden whitespace-nowrap border-t border-[#2a2e39] bg-[#131722] px-2 text-[11px] text-[#787b86]">
+    <div className="flex h-7 shrink-0 items-center gap-2 overflow-hidden whitespace-nowrap border-t border-tv-border bg-tv-workspace px-2 text-[11px] text-tv-muted">
       <span className="min-w-0 shrink truncate" data-testid="status-symbol">
         {symbol} · Binance · {INTERVAL_LABELS[interval]}
       </span>
-      <span className="hidden shrink-0 md:block" data-testid="status-clock">
+      <span className="hidden h-3 w-px shrink-0 bg-tv-border md:block" aria-hidden="true" />
+      <span className="hidden shrink-0 font-mono tabular-nums md:block" data-testid="status-clock">
         {timeZone && timeZone !== 'UTC' ? `${timeZone} ` : ''}
         {now ? formatHMS(now, false) : '--:--:--'}
         {timeZone && timeZone !== 'UTC' && (
@@ -86,7 +87,7 @@ export default function StatusBar({
         <span>Binance WS</span>
         <span className={`h-2 w-2 rounded-full ${status.dot}`} />
         <span>{status.text}</span>
-        <span className="hidden sm:inline">最後 tick {lastTickText}</span>
+        <span className="hidden font-mono tabular-nums sm:inline">最後 tick {lastTickText}</span>
       </span>
     </div>
   );

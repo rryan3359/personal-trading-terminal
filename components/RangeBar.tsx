@@ -22,16 +22,16 @@ export interface RangeBarProps {
 
 export default function RangeBar({ activeRange, onRange }: RangeBarProps) {
   return (
-    <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto whitespace-nowrap border-t border-[#2a2e39] bg-[#131722] px-2">
-      <div className="flex shrink-0 items-center">
+    <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto whitespace-nowrap border-t border-tv-border bg-tv-workspace px-2">
+      <div className="flex shrink-0 items-center gap-0.5">
         {RANGES.map((r) => (
           <button
             key={r.id}
             onClick={() => onRange(r.id)}
             className={`rounded px-2 py-1 text-xs ${
               r.id === activeRange
-                ? 'font-medium text-[#2962ff]'
-                : 'text-[#b2b5be] hover:text-white'
+                ? 'bg-tv-accent-soft font-medium text-tv-accent'
+                : 'text-tv-text-2 hover:text-tv-text-strong'
             }`}
           >
             {r.label}

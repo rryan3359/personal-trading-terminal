@@ -65,13 +65,13 @@ export default function ChartContextMenu({
       role="menu"
       data-testid="chart-context-menu"
       onContextMenu={(e) => e.preventDefault()}
-      className="absolute z-40 w-56 rounded-md border border-[#2a2e39] bg-[#1e222d]/80 p-1 text-xs text-[#d1d4dc] shadow-xl backdrop-blur-xl"
+      className="absolute z-40 w-56 rounded-md border border-tv-border bg-tv-panel/80 p-1 text-xs text-tv-text shadow-xl backdrop-blur-xl"
       style={{ left: pos.x, top: pos.y }}
     >
       {sections.map((section, si) => (
         <div key={si}>
           {si > 0 && (
-            <div className="mx-1 my-1 h-px bg-[#2a2e39]" role="separator" />
+            <div className="mx-1 my-1 h-px bg-tv-border" role="separator" />
           )}
           {section.map((item) => (
             <button
@@ -80,8 +80,8 @@ export default function ChartContextMenu({
               data-menu-item={item.id}
               disabled={item.disabled}
               onClick={() => onSelect(item.id)}
-              className={`block w-full rounded-sm px-2 py-1.5 text-left hover:bg-white/10 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent ${
-                item.danger ? 'text-[#ef5350]' : ''
+              className={`block w-full rounded-sm px-2 py-1.5 text-left hover:bg-tv-elevated disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent ${
+                item.danger ? 'text-tv-down' : ''
               }`}
             >
               {item.label}

@@ -1206,7 +1206,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           title="圖表設定"
           aria-label="圖表設定"
           onClick={() => onOpenAppearanceSettingsRef.current?.()}
-          className="flex h-8 w-8 items-center justify-center rounded-md border border-[#2a2e39] bg-[#1e222d]/75 text-[#d1d4dc] shadow-lg backdrop-blur-xl hover:bg-[#262b38]"
+          className="flex h-8 w-8 items-center justify-center rounded-md border border-tv-border bg-tv-panel/75 text-tv-text shadow-tv-chip backdrop-blur-xl hover:bg-tv-elevated"
         >
           <BarGearIcon />
         </button>
@@ -1217,7 +1217,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           aria-label="物件清單"
           aria-expanded={objectListOpen}
           onClick={() => drawingController.toggleObjectList()}
-          className="flex h-8 items-center gap-1.5 rounded-md border border-[#2a2e39] bg-[#1e222d]/75 px-2.5 text-xs text-[#d1d4dc] shadow-lg backdrop-blur-xl hover:bg-[#262b38]"
+          className="flex h-8 items-center gap-1.5 rounded-md border border-tv-border bg-tv-panel/75 px-2.5 text-xs text-tv-text shadow-tv-chip backdrop-blur-xl hover:bg-tv-elevated"
         >
           <svg
             width="14"
@@ -1235,7 +1235,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
           </svg>
           物件清單
           {objectListItems.length > 0 && (
-            <span className="rounded-full bg-[#2962ff] px-1.5 py-px text-[10px] font-semibold text-white">
+            <span className="rounded-full bg-tv-accent px-1.5 py-px text-[10px] font-semibold text-tv-text-strong">
               {objectListItems.length}
             </span>
           )}

@@ -380,7 +380,7 @@ const DrawingSelectionToolbar = forwardRef<
           e.preventDefault();
         }
       }}
-      className="absolute z-20 flex max-w-full flex-nowrap items-center gap-1 rounded-md border border-[#2a2e39] bg-[#1e222d]/75 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg backdrop-blur-xl"
+      className="absolute z-20 flex max-w-full flex-nowrap items-center gap-1 rounded-md border border-tv-border bg-[#1e222d]/75 px-2 py-1.5 text-xs text-[#d1d4dc] shadow-lg backdrop-blur-xl"
       style={{ left: '50%', bottom: 8, transform: 'translateX(-50%)' }}
     >
       {/* A standalone text annotation has no line to style: hide
@@ -395,7 +395,7 @@ const DrawingSelectionToolbar = forwardRef<
             title="範本"
             aria-label="範本"
             onClick={() => togglePanel('template')}
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 ${
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated ${
               openPanel === 'template' ? 'bg-white/10' : ''
             }`}
           >
@@ -406,7 +406,7 @@ const DrawingSelectionToolbar = forwardRef<
             title={`顏色 ${selected.color}（不透明度 ${Math.round(selected.opacity * 100)}%）`}
             aria-label="顏色"
             onClick={() => togglePanel('color')}
-            className={`flex h-9 w-9 shrink-0 flex-col items-center justify-center gap-[3px] rounded-sm hover:bg-white/10 ${
+            className={`flex h-9 w-9 shrink-0 flex-col items-center justify-center gap-[3px] rounded-sm hover:bg-tv-elevated ${
               openPanel === 'color' ? 'bg-white/10' : ''
             }`}
           >
@@ -421,7 +421,7 @@ const DrawingSelectionToolbar = forwardRef<
             title="線形"
             aria-label="線形"
             onClick={() => togglePanel('lineStyle')}
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10 ${
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated ${
               openPanel === 'lineStyle' ? 'bg-white/10' : ''
             }`}
           >
@@ -448,7 +448,7 @@ const DrawingSelectionToolbar = forwardRef<
         title={selected.lock ? '已鎖定（點按解鎖）' : '鎖定（點按鎖定）'}
         aria-label={selected.lock ? '已鎖定' : '鎖定'}
         onClick={() => onApplyEdit({ lock: !selected.lock })}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated"
       >
         <BarLockIcon locked={selected.lock} />
       </button>
@@ -456,7 +456,7 @@ const DrawingSelectionToolbar = forwardRef<
         title={selected.visible ? '隱藏' : '顯示'}
         aria-label={selected.visible ? '隱藏' : '顯示'}
         onClick={() => onApplyEdit({ visible: !selected.visible })}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated"
       >
         <BarEyeIcon hidden={!selected.visible} />
       </button>
@@ -469,7 +469,7 @@ const DrawingSelectionToolbar = forwardRef<
             selected.name === TEXT_ANNOTATION_NAME ? 'text' : 'style',
           )
         }
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated"
       >
         <BarGearIcon />
       </button>
@@ -477,14 +477,14 @@ const DrawingSelectionToolbar = forwardRef<
         title="刪除"
         aria-label="刪除"
         onClick={onDelete}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm text-[#ef5350] hover:bg-white/10"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm text-[#ef5350] hover:bg-tv-elevated"
       >
         <BarTrashIcon />
       </button>
       <button
         onClick={onDeselect}
         aria-label="取消選取"
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-white/10"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm hover:bg-tv-elevated"
       >
         ✕
       </button>
@@ -508,7 +508,7 @@ const DrawingSelectionToolbar = forwardRef<
         </div>
       )}
       {openPanel === 'lineStyle' && (
-        <div className="absolute bottom-full left-0 z-40 mb-1 w-44 rounded-md border border-[#2a2e39] bg-[#1e222d]/80 p-1 shadow-xl backdrop-blur-xl">
+        <div className="absolute bottom-full left-0 z-40 mb-1 w-44 rounded-md border border-tv-border bg-[#1e222d]/80 p-1 shadow-xl backdrop-blur-xl">
           {LINE_STYLE_OPTIONS.map((opt) => (
             <button
               key={opt.id}
@@ -516,7 +516,7 @@ const DrawingSelectionToolbar = forwardRef<
                 onApplyEdit({ style: opt.id });
                 setOpenPanel(null);
               }}
-              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-white/10 max-md:py-2.5"
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-tv-elevated max-md:py-2.5"
             >
               <span
                 className="block w-8 border-t-2"
@@ -539,11 +539,11 @@ const DrawingSelectionToolbar = forwardRef<
         </div>
       )}
       {openPanel === 'template' && (
-        <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-[#2a2e39] bg-[#1e222d]/80 p-1 shadow-xl backdrop-blur-xl">
+        <div className="absolute bottom-full left-0 z-40 mb-1 w-60 rounded-md border border-tv-border bg-[#1e222d]/80 p-1 shadow-xl backdrop-blur-xl">
           {/* TV-style menu: save-as + apply default first. */}
           <button
             onClick={() => setShowSaveAs((v) => !v)}
-            className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm hover:bg-white/10 max-md:py-2.5"
+            className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm hover:bg-tv-elevated max-md:py-2.5"
           >
             儲存繪圖模板為...
           </button>
@@ -555,17 +555,17 @@ const DrawingSelectionToolbar = forwardRef<
                 ? '尚未設定預設範本（在範本旁按 ☆ 設為預設）'
                 : `套用預設範本 ${templateDefaults[selected.name]}`
             }
-            className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm hover:bg-white/10 disabled:opacity-40 max-md:py-2.5"
+            className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm hover:bg-tv-elevated disabled:opacity-40 max-md:py-2.5"
           >
             套用預設繪圖範本
             {templateDefaults[selected.name] !== undefined && (
-              <span className="ml-auto text-xs text-[#80858f]">
+              <span className="ml-auto text-xs text-tv-muted">
                 {templateDefaults[selected.name]}
               </span>
             )}
           </button>
           {showSaveAs && (
-            <div className="flex items-center gap-1 border-t border-[#2a2e39] px-1 pb-1 pt-2">
+            <div className="flex items-center gap-1 border-t border-tv-border px-1 pb-1 pt-2">
               <input
                 value={templateName}
                 onChange={(e) => setTemplateName(e.target.value)}
@@ -575,7 +575,7 @@ const DrawingSelectionToolbar = forwardRef<
                 placeholder="範本名稱"
                 aria-label="範本名稱"
                 autoFocus
-                className="min-w-0 flex-1 rounded-sm border border-white/20 bg-transparent px-2 py-1.5 text-xs text-[#d1d4dc] placeholder:text-[#80858f] focus:border-[#2962ff] focus:outline-none"
+                className="min-w-0 flex-1 rounded-sm border border-white/20 bg-transparent px-2 py-1.5 text-xs text-[#d1d4dc] placeholder:text-tv-muted focus:border-[#2962ff] focus:outline-none"
               />
               <button
                 onClick={saveTemplate}
@@ -587,14 +587,14 @@ const DrawingSelectionToolbar = forwardRef<
             </div>
           )}
           {(templates[selected.name] ?? []).length > 0 && (
-            <div className="max-h-48 overflow-y-auto border-t border-[#2a2e39] pt-1">
+            <div className="max-h-48 overflow-y-auto border-t border-tv-border pt-1">
               {(templates[selected.name] ?? []).map((tpl) => {
                 const isDefault =
                   templateDefaults[selected.name] === tpl.name;
                 return (
                   <div
                     key={tpl.name}
-                    className="flex items-center gap-1 rounded-sm px-1 py-1 hover:bg-white/10"
+                    className="flex items-center gap-1 rounded-sm px-1 py-1 hover:bg-tv-elevated"
                   >
                     <button
                       onClick={() => applyTemplate(tpl)}
@@ -627,8 +627,8 @@ const DrawingSelectionToolbar = forwardRef<
                           ? `取消預設範本 ${tpl.name}`
                           : `設為預設範本 ${tpl.name}`
                       }
-                      className={`shrink-0 rounded-sm px-1.5 py-0.5 text-sm hover:bg-white/10 ${
-                        isDefault ? 'text-[#f0b90b]' : 'text-[#80858f]'
+                      className={`shrink-0 rounded-sm px-1.5 py-0.5 text-sm hover:bg-tv-elevated ${
+                        isDefault ? 'text-[#f0b90b]' : 'text-tv-muted'
                       }`}
                     >
                       {isDefault ? '★' : '☆'}
@@ -637,7 +637,7 @@ const DrawingSelectionToolbar = forwardRef<
                       onClick={() => deleteTemplate(tpl.name)}
                       title={`刪除範本 ${tpl.name}`}
                       aria-label={`刪除範本 ${tpl.name}`}
-                      className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-[#ef5350] hover:bg-white/10"
+                      className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-[#ef5350] hover:bg-tv-elevated"
                     >
                       ✕
                     </button>
@@ -647,7 +647,7 @@ const DrawingSelectionToolbar = forwardRef<
             </div>
           )}
           {(templates[selected.name] ?? []).length === 0 && !showSaveAs && (
-            <div className="px-2 py-2 text-xs text-[#80858f]">
+            <div className="px-2 py-2 text-xs text-tv-muted">
               尚未儲存範本
             </div>
           )}
