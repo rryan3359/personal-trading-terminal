@@ -162,6 +162,12 @@ export interface ChartProps {
   /** Open the chart appearance dialog (toolbar gear, chart-corner
    *  gear, context menu). */
   onOpenAppearanceSettings?: () => void;
+  /**
+   * Called after the context menu's 重設圖表檢視 restores the default
+   * view, so the page can sync the RangeBar highlight (activeRange
+   * lives in the page, not in Chart).
+   */
+  onResetView?: () => void;
   onConnectionStatus?: (status: BinanceSocketStatus) => void;
   /**
    * Called when a live tick arrives (throttled to at most once per
@@ -222,6 +228,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     chartType,
     appearance,
     onOpenAppearanceSettings,
+    onResetView,
     onConnectionStatus,
     onLastTick,
     continuousDraw = false,
@@ -251,6 +258,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   const continuousDrawRef = useRef(continuousDraw);
   const onHistoryChangeRef = useRef(onHistoryChange);
   const onOpenAppearanceSettingsRef = useRef(onOpenAppearanceSettings);
+  const onResetViewRef = useRef(onResetView);
   symbolRef.current = symbol;
   intervalRef.current = interval;
   chartTypeRef.current = chartType;
@@ -262,6 +270,7 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
   continuousDrawRef.current = continuousDraw;
   onHistoryChangeRef.current = onHistoryChange;
   onOpenAppearanceSettingsRef.current = onOpenAppearanceSettings;
+  onResetViewRef.current = onResetView;
 
   const suppressSaveRef = useRef(false);
   /** True while restoreDrawings / applySnapshot rebuilds overlays. */
@@ -664,7 +673,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
         openDialogFor: (id) => drawingController.openDialogFor(id, 'style'),
         openAppearanceSettings: () =>
           onOpenAppearanceSettingsRef.current?.(),
-        resetView: () => engineRef.current?.resetView(),
+        resetView: () => {
+          engineRef.current?.resetView();
+          onResetViewRef.current?.();
+        },
       },
     });
   }
@@ -718,6 +730,10 @@ const Chart = forwardRef<ChartHandle, ChartProps>(function Chart(
     },
     resetView() {
       engineRef.current?.resetView();
+      // Same callback as the context-menu reset path above: any
+      // resetView caller (context menu, mobile bar, future callers)
+      // must sync the RangeBar highlight, which lives in the page.
+      onResetViewRef.current?.();
     },
     openObjectList() {
       drawingController.refreshObjectList();

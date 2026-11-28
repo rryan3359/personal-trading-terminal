@@ -10,7 +10,9 @@
  *
  * Sections are rendered with a divider between them (chart actions,
  * then object actions when something is selected). A disabled item
- * (e.g. 圖表設定 [待確認]) is shown but cannot be chosen.
+ * is shown but cannot be chosen (e.g. 複製價格 with no price under
+ * the cursor). 圖表設定 used to be disabled ([待確認]) and now opens
+ * the appearance dialog (see lib/chart-context-menu.ts).
  */
 
 import { useLayoutEffect, useState, type RefObject } from 'react';

@@ -388,6 +388,7 @@ export default function Home() {
               chartType={chartType}
               appearance={appearance}
               onOpenAppearanceSettings={() => setAppearanceDialogOpen(true)}
+              onResetView={() => setActiveRange('1M')}
               onConnectionStatus={setConnectionStatus}
               onLastTick={setLastTickAt}
               continuousDraw={drawContinuous || keepDrawing}
@@ -477,7 +478,10 @@ export default function Home() {
         canUndo={canUndo}
         onRedo={() => chartRef.current?.redo()}
         canRedo={canRedo}
-        onResetView={() => chartRef.current?.resetView()}
+        onResetView={() => {
+          chartRef.current?.resetView();
+          setActiveRange('1M');
+        }}
         sheet={mobileSheet}
         onSheetChange={setMobileSheet}
       />

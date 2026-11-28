@@ -147,7 +147,7 @@ const POSITION_TABS: Array<{ id: DialogTab; label: string }> = [
   ...TABS,
 ];
 
-const TEXT_SIZES = [10, 12, 14, 16, 18, 20, 24];
+const TEXT_SIZES = [10, 11, 12, 14, 16, 18, 20, 24];
 
 function formatBarDate(timestamp: number): string {
   const d = new Date(timestamp);
@@ -433,6 +433,15 @@ export default function OverlaySettingsDialog({
   const isPosition = isPositionTool(toolName);
   const isLongPosition = toolName === 'longPosition';
   const tabs = isPosition ? POSITION_TABS : TABS;
+  /** Signed money, same format as the on-chart stats pill (chart-theme):
+   *  +$340.21 / -$170.10 (2 decimals, ASCII sign). The preview shows
+   *  the final TP/SL P&L from calcPosition (leverage-capped qty), so
+   *  it always matches the pill. */
+  const fmtSignedMoney = (v: number) =>
+    `${v < 0 ? '-' : '+'}$${Math.abs(v).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
   /** Live quantity preview for the Inputs tab (last close unknown
    *  here, so open P&L is not shown in the dialog). */
   const posPreview =
@@ -707,7 +716,7 @@ export default function OverlaySettingsDialog({
                   <span className={FIELD_LABEL}>預估</span>
                   <div className="rounded border border-[#2a2e39] bg-[#131722] px-2 py-1.5 text-sm text-[#d1d4dc]">
                     {posPreview !== null
-                      ? `數量 ${posPreview.qty.toFixed(draft.posQtyPrecision)} · 風險 $${posPreview.riskSize.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · R:R ${posPreview.rr.toFixed(2)}`
+                      ? `數量 ${posPreview.qty.toFixed(draft.posQtyPrecision)} · TP ${fmtSignedMoney(posPreview.pnlTp)} · SL ${fmtSignedMoney(posPreview.pnlSl)} · R:R ${posPreview.rr.toFixed(2)}`
                       : '—'}
                   </div>
                 </div>
@@ -1630,7 +1639,10 @@ export default function OverlaySettingsDialog({
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-[#2a2e39] px-4 py-3">
+        {/* Footer sticks to the dialog's bottom edge while the
+            content scrolls, so 確認 stays reachable without
+            scrolling to the end (900px viewport). */}
+        <div className="sticky bottom-0 z-10 flex items-center justify-between border-t border-[#2a2e39] bg-[#131722] px-4 py-3">
           <select
             title={
               onApplyTemplate === undefined ||
